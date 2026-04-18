@@ -1,0 +1,35 @@
+---
+- name: Download k3s installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /tmp/k3s-install.sh
+    mode: "0755"
+
+- name: Install k3s server
+  ansible.builtin.shell: >
+    /tmp/k3s-install.sh server
+    --flannel-backend=none
+    --disable-network-policy
+    --disable=traefik
+    --write-kubeconfig-mode=0644
+    --token={{ k3s_cluster_token }}
+    {% for san in k3s_tls_san | default([]) %}--tls-san={{ san }} {% endfor %}
+  args:
+    creates: /usr/local/bin/k3s
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+
+- name: Wait for k3s to be ready
+  ansible.builtin.command: k3s kubectl get nodes
+  register: k3s_ready
+  retries: 30
+  delay: 5
+  until: k3s_ready.rc == 0
+  changed_when: false
+
+- name: Fetch kubeconfig to control machine
+  ansible.builtin.fetch:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: files/kubeconfig.yaml
+    flat: true

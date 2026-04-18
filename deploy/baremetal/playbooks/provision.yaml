@@ -1,0 +1,6 @@
+---
+- name: Provision miner nodes for Eirel agent deployments
+  hosts: miner_nodes
+  become: true
+  roles:
+    - eirel-miner-node

@@ -1,0 +1,43 @@
+---
+- name: Deploy owner-api to k3s (hybrid — deps stay in compose)
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Apply owner-api-hybrid kustomize manifests
+      ansible.builtin.command: >
+        kubectl apply -k {{ eirel_ai_project_dir }}/deploy/k8s/owner-api-hybrid/
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+    - name: Wait for owner-api Deployment to become Available
+      ansible.builtin.command: >
+        kubectl -n eirel-control-plane rollout status deploy/owner-api
+        --timeout=180s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+    - name: Health check — owner-api via NodePort
+      ansible.builtin.uri:
+        url: "http://{{ ansible_default_ipv4.address }}:30020/healthz"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: health_result
+      retries: 6
+      delay: 5
+      until: health_result.status == 200
+
+    - name: Verify SA can list miner pods
+      ansible.builtin.command: >
+        kubectl -n eirel-control-plane exec deploy/owner-api --
+        python -c "from kubernetes import client, config; config.load_incluster_config(); pods=client.CoreV1Api().list_namespaced_pod('eirel-miners'); print(f'miner pods: {len(pods.items)}')"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: sa_check
+      changed_when: false
+
+    - name: Display SA check result
+      ansible.builtin.debug:
+        var: sa_check.stdout

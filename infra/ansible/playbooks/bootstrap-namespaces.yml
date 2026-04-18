@@ -1,0 +1,36 @@
+---
+- name: Bootstrap Eirel namespaces
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Create miners namespace
+      ansible.builtin.command: kubectl create ns {{ eirel_miners_namespace }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: create_miners_ns
+      changed_when: create_miners_ns.rc == 0
+      failed_when: create_miners_ns.rc != 0 and 'already exists' not in create_miners_ns.stderr
+
+    - name: Create system namespace
+      ansible.builtin.command: kubectl create ns {{ eirel_system_namespace }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: create_system_ns
+      changed_when: create_system_ns.rc == 0
+      failed_when: create_system_ns.rc != 0 and 'already exists' not in create_system_ns.stderr
+
+    - name: Label miners namespace
+      ansible.builtin.command: >
+        kubectl label ns {{ eirel_miners_namespace }}
+        name={{ eirel_miners_namespace }} --overwrite
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+    - name: Label system namespace
+      ansible.builtin.command: >
+        kubectl label ns {{ eirel_system_namespace }}
+        name={{ eirel_system_namespace }} --overwrite
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true

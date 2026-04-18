@@ -1,0 +1,2 @@
+# Private calibration fixtures live here in dev. Production loads them
+# from S3. Tests use tests/fixtures/calibration/.

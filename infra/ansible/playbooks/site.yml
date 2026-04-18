@@ -1,0 +1,24 @@
+---
+- name: Install k3s servers
+  ansible.builtin.import_playbook: k3s-install-server.yml
+
+- name: Install Calico CNI
+  ansible.builtin.import_playbook: calico-install.yml
+
+- name: Install k3s agents
+  ansible.builtin.import_playbook: k3s-install-agent.yml
+
+- name: Bootstrap namespaces
+  ansible.builtin.import_playbook: bootstrap-namespaces.yml
+
+- name: Deploy in-cluster registry
+  ansible.builtin.import_playbook: bootstrap-registry.yml
+
+- name: Apply node labels
+  ansible.builtin.import_playbook: apply-node-labels.yml
+
+- name: Label control-plane node
+  ansible.builtin.import_playbook: label-control-plane-node.yml
+
+- name: Create runtime secrets
+  ansible.builtin.import_playbook: create-runtime-secrets.yml

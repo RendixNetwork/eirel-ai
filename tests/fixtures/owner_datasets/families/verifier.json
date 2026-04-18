@@ -1,0 +1,62 @@
+{
+  "kind": "family_evaluation_bundle",
+  "family_id": "verifier",
+  "benchmark_version": "verifier_family_v2",
+  "rubric_version": "verifier_family_rubric_v2",
+  "metadata": {
+    "dataset_version": "owner-verifier-v1",
+    "protocol_suite_id": "verifier_protocol_suite_v1",
+    "hidden_fixture_ids": ["verifier-code-3"]
+  },
+  "tasks": [
+    {
+      "task_id": "verifier-review-2",
+      "family_id": "verifier",
+      "prompt": "Review this release note draft: 'We removed all latency problems and the system is guaranteed to never fail again.' Identify the main issue, explain why it is misleading, and suggest a safer rewrite.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "text_audit",
+      "difficulty": "standard",
+      "risk_tags": ["false_positive_restraint", "repair_usefulness"],
+      "expected_output": {
+        "task_family": "factual_grounding_review",
+        "required_issues": ["misleading", "guaranteed"],
+        "required_repairs": ["safer rewrite", "qualified"],
+        "required_context_points": ["latency problems", "never fail again"],
+        "forbidden_false_positives": ["security breach"]
+      },
+      "inputs": {},
+      "metadata": {
+        "category": "text_audit",
+        "difficulty": "standard",
+        "task_family": "factual_grounding_review",
+        "risk_tags": ["false_positive_restraint", "repair_usefulness"]
+      }
+    },
+    {
+      "task_id": "verifier-code-3",
+      "family_id": "verifier",
+      "prompt": "Review this code summary: 'The patch retries forever on every exception and never records a timeout.' Identify the operational defect and suggest one bounded repair.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "code_review",
+      "difficulty": "hard",
+      "risk_tags": ["issue_detection", "repair_usefulness"],
+      "expected_output": {
+        "task_family": "output_defect_detection",
+        "required_issues": ["retries forever", "timeout"],
+        "required_repairs": ["bounded retry", "record timeout"],
+        "required_context_points": ["exception"]
+      },
+      "inputs": {},
+      "metadata": {
+        "category": "code_review",
+        "difficulty": "hard",
+        "task_family": "output_defect_detection",
+        "risk_tags": ["issue_detection", "repair_usefulness"],
+        "hidden_fixture": true,
+        "visibility": "hidden"
+      }
+    }
+  ]
+}

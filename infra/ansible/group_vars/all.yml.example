@@ -1,0 +1,20 @@
+---
+k3s_version: v1.30.0+k3s1
+k3s_channel: stable
+k3s_cluster_token: CHANGEME_VAULTED
+
+calico_version: v3.27.3
+
+eirel_miners_namespace: eirel-miners
+eirel_system_namespace: eirel-system
+eirel_runtime_shared_secret_name: eirel-runtime-shared
+eirel_runtime_image: registry.eirel.internal/miner-runtime:v1
+
+eirel_runtime_pool_label_key: eirel.dev/runtime-pool
+eirel_runtime_class_label_key: eirel.dev/runtime-class
+
+eirel_control_plane_node_label_key: eirel.dev/role
+eirel_control_plane_node_label_value: control-plane
+eirel_control_plane_registry: "registry.example.com:5000"
+eirel_control_plane_image_repo: "eirel-ai"
+eirel_ai_project_dir: /path/to/eirel-ai

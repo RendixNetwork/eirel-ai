@@ -1,0 +1,238 @@
+groups:
+  - name: eirel-availability
+    rules:
+      - alert: EirelOwnerApiDown
+        expr: absent(eirel_owner_deployments_total)
+        for: 2m
+        labels:
+          severity: critical
+          service: owner-api
+        annotations:
+          summary: owner-api metrics are unavailable
+          description: owner-api has stopped exposing metrics for 2 minutes.
+
+      - alert: EirelOrchestratorDown
+        expr: absent(eirel_orchestrator_up) or eirel_orchestrator_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: orchestrator
+        annotations:
+          summary: orchestrator is unavailable
+          description: orchestrator has stopped serving metrics or is reporting down.
+
+      - alert: EirelExecutionWorkerDown
+        expr: eirel_execution_worker_up == 0 or absent(eirel_execution_worker_up)
+        for: 2m
+        labels:
+          severity: critical
+          service: execution-worker
+        annotations:
+          summary: execution-worker is unavailable
+          description: no healthy execution-worker metrics have been observed for 2 minutes.
+
+      - alert: EirelConsumerApiDown
+        expr: eirel_consumer_api_up == 0 or absent(eirel_consumer_api_up)
+        for: 2m
+        labels:
+          severity: critical
+          service: consumer-chat-api
+        annotations:
+          summary: consumer-chat-api is unavailable
+          description: consumer-chat-api has stopped serving metrics or is reporting down.
+
+      - alert: EirelMetagraphListenerDown
+        expr: eirel_metagraph_listener_up == 0 or absent(eirel_metagraph_listener_up)
+        for: 5m
+        labels:
+          severity: warning
+          service: metagraph-listener
+        annotations:
+          summary: metagraph-listener is unavailable
+          description: metagraph-listener metrics are missing or the service is down.
+
+      - alert: EirelWeightSetterDown
+        expr: eirel_weight_setter_up == 0 or absent(eirel_weight_setter_up)
+        for: 5m
+        labels:
+          severity: warning
+          service: weight-setter
+        annotations:
+          summary: weight-setter is unavailable
+          description: weight-setter metrics are missing or the service is down.
+
+      - alert: EirelProviderProxyDown
+        expr: absent(eirel_provider_proxy_requests_total)
+        for: 5m
+        labels:
+          severity: warning
+          service: provider-proxy
+        annotations:
+          summary: provider-proxy is unavailable
+          description: provider-proxy metrics are missing for 5 minutes.
+
+  - name: eirel-control-plane
+    rules:
+      - alert: EirelTaskBacklogHigh
+        expr: max(eirel_execution_worker_queue_depth) > 20
+        for: 10m
+        labels:
+          severity: warning
+          service: execution-worker
+        annotations:
+          summary: execution-worker queue backlog is elevated
+          description: execution-worker queue depth has exceeded 20 for 10 minutes.
+
+      - alert: EirelWorkerFailuresIncreasing
+        expr: sum(rate(eirel_execution_worker_processed_total{outcome="failed"}[15m])) * 900 > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: execution-worker
+        annotations:
+          summary: execution-worker failures are increasing
+          description: execution-worker has recorded more than 5 failed tasks in the last 15 minutes.
+
+      - alert: EirelUnhealthyDeploymentsPresent
+        expr: eirel_owner_unhealthy_deployments_total > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: owner-api
+        annotations:
+          summary: unhealthy managed deployments are present
+          description: owner-api reports unhealthy deployments persisting.
+
+      - alert: EirelEpochSnapshotsStuckOpen
+        expr: eirel_owner_open_run_snapshots > 0
+        for: 60m
+        labels:
+          severity: warning
+          service: owner-api
+        annotations:
+          summary: epoch target snapshots have remained open for too long
+          description: at least one frozen epoch snapshot has remained open for an hour.
+
+      - alert: EirelAggregateSnapshotsPendingTooLong
+        expr: eirel_owner_pending_aggregate_snapshots > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: owner-api
+        annotations:
+          summary: aggregate score snapshots are pending too long
+          description: aggregate score snapshots are pending quorum or aggregation for 30 minutes.
+
+      - alert: EirelValidatorSetTooSmall
+        expr: eirel_metagraph_listener_active_validators < 3
+        for: 15m
+        labels:
+          severity: warning
+          service: metagraph-listener
+        annotations:
+          summary: active validator set is below quorum
+          description: fewer than 3 active validators are available from the latest metagraph snapshot.
+
+      - alert: EirelMetagraphSyncFailing
+        expr: eirel_metagraph_listener_last_sync_success == 0
+        for: 15m
+        labels:
+          severity: warning
+          service: metagraph-listener
+        annotations:
+          summary: metagraph sync is failing
+          description: the latest metagraph sync attempt was unsuccessful for 15 minutes.
+
+      - alert: EirelProviderProxyQuotaRejectionsHigh
+        expr: increase(eirel_provider_proxy_quota_rejections_total[15m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: provider-proxy
+        annotations:
+          summary: provider-proxy quota rejections are increasing
+          description: provider-proxy has rejected more than 10 requests for quota reasons in 15 minutes.
+
+  - name: eirel-scoring-pipeline
+    rules:
+      - alert: EirelValidatorLoopStale
+        expr: time() - max(eirel_validator_last_successful_loop_timestamp_seconds{loop_name="validator"}) > 1800
+        for: 5m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: validator loop has not completed successfully in 30 minutes
+          description: no successful validator loop iteration observed for more than 30 minutes.
+
+      - alert: EirelBenchmarkRunFailureRateHigh
+        expr: sum(rate(eirel_validator_benchmark_runs_completed_total{outcome="failed"}[30m])) / sum(rate(eirel_validator_benchmark_runs_completed_total[30m])) > 0.25
+        for: 15m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: benchmark run failure rate is high
+          description: more than 25% of benchmark runs in the last 30 minutes have failed.
+
+      - alert: EirelJudgeDisagreementHigh
+        expr: sum(rate(eirel_validator_judge_disagreements_total[1h])) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: judge disagreement rate is elevated
+          description: judges have disagreed at a rate above 0.05/s over the last hour.
+
+      - alert: EirelWorkflowDeadLetterGrowing
+        expr: increase(eirel_owner_workflow_episode_dead_lettered_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: owner-api
+        annotations:
+          summary: workflow episodes are being dead-lettered
+          description: at least one workflow episode has been dead-lettered in the last 15 minutes.
+
+      - alert: EirelWorkflowWorkerDown
+        expr: absent(eirel_workflow_worker_processed_total)
+        for: 5m
+        labels:
+          severity: critical
+          service: execution-worker
+        annotations:
+          summary: workflow worker is unavailable
+          description: no workflow worker metrics have been observed for 5 minutes.
+
+  - name: eirel-chain
+    rules:
+      - alert: EirelWeightSubmissionStale
+        expr: time() - max by (family) (eirel_weight_setter_last_success_timestamp_seconds) > 3600
+        for: 5m
+        labels:
+          severity: critical
+          service: weight-setter
+        annotations:
+          summary: weight submission is stale
+          description: no successful weight submission observed for a family in over an hour.
+
+      - alert: EirelWeightSubmissionFailing
+        expr: sum(rate(eirel_weight_setter_submissions_total{status!="success"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: weight-setter
+        annotations:
+          summary: weight submissions are failing
+          description: weight-setter has recorded non-success submissions over the last 15 minutes.
+
+      - alert: EirelChainErrorsHigh
+        expr: sum(rate(eirel_weight_setter_chain_errors_total[15m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: weight-setter
+        annotations:
+          summary: chain interaction errors are elevated
+          description: weight-setter is observing chain errors above 0.1/s over the last 15 minutes.

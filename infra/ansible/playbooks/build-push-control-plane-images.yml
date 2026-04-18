@@ -1,0 +1,52 @@
+---
+- name: Build and push control-plane images to in-cluster registry
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Build owner-api image via docker compose
+      ansible.builtin.command: >
+        docker compose -f {{ eirel_ai_project_dir }}/docker-compose.yml
+        build owner-api
+      changed_when: true
+
+    - name: Derive GIT_SHA from repo
+      ansible.builtin.command: >
+        git -C {{ eirel_ai_project_dir }} rev-parse --short HEAD
+      register: git_sha_result
+      changed_when: false
+
+    - name: Set git_sha fact
+      ansible.builtin.set_fact:
+        git_sha: "{{ git_sha_result.stdout }}"
+
+    - name: Tag image with git SHA
+      ansible.builtin.command: >
+        docker tag eirel-ai:latest
+        {{ eirel_control_plane_registry }}/{{ eirel_control_plane_image_repo }}:git-{{ git_sha }}
+      changed_when: true
+
+    - name: Tag image with staging
+      ansible.builtin.command: >
+        docker tag eirel-ai:latest
+        {{ eirel_control_plane_registry }}/{{ eirel_control_plane_image_repo }}:staging
+      changed_when: true
+
+    - name: Push git SHA tagged image
+      ansible.builtin.command: >
+        docker push
+        {{ eirel_control_plane_registry }}/{{ eirel_control_plane_image_repo }}:git-{{ git_sha }}
+      register: push_sha_result
+      retries: 3
+      delay: 5
+      until: push_sha_result.rc == 0
+      changed_when: true
+
+    - name: Push staging tagged image
+      ansible.builtin.command: >
+        docker push
+        {{ eirel_control_plane_registry }}/{{ eirel_control_plane_image_repo }}:staging
+      register: push_staging_result
+      retries: 3
+      delay: 5
+      until: push_staging_result.rc == 0
+      changed_when: true

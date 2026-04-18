@@ -1,0 +1,28 @@
+{
+  "family_id": "builder",
+  "fixture_cases": [
+    {
+      "case_id": "builder-cal-001",
+      "label": "placeholder-code-trap",
+      "tags": ["placeholder", "correctness"]
+    },
+    {
+      "case_id": "builder-cal-002",
+      "label": "banned-construct-trap",
+      "tags": ["safety", "policy"]
+    }
+  ],
+  "baseline_profiles": [
+    {
+      "profile_id": "strong_baseline",
+      "label": "known-strong"
+    },
+    {
+      "profile_id": "weak_baseline",
+      "label": "shallow-or-evasive"
+    }
+  ],
+  "metadata": {
+    "seed_only": true
+  }
+}

@@ -1,0 +1,15 @@
+namespace: eirel
+
+resources:
+  - ../../base
+  - dependencies.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: eirel-control-plane-secrets
+    envs:
+      - secret.env

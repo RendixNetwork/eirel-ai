@@ -1,0 +1,18 @@
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - clusterrole.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: owner-api-secrets
+    namespace: eirel-control-plane
+    envs:
+      - secret.env
+    type: Opaque

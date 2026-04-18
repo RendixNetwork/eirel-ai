@@ -1,0 +1,85 @@
+{
+  "kind": "family_evaluation_bundle",
+  "family_id": "browser",
+  "benchmark_version": "browser_family_v1",
+  "rubric_version": "browser_family_rubric_v1",
+  "metadata": {
+    "dataset_version": "owner-browser-v1",
+    "protocol_suite_id": "browser_protocol_suite_v1",
+    "hidden_fixture_ids": ["browser-nav-3"]
+  },
+  "tasks": [
+    {
+      "task_id": "browser-extract-1",
+      "family_id": "browser",
+      "prompt": "Navigate to the product page and extract the product name, price, and availability status.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "content_extraction",
+      "difficulty": "standard",
+      "risk_tags": ["extraction_accuracy", "schema_adherence"],
+      "expected_output": {
+        "task_family": "content_extraction",
+        "required_extracted_fields": ["product_name", "price", "availability"],
+        "max_navigation_steps": 3
+      },
+      "inputs": {
+        "target_url": "https://example.com/product/123"
+      },
+      "metadata": {
+        "category": "content_extraction",
+        "difficulty": "standard",
+        "task_family": "content_extraction",
+        "risk_tags": ["extraction_accuracy", "schema_adherence"]
+      }
+    },
+    {
+      "task_id": "browser-scrape-2",
+      "family_id": "browser",
+      "prompt": "Browse the news website and extract the top 5 headlines with their publication dates and author names.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "web_scraping",
+      "difficulty": "standard",
+      "risk_tags": ["content_completeness", "temporal_accuracy"],
+      "expected_output": {
+        "task_family": "web_scraping",
+        "required_extracted_fields": ["headlines", "dates", "authors"],
+        "max_navigation_steps": 5
+      },
+      "inputs": {
+        "target_url": "https://example.com/news"
+      },
+      "metadata": {
+        "category": "web_scraping",
+        "difficulty": "standard",
+        "task_family": "web_scraping",
+        "risk_tags": ["content_completeness", "temporal_accuracy"]
+      }
+    },
+    {
+      "task_id": "browser-nav-3",
+      "family_id": "browser",
+      "prompt": "Navigate through a multi-step checkout flow: add item to cart, proceed to checkout, fill shipping form, and capture the order summary.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "navigation",
+      "difficulty": "hard",
+      "risk_tags": ["form_interaction", "multi_step_navigation"],
+      "expected_output": {
+        "task_family": "navigation",
+        "required_extracted_fields": ["order_summary", "total_price"],
+        "max_navigation_steps": 8
+      },
+      "inputs": {
+        "target_url": "https://example.com/shop"
+      },
+      "metadata": {
+        "category": "navigation",
+        "difficulty": "hard",
+        "task_family": "navigation",
+        "risk_tags": ["form_interaction", "multi_step_navigation"]
+      }
+    }
+  ]
+}

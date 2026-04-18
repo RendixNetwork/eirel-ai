@@ -1,0 +1,113 @@
+groups:
+  - name: eirel-kube-state
+    rules:
+      - alert: EirelKubeStateMetricsDown
+        expr: up{job="kube_state_metrics"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: kube-state-metrics
+        annotations:
+          summary: "kube-state-metrics is unreachable"
+          description: "Prometheus cannot scrape kube-state-metrics at host:30080 for 5 minutes. Pod visibility is degraded."
+
+  - name: eirel-miner-pods
+    rules:
+      - alert: EirelMinerPodCrashLooping
+        expr: increase(kube_pod_container_status_restarts_total{namespace="eirel-miners"}[10m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: miner-runtime
+        annotations:
+          summary: "miner pod {{ $labels.pod }} crash-looping"
+          description: "{{ $labels.pod }}/{{ $labels.container }} restarted more than 2 times in 10 minutes."
+
+      - alert: EirelMinerPodStuckPending
+        expr: sum by (pod, namespace) (kube_pod_status_phase{namespace="eirel-miners", phase="Pending"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: miner-runtime
+        annotations:
+          summary: "miner pod {{ $labels.pod }} stuck in Pending"
+          description: "Scheduler has not placed {{ $labels.pod }} in {{ $labels.namespace }} for 10 minutes."
+
+      - alert: EirelMinerPodImagePullBackOff
+        expr: kube_pod_container_status_waiting_reason{namespace="eirel-miners", reason=~"ImagePullBackOff|ErrImagePull"} > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: miner-runtime
+        annotations:
+          summary: "miner pod {{ $labels.pod }} ImagePullBackOff"
+          description: "Registry or image issue for {{ $labels.container }} in {{ $labels.pod }}."
+
+      - alert: EirelMinerDeploymentUnavailable
+        expr: |
+          kube_deployment_status_replicas_unavailable{namespace="eirel-miners"} > 0
+          and
+          kube_deployment_spec_replicas{namespace="eirel-miners"} > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: miner-runtime
+        annotations:
+          summary: "miner deployment {{ $labels.deployment }} has unavailable replicas"
+          description: "{{ $labels.deployment }} in {{ $labels.namespace }} has unavailable replicas for 15 minutes."
+
+  - name: eirel-control-plane-pods
+    rules:
+      - alert: EirelControlPlanePodCrashLooping
+        expr: increase(kube_pod_container_status_restarts_total{namespace="eirel-control-plane"}[10m]) > 2
+        for: 5m
+        labels:
+          severity: critical
+          service: control-plane
+        annotations:
+          summary: "control-plane pod {{ $labels.pod }} crash-looping"
+          description: "{{ $labels.pod }}/{{ $labels.container }} in {{ $labels.namespace }} restarted more than 2 times in 10 minutes."
+
+      - alert: EirelControlPlanePodNotReady
+        expr: |
+          kube_pod_status_ready{namespace="eirel-control-plane", condition="true"} == 0
+          unless on (namespace, pod) kube_pod_status_phase{namespace="eirel-control-plane", phase=~"Succeeded|Failed"} == 1
+        for: 10m
+        labels:
+          severity: critical
+          service: control-plane
+        annotations:
+          summary: "control-plane pod {{ $labels.pod }} not ready"
+          description: "{{ $labels.pod }} in {{ $labels.namespace }} has been NotReady for 10 minutes."
+
+      - alert: EirelControlPlanePodImagePullBackOff
+        expr: kube_pod_container_status_waiting_reason{namespace="eirel-control-plane", reason=~"ImagePullBackOff|ErrImagePull"} > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: control-plane
+        annotations:
+          summary: "control-plane pod {{ $labels.pod }} ImagePullBackOff"
+          description: "Registry or image issue for {{ $labels.container }} in {{ $labels.pod }}."
+
+  - name: eirel-kube-nodes
+    rules:
+      - alert: EirelKubeNodeNotReady
+        expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: k3s
+        annotations:
+          summary: "k3s node {{ $labels.node }} not Ready"
+          description: "Node {{ $labels.node }} has been NotReady for 5 minutes."
+
+      - alert: EirelKubeNodeUnschedulable
+        expr: kube_node_spec_unschedulable == 1
+        for: 15m
+        labels:
+          severity: warning
+          service: k3s
+        annotations:
+          summary: "k3s node {{ $labels.node }} cordoned"
+          description: "Node {{ $labels.node }} has been marked unschedulable for 15 minutes (drain in progress?)."

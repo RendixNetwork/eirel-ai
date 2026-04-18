@@ -1,0 +1,45 @@
+.venv/
+venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.db
+.env
+.env.compose
+.env.host
+.env.local
+.env.validator
+deploy/k8s/overlays/staging/secret.env
+deploy/k8s/owner-api-hybrid/secret.env
+local/*
+!local/.gitkeep
+!local/*.example
+# Ansible — real inventory and vars contain IPs, tokens, secrets.
+# Only *.example files are tracked.
+infra/ansible/inventory.yml
+infra/ansible/group_vars/all.yml
+infra/ansible/playbooks/files/kubeconfig.yaml
+
+build/
+dist/
+*.egg-info/
+
+# Agent scratch — local Claude Code state, never ship.
+.claude/
+
+# Local metagraph snapshots — may carry operator-identity hotkeys.
+# Keep these out of the repo even if dev/ reappears as a scratch dir.
+*staging_metagraph_snapshot.json
+*local_metagraph_snapshot.json
+
+# Private evaluation payloads — must never ship in the public repo.
+# Operators obtain these from S3 (dataset forge output) or a private
+# bundle mirror. Local dev copies live under data/ but are gitignored.
+data/owner_datasets/families/*.json
+data/calibration/*.json
+data/workflow_corpus/**/*.json
+!data/owner_datasets/families/.gitkeep
+!data/calibration/.gitkeep
+!data/workflow_corpus/.gitkeep
+
+.vscode/

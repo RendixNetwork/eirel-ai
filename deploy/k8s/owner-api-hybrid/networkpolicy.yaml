@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: owner-api
+  namespace: eirel-control-plane
+spec:
+  podSelector:
+    matchLabels:
+      app: owner-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # NodePort traffic from the host network + intra-namespace
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Allow all egress — owner-api is a control-plane service that must reach:
+    #   - CoreDNS (kube-system)
+    #   - k8s API server on the control-plane host
+    #   - compose services on host (postgres, redis, tool services)
+    #   - miner pods in eirel-miners
+    # Calico ipBlock rules don't reliably match same-node host traffic,
+    # so we allow all egress here. Ingress is still restricted.
+    - {}

@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eirel-cluster-smoke
+  namespace: eirel
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: eirel-cluster-smoke
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: cluster-smoke
+          image: ghcr.io/eirel/owner-api:latest
+          imagePullPolicy: Always
+          command: ["eirel-cluster-smoke"]
+          args:
+            - --miner-source-dir
+            - /app/eirel/examples/sample_miner
+            - --timeout-seconds
+            - "240"
+          envFrom:
+            - configMapRef:
+                name: eirel-control-plane-config
+            - secretRef:
+                name: eirel-control-plane-secrets

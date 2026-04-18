@@ -1,0 +1,231 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["eirel", "scoring", "leaderboard"],
+  "templating": {
+    "list": [
+      {
+        "name": "family",
+        "label": "Family",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(eirel_owner_scorecard_raw_score, family)",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "sort": 1
+      },
+      {
+        "name": "run_id",
+        "label": "Run",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(eirel_owner_scorecard_raw_score{family=\"$family\"}, run_id)",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "sort": 7
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "EIREL — Miner Leaderboard",
+  "uid": "eirel-miner-leaderboard",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Current standings — $family / $run_id",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Leaderboard",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "RANK", "expr": "eirel_owner_scorecard_rank{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "RAW", "expr": "eirel_owner_scorecard_raw_score{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "NORM", "expr": "eirel_owner_scorecard_normalized_score{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "DONE", "expr": "eirel_owner_scorecard_tasks_completed{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "TOTAL", "expr": "eirel_owner_scorecard_tasks_total{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "LLM", "expr": "eirel_owner_scorecard_llm_cost_usd{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "TOOL", "expr": "eirel_owner_scorecard_tool_cost_usd{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"},
+        {"refId": "WIN", "expr": "eirel_owner_scorecard_is_winner{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "format": "table"}
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {"byField": "hotkey", "mode": "outer"}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true,
+              "Time 5": true, "Time 6": true, "Time 7": true, "Time 8": true,
+              "family 1": true, "family 2": true, "family 3": true, "family 4": true,
+              "family 5": true, "family 6": true, "family 7": true, "family 8": true,
+              "run_id 1": true, "run_id 2": true, "run_id 3": true, "run_id 4": true,
+              "run_id 5": true, "run_id 6": true, "run_id 7": true, "run_id 8": true,
+              "__name__ 1": true, "__name__ 2": true, "__name__ 3": true, "__name__ 4": true,
+              "__name__ 5": true, "__name__ 6": true, "__name__ 7": true, "__name__ 8": true,
+              "job 1": true, "job 2": true, "job 3": true, "job 4": true,
+              "job 5": true, "job 6": true, "job 7": true, "job 8": true,
+              "instance 1": true, "instance 2": true, "instance 3": true, "instance 4": true,
+              "instance 5": true, "instance 6": true, "instance 7": true, "instance 8": true
+            },
+            "indexByName": {
+              "hotkey": 0,
+              "Value #RANK": 1,
+              "Value #RAW": 2,
+              "Value #NORM": 3,
+              "Value #DONE": 4,
+              "Value #TOTAL": 5,
+              "Value #LLM": 6,
+              "Value #TOOL": 7,
+              "Value #WIN": 8
+            },
+            "renameByName": {
+              "hotkey": "Hotkey",
+              "Value #RANK": "Rank",
+              "Value #RAW": "Raw",
+              "Value #NORM": "Normalized",
+              "Value #DONE": "Done",
+              "Value #TOTAL": "Total",
+              "Value #LLM": "LLM $",
+              "Value #TOOL": "Tool $",
+              "Value #WIN": "Winner"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {"fields": {}, "sort": [{"field": "Rank", "desc": false}]}
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "Winner"},
+            "properties": [
+              {"id": "mappings", "value": [
+                {"type": "value", "options": {"0": {"text": "", "index": 0}, "1": {"text": "🏆", "index": 1}}}
+              ]},
+              {"id": "custom.width", "value": 80}
+            ]
+          },
+          {
+            "matcher": {"id": "byRegexp", "options": "LLM.*|Tool.*"},
+            "properties": [{"id": "unit", "value": "currencyUSD"}, {"id": "decimals", "value": 4}]
+          },
+          {
+            "matcher": {"id": "byRegexp", "options": "Raw|Normalized"},
+            "properties": [{"id": "decimals", "value": 3}]
+          }
+        ]
+      },
+      "options": {"showHeader": true}
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Score trajectory",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 10},
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Normalized score per miner (current + previous run)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 11},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "eirel_owner_scorecard_normalized_score{family=\"$family\"}", "legendFormat": "{{hotkey}} · {{run_id}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "none", "min": 0, "max": 1, "decimals": 3, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Evaluation progress — $run_id",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 19},
+      "panels": []
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Tasks evaluated / total",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "eirel_owner_scorecard_tasks_completed{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "legendFormat": "{{hotkey}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "none", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}, {"color": "green", "value": 15}]}},
+        "overrides": []
+      },
+      "options": {"displayMode": "gradient", "orientation": "horizontal", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Spend per miner (LLM + Tool)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "LLM", "expr": "eirel_owner_scorecard_llm_cost_usd{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "legendFormat": "{{hotkey}} · LLM"},
+        {"refId": "TOOL", "expr": "eirel_owner_scorecard_tool_cost_usd{family=\"$family\",run_id=\"$run_id\"}", "instant": true, "legendFormat": "{{hotkey}} · Tool"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "currencyUSD", "decimals": 4, "min": 0},
+        "overrides": []
+      },
+      "options": {"displayMode": "gradient", "orientation": "horizontal", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Winner history",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Winner indicator (1 = published winner)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 29},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "eirel_owner_scorecard_is_winner{family=\"$family\"}", "legendFormat": "{{hotkey}} · {{run_id}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "none", "min": 0, "max": 1, "custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80, "barAlignment": 0}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}}
+    }
+  ]
+}

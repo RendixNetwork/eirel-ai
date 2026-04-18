@@ -1,0 +1,387 @@
+# -----------------------------------------------------------------------------
+# Operator stack — what the subnet operator (Rendix Network) runs alongside
+# the k3s-hosted owner-api. For running a validator as a third party, see
+# docker-compose.validator.yml + .env.validator.example + README.validator.md.
+#
+# Shared image: every service below runs the same eirel-ai:latest image,
+# differing only in command. Only the orchestrator owns the ``build:`` block;
+# the rest reference the built image via ``image: eirel-ai:latest`` to avoid
+# a Docker Bake race on parallel build targets. Build explicitly with:
+#
+#     docker compose build orchestrator
+#
+# owner-api is NOT in compose — it runs in k3s under
+# ``deploy/k8s/owner-api-hybrid/``. Compose callers reach it via
+# ``${SERVER_A_HOST_IP}:${OWNER_API_NODEPORT}``.
+# -----------------------------------------------------------------------------
+x-eirel-ai-build: &eirel-ai-build
+  image: eirel-ai:latest
+  build:
+    context: ..
+    dockerfile: eirel-ai/Dockerfile
+    target: base
+  working_dir: /app/eirel-ai
+  env_file: .env
+
+x-eirel-ai-run: &eirel-ai-run
+  image: eirel-ai:latest
+  working_dir: /app/eirel-ai
+  env_file: .env
+
+x-eirel-ai-test: &eirel-ai-test
+  image: eirel-ai-test:latest
+  build:
+    context: ..
+    dockerfile: eirel-ai/Dockerfile
+    target: test
+  working_dir: /app/eirel-ai
+  env_file: .env
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: eirel
+      POSTGRES_USER: eirel
+      POSTGRES_PASSWORD: eirel
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
+
+  redis:
+    image: redis:7
+    ports:
+      - "${REDIS_HOST_PORT:-16379}:6379"
+
+  # owner-api runs in k3s (deploy/k8s/owner-api-hybrid/).  Compose
+  # services reach it via ``${SERVER_A_HOST_IP}:${OWNER_API_NODEPORT}``
+  # (see ``OWNER_API_URL`` env on each caller below).  The orchestrator
+  # below owns the build: block for the shared eirel-ai:latest image
+  # now that owner-api is out of compose.
+
+  orchestrator:
+    <<: *eirel-ai-build
+    command: ["orchestrator"]
+    volumes:
+      - ..:/app
+    environment:
+      DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
+      REDIS_URL: redis://redis:6379/0
+      EIREL_INTERNAL_SERVICE_TOKEN: ${EIREL_INTERNAL_SERVICE_TOKEN:-internal-token}
+      OWNER_API_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
+      OWNER_API_INTERNAL_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
+      EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
+      EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
+      EIREL_SEMANTIC_SCHOLAR_TOOL_URL: ${EIREL_SEMANTIC_SCHOLAR_TOOL_URL:-http://semantic-scholar-tool-service:8087}
+      EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
+      EIREL_PROVIDER_PROXY_URL: http://provider-proxy:8092
+      EIREL_PROVIDER_PROXY_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      web-search-tool-service:
+        condition: service_healthy
+      x-tool-service:
+        condition: service_healthy
+      semantic-scholar-tool-service:
+        condition: service_healthy
+      sandbox-tool-service:
+        condition: service_healthy
+    ports:
+      - "${ORCHESTRATOR_HOST_PORT:-18050}:8050"
+
+  execution-worker:
+    <<: *eirel-ai-run
+    command: ["execution-worker"]
+    volumes:
+      - ..:/app
+    environment:
+      DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
+      REDIS_URL: redis://redis:6379/0
+      OWNER_API_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
+      ORCHESTRATOR_URL: http://orchestrator:8050
+      EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
+      EIREL_WEB_SEARCH_TOOL_BACKEND: ${EIREL_WEB_SEARCH_TOOL_BACKEND:-catalog}
+      EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
+      EIREL_SEMANTIC_SCHOLAR_TOOL_URL: ${EIREL_SEMANTIC_SCHOLAR_TOOL_URL:-http://semantic-scholar-tool-service:8087}
+      EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      orchestrator:
+        condition: service_started
+      web-search-tool-service:
+        condition: service_healthy
+      x-tool-service:
+        condition: service_healthy
+      semantic-scholar-tool-service:
+        condition: service_healthy
+      sandbox-tool-service:
+        condition: service_healthy
+    ports:
+      - "${EXECUTION_WORKER_HOST_PORT:-18006}:8006"
+
+  consumer-chat-api:
+    <<: *eirel-ai-run
+    command: ["consumer-chat-api"]
+    volumes:
+      - ..:/app
+    environment:
+      CONSUMER_API_KEYS: ${CONSUMER_API_KEYS:-staging-consumer-key}
+      ORCHESTRATOR_URL: http://orchestrator:8050
+    depends_on:
+      - orchestrator
+    ports:
+      - "${CONSUMER_CHAT_API_HOST_PORT:-18080}:8080"
+
+  eiretes-judge:
+    image: eiretes-judge:latest
+    build:
+      context: ..
+      dockerfile: eiretes/Dockerfile
+      target: base
+    command: ["eiretes-judge-service"]
+    environment:
+      EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
+      EIREL_JUDGE_BASE_URL: ${EIREL_JUDGE_API_BASE_URL:-https://llm.chutes.ai/v1}
+      EIREL_JUDGE_API_KEY: ${EIREL_JUDGE_API_KEY:-}
+      EIREL_JUDGE_TIMEOUT_SECONDS: ${EIREL_JUDGE_TIMEOUT_SECONDS:-20}
+      EIREL_JUDGE_RUBRIC_VERSION: ${EIREL_JUDGE_RUBRIC_VERSION:-family_rubric_v2}
+      EIREL_ENSEMBLE_JUDGE_BASE_URL: ${EIREL_ENSEMBLE_JUDGE_BASE_URL:-}
+      EIREL_ENSEMBLE_JUDGE_API_KEY: ${EIREL_ENSEMBLE_JUDGE_API_KEY:-}
+      EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD: ${EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD:-0.20}
+    ports:
+      - "${EIRETES_JUDGE_HOST_PORT:-18095}:8095"
+
+  # Metagraph listener — operator-side: keeps the RegisteredNeuron table in
+  # sync with the subnet's registered hotkeys. owner-api hard-gates miner
+  # submissions on this table (submission_manager._require_registered_hotkey),
+  # so this service MUST run alongside the owner-api — without it, every
+  # miner submission gets rejected with "not registered on the metagraph".
+  # Validators do NOT need this (see docker-compose.validator.yml).
+  metagraph-listener:
+    <<: *eirel-ai-run
+    command: ["metagraph-listener"]
+    volumes:
+      - ..:/app
+    environment:
+      DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
+      METAGRAPH_SNAPSHOT_PATH: ${METAGRAPH_SNAPSHOT_PATH:-}
+      METAGRAPH_SYNC_INTERVAL_SECONDS: ${METAGRAPH_SYNC_INTERVAL_SECONDS:-60}
+      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK:-test}
+      BITTENSOR_NETUID: ${BITTENSOR_NETUID:-144}
+      MINIMUM_VALIDATOR_STAKE: ${MINIMUM_VALIDATOR_STAKE:-0}
+    depends_on:
+      - postgres
+    ports:
+      - "${METAGRAPH_LISTENER_HOST_PORT:-18011}:8011"
+
+  # validator-engine + weight-setter moved to docker-compose.validator.yml so
+  # third-party validators run a lean stack without the operator's services.
+
+  provider-proxy:
+    <<: *eirel-ai-run
+    command: ["eirel-provider-proxy"]
+    volumes:
+      - ..:/app
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      EIREL_PROVIDER_PROXY_MASTER_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
+      EIREL_PROVIDER_PROXY_ALLOW_MOCK: ${EIREL_PROVIDER_PROXY_ALLOW_MOCK:-false}
+      EIREL_RUN_BUDGET_USD: ${EIREL_RUN_BUDGET_USD:-30.0}
+      EIREL_PROVIDER_CHUTES_API_KEY: ${EIREL_PROVIDER_CHUTES_API_KEY:-}
+      EIREL_PROVIDER_CHUTES_BASE_URL: ${EIREL_PROVIDER_CHUTES_BASE_URL:-https://llm.chutes.ai/v1/chat/completions}
+    depends_on:
+      - redis
+    ports:
+      - "${PROVIDER_PROXY_HOST_PORT:-18092}:8092"
+
+  web-search-tool-service:
+    <<: *eirel-ai-run
+    command: ["web-search-tool-service"]
+    volumes:
+      - ..:/app
+    environment:
+      EIREL_WEB_SEARCH_TOOL_BACKEND: ${EIREL_WEB_SEARCH_TOOL_BACKEND:-catalog}
+      EIREL_WEB_SEARCH_TOOL_BACKENDS: ${EIREL_WEB_SEARCH_TOOL_BACKENDS:-}
+      EIREL_WEB_SEARCH_TOOL_API_TOKEN: ${EIREL_WEB_SEARCH_TOOL_API_TOKEN:-}
+      EIREL_BRAVE_SEARCH_API_KEY: ${EIREL_BRAVE_SEARCH_API_KEY:-}
+      EIREL_SERPER_API_KEY: ${EIREL_SERPER_API_KEY:-}
+      EIREL_TAVILY_API_KEY: ${EIREL_TAVILY_API_KEY:-}
+      EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS: ${EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS:-10.0}
+      EIREL_WEB_SEARCH_MOCK: ${EIREL_WEB_SEARCH_MOCK:-false}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8085/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    ports:
+      - "${WEB_SEARCH_TOOL_SERVICE_HOST_PORT:-18085}:8085"
+
+  x-tool-service:
+    <<: *eirel-ai-run
+    command: ["x-tool-service"]
+    volumes:
+      - ..:/app
+    environment:
+      EIREL_X_TOOL_API_TOKEN: ${EIREL_X_TOOL_API_TOKEN:-}
+      EIREL_X_BEARER_TOKEN: ${EIREL_X_BEARER_TOKEN:-}
+      EIREL_X_API_CALLS_PER_TASK: ${EIREL_X_API_CALLS_PER_TASK:-1}
+      EIREL_X_MOCK: ${EIREL_X_MOCK:-false}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8086/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    ports:
+      - "${X_TOOL_SERVICE_HOST_PORT:-18086}:8086"
+
+  semantic-scholar-tool-service:
+    <<: *eirel-ai-run
+    command: ["semantic-scholar-tool-service"]
+    volumes:
+      - ..:/app
+    environment:
+      EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN: ${EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN:-}
+      EIREL_SEMANTIC_SCHOLAR_API_KEY: ${EIREL_SEMANTIC_SCHOLAR_API_KEY:-}
+      EIREL_SEMANTIC_SCHOLAR_TOOL_PORT: 8087
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8087/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    ports:
+      - "${SEMANTIC_SCHOLAR_TOOL_SERVICE_HOST_PORT:-18087}:8087"
+
+  sandbox-tool-service:
+    <<: *eirel-ai-run
+    command: ["sandbox-tool-service"]
+    volumes:
+      - ..:/app
+    # Hardening: run unprivileged, drop all caps, no new privileges,
+    # no network, read-only fs with scratch tmpfs. The SubprocessBackend
+    # enforces resource limits inside this container; the container
+    # itself is the kernel-level isolation boundary. Swap to a gVisor
+    # or Firecracker runtime for stronger isolation when production
+    # adversarial pressure justifies it.
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      EIREL_SANDBOX_TOOL_API_TOKEN: ${EIREL_SANDBOX_TOOL_API_TOKEN:-}
+      EIREL_SANDBOX_TOOL_PORT: 8091
+      EIREL_SANDBOX_TOOL_DEFAULT_TIMEOUT_SECONDS: ${EIREL_SANDBOX_TOOL_DEFAULT_TIMEOUT_SECONDS:-5.0}
+      EIREL_SANDBOX_TOOL_DEFAULT_MEMORY_MB: ${EIREL_SANDBOX_TOOL_DEFAULT_MEMORY_MB:-128}
+      EIREL_SANDBOX_TOOL_MAX_CODE_BYTES: ${EIREL_SANDBOX_TOOL_MAX_CODE_BYTES:-65536}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 512m
+    pids_limit: 100
+    restart: unless-stopped
+    ports:
+      - "${SANDBOX_TOOL_SERVICE_HOST_PORT:-18091}:8091"
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    # host.docker.internal resolves to the Docker host, which is how the
+    # owner_api scrape (host:30020 NodePort on k3s) reaches the cluster.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-19090}:9090"
+    depends_on:
+      - orchestrator
+      - consumer-chat-api
+      - execution-worker
+      - metagraph-listener
+      - provider-proxy
+
+  alertmanager:
+    profiles: ["monitoring"]
+    image: prom/alertmanager:v0.27.0
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sed \
+          -e "s|http://localhost:9999/default-noop|$$ALERTMANAGER_DEFAULT_WEBHOOK_URL|g" \
+          -e "s|http://localhost:9999/critical-noop|$$ALERTMANAGER_CRITICAL_WEBHOOK_URL|g" \
+          /etc/alertmanager/alertmanager.yml.tmpl > /tmp/alertmanager.yml
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - alertmanager_data:/alertmanager
+    environment:
+      ALERTMANAGER_DEFAULT_WEBHOOK_URL: ${ALERTMANAGER_DEFAULT_WEBHOOK_URL:-http://localhost:9999/default-noop}
+      ALERTMANAGER_CRITICAL_WEBHOOK_URL: ${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:9999/critical-noop}
+    ports:
+      - "${ALERTMANAGER_HOST_PORT:-19093}:9093"
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.1.0
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_HOST_PORT:-13000}:3000"
+    depends_on:
+      - prometheus
+
+  subnet-tests:
+    profiles: ["test"]
+    <<: *eirel-ai-test
+    command: ["pytest", "tests/test_control_plane_reset.py", "-q"]
+    volumes:
+      - ..:/app
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  alertmanager_data: {}

@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: Eirel Local Stack
+    folder: Eirel
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

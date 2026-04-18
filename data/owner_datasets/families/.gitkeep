@@ -1,0 +1,3 @@
+# Private evaluation datasets live here in dev. Production loads them
+# from S3 via OwnerDatasetBinding rows written by the dataset forge
+# (shared/dataset_forge/). Tests use tests/fixtures/owner_datasets/.

@@ -1,0 +1,11 @@
+---
+- name: Restart Docker
+  systemd:
+    name: docker
+    state: restarted
+
+- name: Restart node_exporter
+  systemd:
+    name: node_exporter
+    state: restarted
+    daemon_reload: true

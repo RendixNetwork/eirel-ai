@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Writes node capacity info to a JSON file for fast probing by the owner API.
+set -euo pipefail
+
+STORAGE_ROOT="{{ eirel_storage_root }}"
+STATUS_FILE="${STORAGE_ROOT}/node-status.json"
+
+cpu_count=$(nproc)
+mem_total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+mem_total_bytes=$((mem_total_kb * 1024))
+disk_avail_kb=$(df --output=avail "${STORAGE_ROOT}" | tail -1 | tr -d ' ')
+disk_avail_bytes=$((disk_avail_kb * 1024))
+container_count=$(docker ps -q 2>/dev/null | wc -l)
+drain_active=false
+if [ -f "${STORAGE_ROOT}/drain" ]; then
+  drain_active=true
+fi
+
+cat > "${STATUS_FILE}.tmp" <<EOF
+{
+  "cpu_count": ${cpu_count},
+  "mem_total_bytes": ${mem_total_bytes},
+  "disk_avail_bytes": ${disk_avail_bytes},
+  "container_count": ${container_count},
+  "drain_active": ${drain_active},
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+mv "${STATUS_FILE}.tmp" "${STATUS_FILE}"

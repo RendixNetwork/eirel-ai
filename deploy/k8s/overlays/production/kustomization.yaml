@@ -1,0 +1,16 @@
+namespace: eirel-prod
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+patches:
+  - path: configmap-patch.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: eirel-control-plane-secrets
+    envs:
+      - secret.env

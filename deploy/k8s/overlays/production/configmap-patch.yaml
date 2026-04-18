@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eirel-control-plane-config
+  namespace: eirel
+data:
+  REDIS_URL: redis://redis.eirel-prod.svc.cluster.local:6379/0
+  OBJECT_STORAGE_BACKEND: s3
+  OBJECT_STORAGE_ENDPOINT_URL: https://s3.example.com
+  OBJECT_STORAGE_REGION: us-east-1
+  OBJECT_STORAGE_PREFIX: production
+  OBJECT_STORAGE_USE_SSL: "true"
+  OBJECT_STORAGE_ADDRESSING_STYLE: path
+  ARTIFACT_STORAGE_BUCKET: eirel-production-artifacts
+  OWNER_API_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
+  OWNER_API_PUBLIC_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
+  OWNER_API_INTERNAL_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
+  API_GATEWAY_URL: http://api-gateway.eirel-prod.svc.cluster.local:8000
+  API_GATEWAY_PUBLIC_URL: http://api-gateway.eirel-prod.svc.cluster.local:8000
+  CONTROL_PLANE_INTERNAL_URL: http://api-gateway.eirel-prod.svc.cluster.local:8000
+  CONSUMER_API_PUBLIC_URL: http://consumer-chat-api.eirel-prod.svc.cluster.local:8080
+  VALIDATOR_ENGINE_PUBLIC_URL: http://validator-engine.eirel-prod.svc.cluster.local:8010
+  METAGRAPH_LISTENER_PUBLIC_URL: http://metagraph-listener.eirel-prod.svc.cluster.local:8011
+  WEIGHT_SETTER_PUBLIC_URL: http://weight-setter.eirel-prod.svc.cluster.local:8012
+  PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
+  EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
+  OWNER_RUNTIME_NAMESPACE: eirel-prod

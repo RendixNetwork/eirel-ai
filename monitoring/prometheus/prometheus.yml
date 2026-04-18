@@ -1,0 +1,91 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    env: "${EIREL_ENV:-local}"
+    cluster: eirel
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  # owner-api runs in k3s (not compose) — scrape through the NodePort
+  # exposed by the hybrid manifest.  ``host.docker.internal`` resolves to
+  # the Docker host via the ``extra_hosts`` mapping on the Prometheus
+  # service in docker-compose.yml.  The NodePort is fixed at 30020 in
+  # ``deploy/k8s/owner-api-hybrid/service.yaml``.
+  - job_name: owner_api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:30020
+
+  - job_name: orchestrator
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - orchestrator:8050
+
+  - job_name: consumer_chat_api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - consumer-chat-api:8080
+
+  - job_name: validator_engine
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - validator-engine:8010
+
+  - job_name: metagraph_listener
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - metagraph-listener:8011
+
+  - job_name: weight_setter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - weight-setter:8012
+
+  - job_name: provider_proxy
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - provider-proxy:8092
+
+  - job_name: execution_worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - execution-worker:8006
+
+  # Baremetal runtime node OS metrics via node_exporter.
+  # Targets are discovered from the owner API's runtime node inventory.
+  - job_name: runtime_node
+    http_sd_configs:
+      - url: http://host.docker.internal:30020/v1/operators/prometheus-targets
+        refresh_interval: 30s
+
+  # kube-state-metrics exposes pod/deployment/namespace lifecycle for the
+  # k3s cluster.  Installed via ``deploy/k8s/kube-state-metrics/``.  The
+  # NodePort 30080 is exposed on Server A's control-plane node and reached
+  # through the same ``host.docker.internal`` mapping owner-api uses.
+  - job_name: kube_state_metrics
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:30080

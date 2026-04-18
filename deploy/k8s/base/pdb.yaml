@@ -1,0 +1,32 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway
+  namespace: eirel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: execution-worker
+  namespace: eirel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: execution-worker
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: consumer-chat-api
+  namespace: eirel
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: consumer-chat-api

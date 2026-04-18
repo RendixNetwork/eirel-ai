@@ -1,0 +1,20 @@
+---
+- name: Gather facts from agents for their hostnames
+  hosts: k3s_agents
+  gather_facts: true
+  tasks: []
+
+- name: Apply runtime labels to agent nodes
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Label agent nodes with runtime-pool and runtime-class
+      ansible.builtin.command: >
+        kubectl label node {{ hostvars[item]['ansible_facts']['hostname'] }}
+        {{ eirel_runtime_pool_label_key }}=true
+        {{ eirel_runtime_class_label_key }}=miner
+        --overwrite
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      loop: "{{ groups['k3s_agents'] }}"
+      changed_when: true

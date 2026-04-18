@@ -1,0 +1,14 @@
+---
+- name: Label k3s server node as control-plane
+  hosts: k3s_servers[0]
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Apply control-plane label to server node
+      ansible.builtin.command: >
+        kubectl label node {{ ansible_hostname }}
+        {{ eirel_control_plane_node_label_key }}={{ eirel_control_plane_node_label_value }}
+        --overwrite
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true

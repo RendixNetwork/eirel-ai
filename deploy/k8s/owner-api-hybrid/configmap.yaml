@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: owner-api-config
+  namespace: eirel-control-plane
+data:
+  # -- Runtime backend (kubernetes, in-cluster) ---
+  OWNER_RUNTIME_BACKEND: kubernetes
+  EIREL_OWNER_KUBECONFIG_PATH: ""
+  EIREL_OWNER_RUNTIME_NAMESPACE: eirel-miners
+  EIREL_OWNER_RUNTIME_SYSTEM_NAMESPACE: eirel-system
+  EIREL_OWNER_RUNTIME_SERVICE_DOMAIN: svc.cluster.local
+  # Replace with your own registry before applying this manifest, e.g.
+  # `kubectl -n eirel-control-plane patch cm owner-api-config --patch \
+  #   '{"data":{"EIREL_OWNER_RUNTIME_IMAGE":"registry.example.com:5000/miner-runtime:v1"}}'`
+  EIREL_OWNER_RUNTIME_IMAGE: registry.example.com:5000/miner-runtime:v1
+  EIREL_OWNER_RUNTIME_SHARED_SECRET_NAME: eirel-runtime-shared
+  EIREL_OWNER_RUNTIME_SUBMISSION_CPU_MILLIS: "2000"
+  EIREL_OWNER_RUNTIME_SUBMISSION_MEMORY_MB: "2048"
+  EIREL_OWNER_RUNTIME_PROBE_PERIOD_SECONDS: "5"
+  EIREL_OWNER_RUNTIME_REAPER_INTERVAL_SECONDS: "30"
+  EIREL_OWNER_PENDING_CAPACITY_RETRY_INTERVAL_SECONDS: "30"
+  OWNER_RUNTIME_HEALTH_TIMEOUT_SECONDS: "60"
+  OWNER_RUNTIME_RESTART_BUDGET: "2"
+  OWNER_RUNTIME_POOL_LABEL_KEY: eirel.dev/runtime-pool
+  OWNER_RUNTIME_POOL_LABEL_VALUE: "true"
+  OWNER_RUNTIME_CLASS_LABEL_KEY: eirel.dev/runtime-class
+  OWNER_RUNTIME_CLASS_LABEL_VALUE: miner
+  OWNER_RUNTIME_CAPACITY_REFRESH_INTERVAL_SECONDS: "30"
+  OWNER_RUNTIME_CAPACITY_CPU_HEADROOM_MILLIS: "500"
+  OWNER_RUNTIME_CAPACITY_MEMORY_HEADROOM_MB: "512"
+  OWNER_RUNTIME_CAPACITY_POD_HEADROOM: "1"
+  # -- Bittensor / metagraph ---
+  BITTENSOR_NETWORK: test
+  BITTENSOR_NETUID: "144"
+  MINIMUM_VALIDATOR_STAKE: "0"
+  METAGRAPH_SNAPSHOT_PATH: ""
+  # -- Owner identity ---
+  # Point these at the local Bittensor wallet that signs owner-admin API
+  # requests. The wallet is expected at
+  # ~/.bittensor/wallets/<NAME>/hotkeys/<HOTKEY> on the k3s node.
+  EIREL_OWNER_WALLET_NAME: your-owner-wallet
+  EIREL_OWNER_HOTKEY_NAME: your-owner-hotkey
+  # -- Tool backend toggles ---
+  EIREL_WEB_SEARCH_TOOL_BACKEND: catalog
+  PLATFORM_TOOLS_ENABLED: "true"
+  # -- Archive / submission limits ---
+  ARCHIVE_LIMIT_BYTES: "209715200"
+  EIREL_SUBMISSION_FEE_TAO: "0"
+  EIREL_SUBMISSION_TREASURY_ADDRESS: ""
+  # -- Launch mode ---
+  LAUNCH_MODE: development
+  # -- Artifact storage ---
+  OBJECT_STORAGE_BACKEND: filesystem
+  ARTIFACT_STORAGE_ROOT: /tmp/eirel-managed-artifacts
+  ARTIFACT_STORAGE_BUCKET: eirel-managed-local
+  # -- Dataset paths ---
+  EIREL_OWNER_DATASET_ROOT_PATH: /app/eirel-ai/data/owner_datasets/families
+  EIREL_OWNER_DATASET_SOURCE_TYPE: filesystem
+  # -- Self-referencing URL (pod-local) ---
+  OWNER_API_INTERNAL_URL: http://localhost:8000
+  # -- Validator / scoring ---
+  VALIDATOR_EPOCH_QUORUM: "1"

@@ -1,0 +1,277 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["eirel", "live", "scoring"],
+  "templating": {
+    "list": [
+      {
+        "name": "family",
+        "label": "Family",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(eirel_owner_task_progress, family)",
+        "refresh": 1,
+        "multi": false,
+        "includeAll": false,
+        "sort": 1,
+        "current": {"selected": false, "text": "general_chat", "value": "general_chat"}
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "EIREL — Live Run Progress",
+  "uid": "eirel-live-run-progress",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Run overview",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Current run",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "max(eirel_owner_task_progress{family=\"$family\"}) by (run_id)", "instant": true, "format": "time_series", "legendFormat": "{{run_id}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}},
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "/.*/"}, "colorMode": "value", "graphMode": "none", "textMode": "name"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Tasks evaluated",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(eirel_owner_task_progress{family=\"$family\",state=\"evaluated\"})", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Tasks in flight",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(eirel_owner_task_progress{family=\"$family\",state=\"claimed\"})", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Tasks pending",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(eirel_owner_task_progress{family=\"$family\",state=\"pending\"})", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Per-miner progress",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "barchart",
+      "title": "Tasks by state per miner (stacked)",
+      "gridPos": {"h": 8, "w": 14, "x": 0, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum by (hotkey, state) (eirel_owner_task_progress{family=\"$family\"})", "instant": true, "format": "table", "legendFormat": "{{hotkey}} / {{state}}"}
+      ],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "run_id": true, "family": true}, "renameByName": {}}}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "none", "custom": {"axisPlacement": "auto"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "evaluated"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+          {"matcher": {"id": "byName", "options": "claimed"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "pending"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]}
+        ]
+      },
+      "options": {"orientation": "horizontal", "xTickLabelRotation": 0, "stacking": "normal", "legend": {"displayMode": "list", "placement": "bottom"}, "xField": "hotkey"}
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Completion % per miner",
+      "gridPos": {"h": 8, "w": 10, "x": 14, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum by (hotkey) (eirel_owner_task_progress{family=\"$family\",state=\"evaluated\"}) / sum by (hotkey) (eirel_owner_task_progress{family=\"$family\"})", "instant": true, "legendFormat": "{{hotkey}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.3}, {"color": "green", "value": 0.8}]},
+          "color": {"mode": "thresholds"}
+        },
+        "overrides": []
+      },
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Per-task detail",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Task × miner grid (score if evaluated, status otherwise)",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 15},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "SCORE", "expr": "eirel_owner_task_score{family=\"$family\"}", "instant": true, "format": "table"},
+        {"refId": "STATUS", "expr": "sum by (task_id, hotkey, status) (eirel_owner_task_status{family=\"$family\"})", "instant": true, "format": "table"}
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {"excludeByName": {"Time": true, "__name__": true, "family": true, "run_id": true, "job": true, "instance": true}, "renameByName": {}}
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "Value #SCORE"},
+            "properties": [
+              {"id": "displayName", "value": "score"},
+              {"id": "decimals", "value": 3},
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "gradient"}},
+              {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.4}, {"color": "green", "value": 0.7}]}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Value #STATUS"},
+            "properties": [
+              {"id": "custom.hidden", "value": true}
+            ]
+          }
+        ]
+      },
+      "options": {"showHeader": true}
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Live trends",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 27},
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Task score as it lands (per miner)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "eirel_owner_task_score{family=\"$family\"}", "legendFormat": "{{hotkey}} / {{task_id}}"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "points", "pointSize": 7, "showPoints": "always", "lineWidth": 0}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Response latency per miner (ms)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "avg by (hotkey) (eirel_owner_task_latency_ms{family=\"$family\"})", "legendFormat": "{{hotkey}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 20}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Tool usage",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "bargauge",
+      "title": "web_search invocations per miner (current run)",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 37},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum by (hotkey) (eirel_owner_task_web_search_used{family=\"$family\"})", "instant": true, "legendFormat": "{{hotkey}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Tasks with web_search used (overall)",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 37},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(eirel_owner_task_web_search_used{family=\"$family\"})", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Avg score where web_search used",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 37},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "avg(eirel_owner_task_score{family=\"$family\"} * on(run_id,family,hotkey,task_id) eirel_owner_task_web_search_used{family=\"$family\"} == 1)", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "decimals": 3, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.4}, {"color": "green", "value": 0.7}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+    }
+  ]
+}

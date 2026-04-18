@@ -1,0 +1,29 @@
+# Runtime node inventory — copy to inventory.yaml and fill in your servers.
+#
+# These are owner-operated servers that run submitted miner agent containers.
+# This directory (local/) is gitignored so your real inventory stays private.
+# Alternatively, place your inventory at /etc/eirel/inventory.yaml or set
+# OWNER_BAREMETAL_INVENTORY_PATH to any path.
+#
+# Resolution order:
+#   1. OWNER_BAREMETAL_INVENTORY_PATH env var
+#   2. eirel-ai/local/inventory.yaml      (this directory, gitignored)
+#   3. /etc/eirel/inventory.yaml           (system-wide)
+#   4. deploy/baremetal/inventory/hosts.yaml (in-repo template)
+
+all:
+  vars:
+    ansible_user: eirel
+    ansible_ssh_private_key_file: ~/.ssh/eirel_deploy
+    eirel_storage_root: /var/lib/eirel
+    eirel_owner_api_ip: "10.0.0.1"  # restrict to your owner API server IP
+  children:
+    miner_nodes:
+      hosts:
+        runtime-node-1:
+          ansible_host: 10.0.1.10
+        runtime-node-2:
+          ansible_host: 10.0.1.11
+        # gpu-node-1:
+        #   ansible_host: 10.0.2.10
+        #   ansible_port: 2222

@@ -1,0 +1,39 @@
+---
+# Usage: ansible-playbook drain-node.yaml -e node=miner-node-1
+#
+# Creates a drain sentinel file on the target node. The owner API will see
+# schedulable=False on the next inventory refresh and stop placing new
+# containers. Existing containers continue running until the grace period
+# expires (default 600s), after which the owner API drains them.
+#
+# After draining completes, remove the host from inventory/hosts.yaml.
+
+- name: Drain a miner node
+  hosts: "{{ node }}"
+  become: true
+  vars:
+    eirel_storage_root: /var/lib/eirel
+    grace_seconds: 660  # slightly longer than owner API's soft_termination_grace_seconds
+  tasks:
+    - name: Create drain sentinel
+      file:
+        path: "{{ eirel_storage_root }}/drain"
+        state: touch
+        owner: eirel
+        group: eirel
+
+    - name: Wait for grace period
+      pause:
+        seconds: "{{ grace_seconds }}"
+
+    - name: Stop all eirel miner containers
+      shell: docker ps -q --filter "name=eirel-miner-" | xargs -r docker stop
+      ignore_errors: true
+
+    - name: Remove all eirel miner containers
+      shell: docker ps -aq --filter "name=eirel-miner-" | xargs -r docker rm -f
+      ignore_errors: true
+
+    - name: Clean up images
+      shell: docker image prune -af
+      ignore_errors: true

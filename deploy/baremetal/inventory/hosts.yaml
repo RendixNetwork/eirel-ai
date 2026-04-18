@@ -1,0 +1,14 @@
+all:
+  vars:
+    ansible_user: eirel
+    ansible_ssh_private_key_file: ~/.ssh/eirel_deploy
+    eirel_storage_root: /var/lib/eirel
+    eirel_owner_api_ip: "0.0.0.0/0"  # restrict to owner API server IP in production
+  children:
+    miner_nodes:
+      hosts: {}
+        # Example — uncomment and set real addresses:
+        # runtime-node-1:
+        #   ansible_host: 192.168.1.10
+        # runtime-node-2:
+        #   ansible_host: 192.168.1.11

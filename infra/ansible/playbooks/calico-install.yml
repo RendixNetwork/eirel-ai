@@ -1,0 +1,59 @@
+---
+- name: Install Calico CNI
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Download tigera-operator manifest
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml"
+        dest: /tmp/tigera-operator.yaml
+        mode: "0644"
+
+    - name: Write custom-resources manifest (VXLAN, no BGP — works across public internet)
+      ansible.builtin.copy:
+        dest: /tmp/calico-custom-resources.yaml
+        mode: "0644"
+        content: |
+          apiVersion: operator.tigera.io/v1
+          kind: Installation
+          metadata:
+            name: default
+          spec:
+            calicoNetwork:
+              bgp: Disabled
+              ipPools:
+                - blockSize: 26
+                  cidr: 192.168.0.0/16
+                  encapsulation: VXLAN
+                  natOutgoing: Enabled
+                  nodeSelector: all()
+          ---
+          apiVersion: operator.tigera.io/v1
+          kind: APIServer
+          metadata:
+            name: default
+          spec: {}
+
+    - name: Apply tigera-operator (server-side to bypass 262KB annotation limit)
+      ansible.builtin.command: kubectl apply --server-side --force-conflicts -f /tmp/tigera-operator.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+    - name: Apply custom-resources
+      ansible.builtin.command: kubectl apply --server-side --force-conflicts -f /tmp/calico-custom-resources.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+    - name: Wait for calico-system pods to be ready
+      ansible.builtin.command: >
+        kubectl wait --for=condition=Ready pods --all
+        -n calico-system --timeout=300s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      retries: 5
+      delay: 10
+      register: calico_wait
+      until: calico_wait.rc == 0

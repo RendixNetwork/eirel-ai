@@ -1,0 +1,162 @@
+---
+- name: Install Docker prerequisites
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: true
+
+- name: Add Docker GPG key
+  apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+- name: Add Docker repository
+  apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+
+- name: Install Docker CE
+  apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    state: present
+    update_cache: true
+
+- name: Create eirel system user
+  user:
+    name: eirel
+    system: true
+    shell: /bin/bash
+    groups: docker
+    append: true
+    create_home: true
+
+- name: Configure Docker daemon
+  template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+  notify: Restart Docker
+
+- name: Create eirel storage directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: eirel
+    group: eirel
+    mode: "0755"
+  loop:
+    - "{{ eirel_storage_root }}"
+    - "{{ eirel_storage_root }}/miner-runtimes"
+    - "{{ eirel_storage_root }}/images"
+
+- name: Install node status reporter script
+  template:
+    src: node-status.sh.j2
+    dest: "{{ eirel_storage_root }}/node-status.sh"
+    owner: eirel
+    group: eirel
+    mode: "0755"
+
+- name: Schedule node status reporter via cron
+  cron:
+    name: eirel-node-status
+    user: eirel
+    job: "{{ eirel_storage_root }}/node-status.sh"
+    minute: "*"
+    state: present
+
+- name: Check if node_exporter is installed
+  stat:
+    path: /usr/local/bin/node_exporter
+  register: node_exporter_bin
+
+- name: Download node_exporter
+  get_url:
+    url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+    dest: /tmp/node_exporter.tar.gz
+    mode: "0644"
+  when: not node_exporter_bin.stat.exists
+
+- name: Extract node_exporter binary
+  unarchive:
+    src: /tmp/node_exporter.tar.gz
+    dest: /tmp
+    remote_src: true
+  when: not node_exporter_bin.stat.exists
+
+- name: Install node_exporter binary
+  copy:
+    src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+    dest: /usr/local/bin/node_exporter
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: not node_exporter_bin.stat.exists
+
+- name: Clean up node_exporter download
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/node_exporter.tar.gz
+    - "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64"
+  when: not node_exporter_bin.stat.exists
+
+- name: Create node_exporter systemd unit
+  template:
+    src: node_exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    mode: "0644"
+  notify: Restart node_exporter
+
+- name: Enable and start node_exporter
+  systemd:
+    name: node_exporter
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Install UFW
+  apt:
+    name: ufw
+    state: present
+
+- name: Configure UFW — allow SSH
+  ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+
+- name: Configure UFW — allow dynamic port range from owner
+  ufw:
+    rule: allow
+    from_ip: "{{ eirel_owner_api_ip }}"
+    port: "32768:65535"
+    proto: tcp
+
+- name: Configure UFW — allow node_exporter from owner
+  ufw:
+    rule: allow
+    from_ip: "{{ eirel_owner_api_ip }}"
+    port: "9100"
+    proto: tcp
+
+- name: Enable UFW
+  ufw:
+    state: enabled
+    policy: deny
+
+- name: Enable and start Docker service
+  systemd:
+    name: docker
+    enabled: true
+    state: started

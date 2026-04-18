@@ -1,0 +1,33 @@
+---
+# Usage: ansible-playbook playbooks/k3s-drain-and-remove.yml -e target_node=k3s-agent-1
+- name: Drain and delete node from cluster
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Validate target_node is defined
+      ansible.builtin.assert:
+        that: target_node is defined
+        fail_msg: "Pass -e target_node=<hostname> to select the node to remove"
+
+    - name: Drain target node
+      ansible.builtin.command: >
+        kubectl drain {{ target_node }}
+        --ignore-daemonsets --delete-emptydir-data --timeout=600s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+    - name: Delete target node from cluster
+      ansible.builtin.command: >
+        kubectl delete node {{ target_node }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+- name: Uninstall k3s agent from target host
+  hosts: "{{ target_node }}"
+  become: true
+  tasks:
+    - name: Run k3s agent uninstall script
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      changed_when: true

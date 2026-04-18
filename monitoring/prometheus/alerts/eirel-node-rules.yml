@@ -1,0 +1,94 @@
+groups:
+  - name: eirel-runtime-node-health
+    rules:
+      - alert: EirelRuntimeNodeDown
+        expr: eirel_owner_node_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} is unreachable"
+          description: "The owner API has been unable to reach node {{ $labels.node }} for 5 minutes."
+
+      - alert: EirelRuntimeNodeNotSchedulable
+        expr: eirel_owner_node_schedulable == 0 and eirel_owner_node_ready == 1
+        for: 10m
+        labels:
+          severity: warning
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} is not schedulable"
+          description: "Node {{ $labels.node }} is reachable but not accepting new containers (drain active or capacity exhausted)."
+
+      - alert: EirelRuntimeNodeDiskLow
+        expr: eirel_owner_node_disk_avail_bytes > 0 and eirel_owner_node_disk_avail_bytes < 5368709120
+        for: 5m
+        labels:
+          severity: warning
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} disk below 5 GB"
+          description: "Node {{ $labels.node }} has {{ $value | humanize1024 }}B available disk. Consider cleaning up images or expanding storage."
+
+      - alert: EirelRuntimeNodeDiskCritical
+        expr: eirel_owner_node_disk_avail_bytes > 0 and eirel_owner_node_disk_avail_bytes < 1073741824
+        for: 2m
+        labels:
+          severity: critical
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} disk below 1 GB"
+          description: "Node {{ $labels.node }} is critically low on disk space. Immediate action required."
+
+      - alert: EirelNoRuntimeNodesAvailable
+        expr: eirel_owner_node_count == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: runtime-node
+        annotations:
+          summary: "no runtime nodes are registered"
+          description: "The owner API reports zero runtime nodes. Check inventory configuration and node connectivity."
+
+  - name: eirel-runtime-node-exporter
+    rules:
+      - alert: EirelNodeExporterDown
+        expr: up{job="runtime_node"} == 0
+        for: 3m
+        labels:
+          severity: warning
+          service: runtime-node
+        annotations:
+          summary: "node_exporter on {{ $labels.node }} is unreachable"
+          description: "Prometheus cannot scrape node_exporter on {{ $labels.instance }} for 3 minutes."
+
+      - alert: EirelNodeHighCpuUsage
+        expr: 100 - (avg by (node, instance) (rate(node_cpu_seconds_total{job="runtime_node", mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} CPU above 90%"
+          description: "CPU utilization on {{ $labels.node }} has exceeded 90% for 10 minutes."
+
+      - alert: EirelNodeHighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes{job="runtime_node"} / node_memory_MemTotal_bytes{job="runtime_node"}) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} memory above 90%"
+          description: "Memory utilization on {{ $labels.node }} has exceeded 90% for 5 minutes."
+
+      - alert: EirelNodeFilesystemAlmostFull
+        expr: (1 - node_filesystem_avail_bytes{job="runtime_node", mountpoint="/"} / node_filesystem_size_bytes{job="runtime_node", mountpoint="/"}) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: runtime-node
+        annotations:
+          summary: "runtime node {{ $labels.node }} root filesystem above 85%"
+          description: "Filesystem on {{ $labels.node }} ({{ $labels.mountpoint }}) is {{ $value | printf \"%.1f\" }}% full."

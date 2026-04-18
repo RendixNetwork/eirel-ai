@@ -1,0 +1,85 @@
+{
+  "kind": "family_evaluation_bundle",
+  "family_id": "builder",
+  "benchmark_version": "builder_family_v2",
+  "rubric_version": "builder_family_rubric_v2",
+  "metadata": {
+    "dataset_version": "owner-builder-v1",
+    "protocol_suite_id": "builder_protocol_suite_v1",
+    "hidden_fixture_ids": ["builder-transform-3"]
+  },
+  "tasks": [
+    {
+      "task_id": "builder-impl-1",
+      "family_id": "builder",
+      "prompt": "Implement a Python function normalize_titles(records) that returns a new list where each record keeps only non-empty title strings, strips surrounding whitespace, and title-cases each title. Do not mutate the input list.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "implementation",
+      "difficulty": "standard",
+      "risk_tags": ["api_shape", "spec_adherence", "hidden_tests"],
+      "expected_output": {
+        "task_family": "function_implementation",
+        "required_api_shape": {"function_name": "normalize_titles", "arity": 1},
+        "python_assertions": [
+          "records = [{'title': '  hello world  '}, {'title': ''}, {'title': 'data science'}]",
+          "output = normalize_titles(records)",
+          "assert output == ['Hello World', 'Data Science']",
+          "assert records[0]['title'] == '  hello world  '"
+        ],
+        "hidden_cases": [
+          {
+            "call": "normalize_titles([{'title': 'multiple   words'}, {'title': None}, {'title': ' build systems '}])",
+            "equals": ["Multiple   Words", "Build Systems"]
+          }
+        ],
+        "spec_must_contain": ["strip", "title"],
+        "spec_must_not_contain": ["records.clear", ".pop("],
+        "forbidden_constructs": ["eval", "exec", "__import__", "open"]
+      },
+      "inputs": {},
+      "metadata": {
+        "category": "implementation",
+        "difficulty": "standard",
+        "task_family": "function_implementation",
+        "risk_tags": ["api_shape", "spec_adherence", "hidden_tests"]
+      }
+    },
+    {
+      "task_id": "builder-transform-3",
+      "family_id": "builder",
+      "prompt": "Write a Python function build_issue_report(issues) that returns a markdown bullet list where each line is '- <severity>: <title>'. Ignore issues missing either field and preserve input order.",
+      "task_mode": "specialist_static",
+      "execution_mode": "static",
+      "category": "transformation",
+      "difficulty": "hard",
+      "risk_tags": ["transformation", "spec_adherence", "format_contract"],
+      "expected_output": {
+        "task_family": "constrained_transformation",
+        "required_api_shape": {"function_name": "build_issue_report", "arity": 1},
+        "python_assertions": [
+          "issues = [{'severity': 'high', 'title': 'Crash on boot'}, {'severity': 'low', 'title': 'Typo'}, {'severity': 'high'}]",
+          "assert build_issue_report(issues) == '- high: Crash on boot\\n- low: Typo'"
+        ],
+        "hidden_cases": [
+          {
+            "call": "build_issue_report([{'severity': 'medium', 'title': 'Queue lag'}])",
+            "equals": "- medium: Queue lag"
+          }
+        ],
+        "spec_must_contain": ["severity", "title"],
+        "spec_must_not_contain": ["sorted(", ".sort("],
+        "forbidden_constructs": ["eval", "exec", "__import__", "open"]
+      },
+      "inputs": {},
+      "metadata": {
+        "category": "transformation",
+        "difficulty": "hard",
+        "task_family": "constrained_transformation",
+        "risk_tags": ["transformation", "spec_adherence", "format_contract"],
+        "hidden_fixture": true,
+        "visibility": "hidden"
+      }
+    }
+  ]
+}

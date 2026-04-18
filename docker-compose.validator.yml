@@ -1,0 +1,59 @@
+# -----------------------------------------------------------------------------
+# Validator stack — what a third-party validator runs to participate in the
+# EIREL subnet. Two services: validator-engine (claims + scores tasks),
+# weight-setter (publishes weights on-chain). Both query Subtensor directly
+# via the bittensor SDK; no local DB is needed.
+#
+# Validators do NOT run the operator services (owner-api, tool services,
+# provider-proxy, orchestrator, etc.) — those are hosted by the subnet
+# operator and reached over HTTP via OPERATOR_OWNER_API_URL.
+#
+# Quickstart:
+#     cp .env.validator.example .env.validator
+#     # Edit .env.validator with your wallet + operator URL + netuid
+#     docker compose -f docker-compose.validator.yml up -d
+#
+# See README.validator.md for full instructions.
+# -----------------------------------------------------------------------------
+
+x-validator-run: &validator-run
+  image: eirel-ai:latest
+  working_dir: /app/eirel-ai
+  env_file: .env.validator
+  volumes:
+    # Read-only mount of the validator's Bittensor wallet. Both services
+    # need the hotkey to sign owner-api requests and set_weights extrinsics.
+    - ${BITTENSOR_WALLETS_PATH:-/root/.bittensor/wallets}:/root/.bittensor/wallets:ro
+  restart: unless-stopped
+
+services:
+  # Polls the operator's owner-api for tasks, invokes miners over HTTP,
+  # submits judged results. The main validator workload.
+  validator-engine:
+    <<: *validator-run
+    command: ["validator-engine"]
+    environment:
+      OWNER_API_URL: ${OPERATOR_OWNER_API_URL}
+      EIREL_VALIDATOR_WALLET_NAME: ${VALIDATOR_WALLET_NAME}
+      EIREL_VALIDATOR_HOTKEY_NAME: ${VALIDATOR_HOTKEY_NAME}
+      EIREL_VALIDATOR_ACTIVE_FAMILIES: ${EIREL_VALIDATOR_ACTIVE_FAMILIES:-general_chat}
+      EIREL_VALIDATOR_AUTO_LOOP: "true"
+      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK}
+      BITTENSOR_NETUID: ${BITTENSOR_NETUID}
+    ports:
+      - "${VALIDATOR_ENGINE_HOST_PORT:-18010}:8010"
+
+  # Aggregates scores from completed runs and publishes weights on-chain via
+  # the Subtensor network. Fires on its own cadence independently of the
+  # validator-engine loop.
+  weight-setter:
+    <<: *validator-run
+    command: ["weight-setter"]
+    environment:
+      OWNER_API_URL: ${OPERATOR_OWNER_API_URL}
+      EIREL_VALIDATOR_WALLET_NAME: ${VALIDATOR_WALLET_NAME}
+      EIREL_VALIDATOR_HOTKEY_NAME: ${VALIDATOR_HOTKEY_NAME}
+      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK}
+      BITTENSOR_NETUID: ${BITTENSOR_NETUID}
+    ports:
+      - "${WEIGHT_SETTER_HOST_PORT:-18012}:8012"
