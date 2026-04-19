@@ -18,7 +18,7 @@ x-eirel-ai-build: &eirel-ai-build
   image: eirel-ai:latest
   build:
     context: ..
-    dockerfile: eirel-ai/Dockerfile
+    dockerfile: eirel-ai/Dockerfile.local
     target: base
   working_dir: /app/eirel-ai
   env_file: .env
@@ -32,7 +32,7 @@ x-eirel-ai-test: &eirel-ai-test
   image: eirel-ai-test:latest
   build:
     context: ..
-    dockerfile: eirel-ai/Dockerfile
+    dockerfile: eirel-ai/Dockerfile.local
     target: test
   working_dir: /app/eirel-ai
   env_file: .env
@@ -139,24 +139,8 @@ services:
     ports:
       - "${CONSUMER_CHAT_API_HOST_PORT:-18080}:8080"
 
-  eiretes-judge:
-    image: eiretes-judge:latest
-    build:
-      context: ..
-      dockerfile: eiretes/Dockerfile
-      target: base
-    command: ["eiretes-judge-service"]
-    environment:
-      EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
-      EIREL_JUDGE_BASE_URL: ${EIREL_JUDGE_API_BASE_URL:-https://llm.chutes.ai/v1}
-      EIREL_JUDGE_API_KEY: ${EIREL_JUDGE_API_KEY:-}
-      EIREL_JUDGE_TIMEOUT_SECONDS: ${EIREL_JUDGE_TIMEOUT_SECONDS:-20}
-      EIREL_JUDGE_RUBRIC_VERSION: ${EIREL_JUDGE_RUBRIC_VERSION:-family_rubric_v2}
-      EIREL_ENSEMBLE_JUDGE_BASE_URL: ${EIREL_ENSEMBLE_JUDGE_BASE_URL:-}
-      EIREL_ENSEMBLE_JUDGE_API_KEY: ${EIREL_ENSEMBLE_JUDGE_API_KEY:-}
-      EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD: ${EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD:-0.20}
-    ports:
-      - "${EIRETES_JUDGE_HOST_PORT:-18095}:8095"
+  # eiretes-judge moved to docker-compose.validator.yml — each validator
+  # now runs its own judge and pays its own LLM bill. See README.validator.md.
 
   # Metagraph listener — operator-side: keeps the RegisteredNeuron table in
   # sync with the subnet's registered hotkeys. owner-api hard-gates miner

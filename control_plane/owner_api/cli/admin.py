@@ -5,17 +5,17 @@ Signs requests with the owner hotkey (Bittensor wallet) and calls the
 wallet files live.
 
 Usage:
-  eirel-admin whoami
-  eirel-admin validators add <hotkey> [--uid N] [--stake N]
-  eirel-admin validators remove <hotkey>
-  eirel-admin validators list
-  eirel-admin validators enable <hotkey>
-  eirel-admin validators disable <hotkey>
-  eirel-admin runs list
-  eirel-admin runs current
-  eirel-admin neurons list
-  eirel-admin submissions list [--limit N]
-  eirel-admin deployments list [--limit N]
+  eirel-ai admin whoami
+  eirel-ai admin validators add <hotkey> [--uid N] [--stake N]
+  eirel-ai admin validators remove <hotkey>
+  eirel-ai admin validators list
+  eirel-ai admin validators enable <hotkey>
+  eirel-ai admin validators disable <hotkey>
+  eirel-ai admin runs list
+  eirel-ai admin runs current
+  eirel-ai admin neurons list
+  eirel-ai admin submissions list [--limit N]
+  eirel-ai admin deployments list [--limit N]
 
 Configuration (env vars):
   EIREL_ADMIN_API_URL       Owner API base URL (default: http://127.0.0.1:18020)
@@ -162,7 +162,7 @@ def cmd_deployments_list(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="eirel-admin",
+        prog="eirel-ai admin",
         description="Eirel subnet operator CLI (owner-signed).",
     )
     sub = parser.add_subparsers(dest="group", required=True)

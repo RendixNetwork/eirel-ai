@@ -58,10 +58,8 @@ semantic-scholar-tool-service = "tool_platforms.semantic_scholar_tool_service.ap
 sandbox-tool-service = "tool_platforms.sandbox_tool_service.app:main"
 eirel-provider-proxy = "tool_platforms.provider_proxy.main:main"
 
-# CLI tools
-db-migrate = "shared.common.db_migrate:main"
-eirel-dataset-forge = "shared.dataset_forge.cli:main"
-eirel-admin = "control_plane.owner_api.cli.admin:main"
+# Operator CLI — unified: `eirel-ai migrate`, `eirel-ai admin …`
+eirel-ai = "control_plane.owner_api.cli.eirel_ai:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

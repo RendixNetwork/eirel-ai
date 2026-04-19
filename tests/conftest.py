@@ -97,6 +97,10 @@ def test_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_URL", "http://provider-proxy.test")
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_TOKEN", "provider-token")
     monkeypatch.setenv("EIREL_INTERNAL_SERVICE_TOKEN", "internal-token")
+    # Force the lightweight docker backend during tests so the app
+    # startup doesn't try to load in-cluster kubeconfig (which fails in
+    # CI). Runtime tests swap in FakeRuntimeManager anyway.
+    monkeypatch.setenv("OWNER_RUNTIME_BACKEND", "docker")
     # Private evaluation fixtures are not committed under data/ once the
     # repo is published. Tests use local copies under tests/fixtures/.
     monkeypatch.setenv(

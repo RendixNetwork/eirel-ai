@@ -1,23 +1,39 @@
 # -----------------------------------------------------------------------------
 # Validator stack — what a third-party validator runs to participate in the
-# EIREL subnet. Two services: validator-engine (claims + scores tasks),
-# weight-setter (publishes weights on-chain). Both query Subtensor directly
-# via the bittensor SDK; no local DB is needed.
+# EIREL subnet. Three services:
+#
+#   - eiretes-judge: LLM judge that scores miner responses locally on your
+#                    machine. You supply your own Chutes API key and pay
+#                    the judge LLM bill yourself (~$0.15-$0.30 per 20-task
+#                    run with Kimi-K2.5 at current Chutes rates).
+#   - validator-engine: claims tasks from the operator's owner-api, invokes
+#                    miners (via owner-api proxy), calls local eiretes-judge,
+#                    submits results.
+#   - weight-setter:  aggregates scores from completed runs and publishes
+#                    weights on-chain via the Subtensor network.
 #
 # Validators do NOT run the operator services (owner-api, tool services,
-# provider-proxy, orchestrator, etc.) — those are hosted by the subnet
-# operator and reached over HTTP via OPERATOR_OWNER_API_URL.
+# miner runtime, etc.) — those are hosted by the subnet operator and
+# reached over HTTP via OPERATOR_OWNER_API_URL.
 #
 # Quickstart:
 #     cp .env.validator.example .env.validator
-#     # Edit .env.validator with your wallet + operator URL + netuid
+#     # Edit .env.validator with your wallet + operator URL + Chutes API key
 #     docker compose -f docker-compose.validator.yml up -d
 #
-# See README.validator.md for full instructions.
+# See README.validator.md for full instructions, including trust model,
+# cost estimates, and troubleshooting.
 # -----------------------------------------------------------------------------
 
 x-validator-run: &validator-run
   image: eirel-ai:latest
+  # Pre-launch: build from the sibling eirel-ai source. Once eirel ships
+  # to PyPI and eirel-ai publishes an image, switch to `image: ...` only
+  # and drop this build block.
+  build:
+    context: ..
+    dockerfile: eirel-ai/Dockerfile.local
+    target: base
   working_dir: /app/eirel-ai
   env_file: .env.validator
   volumes:
@@ -27,19 +43,57 @@ x-validator-run: &validator-run
   restart: unless-stopped
 
 services:
+  # LLM judge sidecar. Validator-engine calls this per evaluated task.
+  # You supply the Chutes API key; this container pays the LLM bill
+  # against your account.
+  #
+  # Pre-launch local build: uses eiretes/Dockerfile.local which installs
+  # eirel from the sibling directory. Once eirel ships to PyPI, switch to
+  # `image: ghcr.io/rendixnetwork/eiretes:<tag>` and drop the build block.
+  eiretes-judge:
+    image: eiretes-judge:local
+    build:
+      context: ..
+      dockerfile: eiretes/Dockerfile.local
+    env_file: .env.validator
+    environment:
+      EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
+      EIREL_JUDGE_BASE_URL: ${EIREL_JUDGE_BASE_URL:-https://llm.chutes.ai/v1}
+      EIREL_JUDGE_API_KEY: ${EIREL_JUDGE_API_KEY:-${EIREL_PROVIDER_CHUTES_API_KEY}}
+      EIREL_JUDGE_TIMEOUT_SECONDS: ${EIREL_JUDGE_TIMEOUT_SECONDS:-30}
+      EIREL_ENSEMBLE_JUDGE_BASE_URL: ${EIREL_ENSEMBLE_JUDGE_BASE_URL:-}
+      EIREL_ENSEMBLE_JUDGE_API_KEY: ${EIREL_ENSEMBLE_JUDGE_API_KEY:-}
+      EIREL_ENSEMBLE_JUDGE_MODEL: ${EIREL_ENSEMBLE_JUDGE_MODEL:-}
+      EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD: ${EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD:-0.20}
+      EIRETES_JUDGE_PORT: "8095"
+    ports:
+      - "${EIRETES_JUDGE_HOST_PORT:-18095}:8095"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8095/healthz').read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # Polls the operator's owner-api for tasks, invokes miners over HTTP,
   # submits judged results. The main validator workload.
   validator-engine:
     <<: *validator-run
     command: ["validator-engine"]
     environment:
-      OWNER_API_URL: ${OPERATOR_OWNER_API_URL}
-      EIREL_VALIDATOR_WALLET_NAME: ${VALIDATOR_WALLET_NAME}
-      EIREL_VALIDATOR_HOTKEY_NAME: ${VALIDATOR_HOTKEY_NAME}
+      OWNER_API_URL: ${OWNER_API_URL}
+      EIREL_VALIDATOR_WALLET_NAME: ${EIREL_VALIDATOR_WALLET_NAME}
+      EIREL_VALIDATOR_HOTKEY_NAME: ${EIREL_VALIDATOR_HOTKEY_NAME}
       EIREL_VALIDATOR_ACTIVE_FAMILIES: ${EIREL_VALIDATOR_ACTIVE_FAMILIES:-general_chat}
       EIREL_VALIDATOR_AUTO_LOOP: "true"
+      EIREL_JUDGE_SERVICE_URL: ${EIREL_JUDGE_SERVICE_URL:-http://eiretes-judge:8095}
+      EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
       BITTENSOR_NETWORK: ${BITTENSOR_NETWORK}
       BITTENSOR_NETUID: ${BITTENSOR_NETUID}
+    depends_on:
+      eiretes-judge:
+        condition: service_healthy
     ports:
       - "${VALIDATOR_ENGINE_HOST_PORT:-18010}:8010"
 
@@ -50,9 +104,9 @@ services:
     <<: *validator-run
     command: ["weight-setter"]
     environment:
-      OWNER_API_URL: ${OPERATOR_OWNER_API_URL}
-      EIREL_VALIDATOR_WALLET_NAME: ${VALIDATOR_WALLET_NAME}
-      EIREL_VALIDATOR_HOTKEY_NAME: ${VALIDATOR_HOTKEY_NAME}
+      OWNER_API_URL: ${OWNER_API_URL}
+      EIREL_VALIDATOR_WALLET_NAME: ${EIREL_VALIDATOR_WALLET_NAME}
+      EIREL_VALIDATOR_HOTKEY_NAME: ${EIREL_VALIDATOR_HOTKEY_NAME}
       BITTENSOR_NETWORK: ${BITTENSOR_NETWORK}
       BITTENSOR_NETUID: ${BITTENSOR_NETUID}
     ports:

@@ -80,103 +80,6 @@ class EvaluationTaskManager:
     def settings(self):
         return self._owner.settings
 
-    # ------------------------------------------------------------------
-    # Server-side judge proxy (C4)
-    # ------------------------------------------------------------------
-
-    def run_judge_for_assignment(
-        self,
-        session: Session,
-        *,
-        task_assignment_id: str,
-        miner_response: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Run the judge server-side for a given task assignment.
-
-        Loads the full task definition (with ``expected_output`` rubric) from
-        the stored run bundle, builds the judge excerpt, calls the eiretes
-        judge sidecar via :class:`JudgeServiceClient`, and returns the
-        ``{task_score, judge_output}`` pair without ever exposing the rubric
-        to the calling validator.
-
-        Raises ``LookupError`` if the assignment or bundle is missing, and
-        any exception from the judge client if the sidecar is unreachable.
-        """
-        task = session.get(MinerEvaluationTask, task_assignment_id)
-        if task is None:
-            raise LookupError(f"task_assignment {task_assignment_id!r} not found")
-        bundle = self._owner.run_evaluation_bundle(
-            session, run_id=task.run_id, family_id=task.family_id,
-        )
-        if not isinstance(bundle, dict):
-            raise LookupError(
-                f"no evaluation bundle for run={task.run_id!r} family={task.family_id!r}"
-            )
-        task_def: dict[str, Any] | None = None
-        for candidate in bundle.get("tasks", []) or []:
-            if isinstance(candidate, dict) and candidate.get("task_id") == task.task_id:
-                task_def = candidate
-                break
-        if task_def is None:
-            raise LookupError(
-                f"task_id={task.task_id!r} not found in bundle for run={task.run_id!r}"
-            )
-
-        # Build the judge excerpt from the FULL (unstripped) server-side
-        # task definition. The validator supplies the raw miner response;
-        # the rubric stays inside the owner process.
-        from shared.benchmark._judge import build_judge_excerpt
-        from shared.core.evaluation_models import BenchmarkTaskRun
-        from shared.core.judge_client import JudgeServiceClient
-
-        task_run = BenchmarkTaskRun(
-            task_id=task.task_id,
-            family_id=task.family_id,
-            prompt=str(task_def.get("prompt") or ""),
-            expected_output=dict(task_def.get("expected_output") or {}),
-            response=dict(miner_response.get("response") or {}),
-            status=str(miner_response.get("status") or "completed"),
-            error=miner_response.get("error"),
-            metadata=dict(miner_response.get("metadata") or {}),
-        )
-        excerpt = build_judge_excerpt(family_id=task.family_id, run=task_run)
-
-        judge_client = JudgeServiceClient()
-        try:
-            judge_result = judge_client.judge(
-                family_id=task.family_id,
-                prompt=task_run.prompt,
-                response_excerpt=excerpt,
-            )
-        finally:
-            judge_client.close()
-        quality_score = float(getattr(judge_result, "score", 0.0) or 0.0)
-
-        # Layered post-judge scoring: if the miner voluntarily reports
-        # response_text + trace + conversation_id in its response dict,
-        # run the full general_chat pipeline — trace integrity gate,
-        # body-overlap check, honeytoken short-circuit, latency axis,
-        # and economic penalty on gate failure. Otherwise, fall through
-        # to the legacy judge-direct behavior.
-        final_score = quality_score
-        conversation_score_payload: dict[str, Any] | None = None
-        if task.family_id == "general_chat":
-            final_score, conversation_score_payload = self._layered_general_chat_score(
-                session=session,
-                task=task,
-                task_def=task_def,
-                raw_miner_response=miner_response,
-                quality_score=quality_score,
-            )
-
-        result: dict[str, Any] = {
-            "task_score": final_score,
-            "judge_output": judge_result.model_dump(mode="json"),
-        }
-        if conversation_score_payload is not None:
-            result["conversation_score"] = conversation_score_payload
-        return result
-
     def _layered_general_chat_score(
         self,
         *,
@@ -702,6 +605,42 @@ class EvaluationTaskManager:
             (count for hotkey, count in rows if hotkey == task.miner_hotkey), 0
         )
         return {"miner_remaining": miner_remaining, "family_remaining": family_remaining}
+
+    def finalize_run_family(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        family_id: str,
+    ) -> None:
+        miners = list(session.execute(
+            select(MinerEvaluationTask.miner_hotkey)
+            .where(MinerEvaluationTask.run_id == run_id)
+            .where(MinerEvaluationTask.family_id == family_id)
+            .where(MinerEvaluationTask.status == "evaluated")
+            .distinct()
+        ).scalars())
+        if not miners:
+            return
+        for miner_hotkey in miners:
+            summary = session.execute(
+                select(MinerEvaluationSummary).where(
+                    MinerEvaluationSummary.run_id == run_id,
+                    MinerEvaluationSummary.family_id == family_id,
+                    MinerEvaluationSummary.miner_hotkey == miner_hotkey,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if summary is None or summary.status == "scored":
+                continue
+            self._on_miner_evaluation_complete(
+                session,
+                run_id=run_id,
+                family_id=family_id,
+                miner_hotkey=miner_hotkey,
+            )
+        self._on_family_evaluation_complete(
+            session, run_id=run_id, family_id=family_id,
+        )
 
     def _on_miner_evaluation_complete(
         self,

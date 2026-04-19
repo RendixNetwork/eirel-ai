@@ -256,8 +256,8 @@ class RunManager:
                 if source_type == "s3":
                     raise RuntimeError(
                         f"no active OwnerDatasetBinding for family={family_id!r} "
-                        f"run_id={run_id!r}; run `eirel-dataset-forge generate "
-                        f"--run-id {run_id}` or enable auto_trigger_dataset_forge"
+                        f"run_id={run_id!r}; enable auto_trigger_dataset_forge "
+                        f"or generate the binding out-of-band"
                     )
                 # Filesystem mode: fall back to disk loader.
             else:
@@ -635,6 +635,11 @@ class RunManager:
             .values(status="expired", updated_at=now)
         )
         session.flush()
+
+        for family_id in PRODUCTION_FAMILIES:
+            self._owner.evaluation_tasks.finalize_run_family(
+                session, run_id=run_id, family_id=family_id,
+            )
 
         session.execute(delete(RunFamilyResult).where(RunFamilyResult.run_id == run_id))
         for family_id in PRODUCTION_FAMILIES:

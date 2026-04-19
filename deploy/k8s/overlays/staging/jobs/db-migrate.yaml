@@ -16,7 +16,7 @@ spec:
         - name: db-migrate
           image: ghcr.io/eirel/owner-api:latest
           imagePullPolicy: Always
-          command: ["db-migrate"]
+          command: ["eirel-ai", "migrate"]
           envFrom:
             - configMapRef:
                 name: eirel-control-plane-config

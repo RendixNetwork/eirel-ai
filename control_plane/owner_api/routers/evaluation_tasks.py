@@ -2,12 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import asyncio
-
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
 
-from shared.common.models import MinerEvaluationTask
 from control_plane.owner_api.dependencies import validator_dependency
 from control_plane.owner_api.managed import ManagedOwnerServices
 from control_plane.owner_api.schemas import (
@@ -18,14 +14,6 @@ from control_plane.owner_api.schemas import (
     TaskResultSubmission,
 )
 
-
-class JudgeProxyRequest(BaseModel):
-    miner_response: dict[str, object] = Field(default_factory=dict)
-
-
-class JudgeProxyResponse(BaseModel):
-    task_score: float
-    judge_output: dict[str, object]
 
 router = APIRouter(tags=["evaluation-tasks"])
 
@@ -134,65 +122,6 @@ async def submit_task_result(
             family_evaluation_complete=result["family_evaluation_complete"],
             remaining_task_count=result["remaining_task_count"],
         )
-
-
-@router.post(
-    "/v1/families/{family_id}/tasks/{task_assignment_id}/judge",
-    response_model=JudgeProxyResponse,
-)
-async def judge_task_proxy(
-    request: Request,
-    family_id: str,
-    task_assignment_id: str,
-    payload: JudgeProxyRequest,
-    validator_hotkey: str = Depends(validator_dependency),
-) -> JudgeProxyResponse:
-    """C4: run the judge server-side for a task the validator has claimed.
-
-    Validators no longer receive ``expected_output`` (the grading rubric)
-    in the claim payload. Instead, after invoking the miner they POST the
-    miner response here and receive back ``{task_score, judge_output}``.
-    The rubric never leaves the owner process, so a validator that is
-    also a miner cannot learn the rubric by claiming tasks in bulk.
-
-    Gated on the validator signature; the caller must be the validator
-    that currently holds the claim on ``task_assignment_id``.
-    """
-    services: ManagedOwnerServices = request.app.state.services
-
-    # Guard: the caller must hold the active claim on this assignment.
-    with services.db.sessionmaker() as session:
-        task = session.get(MinerEvaluationTask, task_assignment_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail="task_assignment_not_found")
-        if task.family_id != family_id:
-            raise HTTPException(status_code=404, detail="task_assignment_family_mismatch")
-        if task.claimed_by_validator != validator_hotkey:
-            raise HTTPException(status_code=403, detail="not_claimed_by_caller")
-        if task.status != "claimed":
-            raise HTTPException(status_code=409, detail=f"task_in_status_{task.status}")
-
-    # Run the judge server-side. ``run_judge_for_assignment`` is a sync
-    # method that calls the sync ``JudgeServiceClient``; offload it so we
-    # don't block the async event loop.
-    def _invoke() -> dict[str, object]:
-        with services.db.sessionmaker() as session:
-            return services.evaluation_tasks.run_judge_for_assignment(
-                session,
-                task_assignment_id=task_assignment_id,
-                miner_response=payload.miner_response,
-            )
-
-    try:
-        result = await asyncio.to_thread(_invoke)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"judge_proxy_failed: {exc}")
-    return JudgeProxyResponse(
-        task_score=float(result.get("task_score", 0.0)),
-        judge_output=dict(result.get("judge_output", {})),
-    )
 
 
 @router.get(
