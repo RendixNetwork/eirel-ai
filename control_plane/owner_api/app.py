@@ -35,6 +35,7 @@ from control_plane.owner_api.routers import (
     submissions,
     deployments,
     datasets,
+    dashboard,
     evaluation_tasks,
     runs,
     scoring,
@@ -428,6 +429,7 @@ app.include_router(datasets.router)
 app.include_router(runtime.router)
 app.include_router(validators.router)
 app.include_router(internal.router)
+app.include_router(dashboard.router)
 
 from control_plane.owner_api.routers import admin as admin_router
 app.include_router(admin_router.router)
