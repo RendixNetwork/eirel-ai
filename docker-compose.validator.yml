@@ -26,14 +26,7 @@
 # -----------------------------------------------------------------------------
 
 x-validator-run: &validator-run
-  image: eirel-ai:latest
-  # Pre-launch: build from the sibling eirel-ai source. Once eirel ships
-  # to PyPI and eirel-ai publishes an image, switch to `image: ...` only
-  # and drop this build block.
-  build:
-    context: ..
-    dockerfile: eirel-ai/Dockerfile.local
-    target: base
+  image: ${DOCKERHUB_NAMESPACE:-rendixnetwork}/eirel-ai:${EIREL_AI_IMAGE_TAG:-latest}
   working_dir: /app/eirel-ai
   env_file: .env.validator
   volumes:
@@ -46,15 +39,9 @@ services:
   # LLM judge sidecar. Validator-engine calls this per evaluated task.
   # You supply the Chutes API key; this container pays the LLM bill
   # against your account.
-  #
-  # Pre-launch local build: uses eiretes/Dockerfile.local which installs
-  # eirel from the sibling directory. Once eirel ships to PyPI, switch to
-  # `image: ghcr.io/rendixnetwork/eiretes:<tag>` and drop the build block.
   eiretes-judge:
-    image: eiretes-judge:local
-    build:
-      context: ..
-      dockerfile: eiretes/Dockerfile.local
+    image: ${DOCKERHUB_NAMESPACE:-rendixnetwork}/eiretes:${EIRETES_IMAGE_TAG:-latest}
+    container_name: eiretes-judge
     env_file: .env.validator
     environment:
       EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
@@ -80,6 +67,7 @@ services:
   # submits judged results. The main validator workload.
   validator-engine:
     <<: *validator-run
+    container_name: validator-engine
     command: ["validator-engine"]
     environment:
       OWNER_API_URL: ${OWNER_API_URL}
@@ -102,6 +90,7 @@ services:
   # validator-engine loop.
   weight-setter:
     <<: *validator-run
+    container_name: weight-setter
     command: ["weight-setter"]
     environment:
       OWNER_API_URL: ${OWNER_API_URL}
@@ -111,3 +100,21 @@ services:
       BITTENSOR_NETUID: ${BITTENSOR_NETUID}
     ports:
       - "${WEIGHT_SETTER_HOST_PORT:-18012}:8012"
+
+  # Polls Docker Hub for new image digests and restarts the three validator
+  # services in place when a new image is published under the tracked tag
+  # (default :latest). WATCHTOWER_POLL_INTERVAL is in seconds; 300 (5 min)
+  # is a reasonable default, lower values hammer the registry.
+  watchtower:
+    image: nickfedor/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - --interval
+      - ${WATCHTOWER_POLL_INTERVAL:-300}
+      - --cleanup
+      - eiretes-judge
+      - validator-engine
+      - weight-setter

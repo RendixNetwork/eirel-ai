@@ -3,37 +3,18 @@
 # the k3s-hosted owner-api. For running a validator as a third party, see
 # docker-compose.validator.yml + .env.validator.example + README.validator.md.
 #
-# Shared image: every service below runs the same eirel-ai:latest image,
-# differing only in command. Only the orchestrator owns the ``build:`` block;
-# the rest reference the built image via ``image: eirel-ai:latest`` to avoid
-# a Docker Bake race on parallel build targets. Build explicitly with:
+# Images are pulled from Docker Hub; there are no local build blocks.
+# Override the namespace / tag via env vars:
 #
-#     docker compose build orchestrator
+#     DOCKERHUB_NAMESPACE  Docker Hub user/org that owns the images (default: rendixnetwork)
+#     EIREL_AI_IMAGE_TAG   Image tag to pull (default: latest)
 #
 # owner-api is NOT in compose — it runs in k3s under
 # ``deploy/k8s/owner-api-hybrid/``. Compose callers reach it via
 # ``${SERVER_A_HOST_IP}:${OWNER_API_NODEPORT}``.
 # -----------------------------------------------------------------------------
-x-eirel-ai-build: &eirel-ai-build
-  image: eirel-ai:latest
-  build:
-    context: ..
-    dockerfile: eirel-ai/Dockerfile.local
-    target: base
-  working_dir: /app/eirel-ai
-  env_file: .env
-
 x-eirel-ai-run: &eirel-ai-run
-  image: eirel-ai:latest
-  working_dir: /app/eirel-ai
-  env_file: .env
-
-x-eirel-ai-test: &eirel-ai-test
-  image: eirel-ai-test:latest
-  build:
-    context: ..
-    dockerfile: eirel-ai/Dockerfile.local
-    target: test
+  image: ${DOCKERHUB_NAMESPACE:-rendixnetwork}/eirel-ai:${EIREL_AI_IMAGE_TAG:-latest}
   working_dir: /app/eirel-ai
   env_file: .env
 
@@ -56,15 +37,11 @@ services:
 
   # owner-api runs in k3s (deploy/k8s/owner-api-hybrid/).  Compose
   # services reach it via ``${SERVER_A_HOST_IP}:${OWNER_API_NODEPORT}``
-  # (see ``OWNER_API_URL`` env on each caller below).  The orchestrator
-  # below owns the build: block for the shared eirel-ai:latest image
-  # now that owner-api is out of compose.
+  # (see ``OWNER_API_URL`` env on each caller below).
 
   orchestrator:
-    <<: *eirel-ai-build
+    <<: *eirel-ai-run
     command: ["orchestrator"]
-    volumes:
-      - ..:/app
     environment:
       DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
       REDIS_URL: redis://redis:6379/0
@@ -96,8 +73,6 @@ services:
   execution-worker:
     <<: *eirel-ai-run
     command: ["execution-worker"]
-    volumes:
-      - ..:/app
     environment:
       DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
       REDIS_URL: redis://redis:6379/0
@@ -129,8 +104,6 @@ services:
   consumer-chat-api:
     <<: *eirel-ai-run
     command: ["consumer-chat-api"]
-    volumes:
-      - ..:/app
     environment:
       CONSUMER_API_KEYS: ${CONSUMER_API_KEYS:-staging-consumer-key}
       ORCHESTRATOR_URL: http://orchestrator:8050
@@ -151,8 +124,6 @@ services:
   metagraph-listener:
     <<: *eirel-ai-run
     command: ["metagraph-listener"]
-    volumes:
-      - ..:/app
     environment:
       DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
       METAGRAPH_SNAPSHOT_PATH: ${METAGRAPH_SNAPSHOT_PATH:-}
@@ -171,8 +142,6 @@ services:
   provider-proxy:
     <<: *eirel-ai-run
     command: ["eirel-provider-proxy"]
-    volumes:
-      - ..:/app
     environment:
       REDIS_URL: redis://redis:6379/0
       EIREL_PROVIDER_PROXY_MASTER_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
@@ -188,8 +157,6 @@ services:
   web-search-tool-service:
     <<: *eirel-ai-run
     command: ["web-search-tool-service"]
-    volumes:
-      - ..:/app
     environment:
       EIREL_WEB_SEARCH_TOOL_BACKEND: ${EIREL_WEB_SEARCH_TOOL_BACKEND:-catalog}
       EIREL_WEB_SEARCH_TOOL_BACKENDS: ${EIREL_WEB_SEARCH_TOOL_BACKENDS:-}
@@ -216,8 +183,6 @@ services:
   x-tool-service:
     <<: *eirel-ai-run
     command: ["x-tool-service"]
-    volumes:
-      - ..:/app
     environment:
       EIREL_X_TOOL_API_TOKEN: ${EIREL_X_TOOL_API_TOKEN:-}
       EIREL_X_BEARER_TOKEN: ${EIREL_X_BEARER_TOKEN:-}
@@ -240,8 +205,6 @@ services:
   semantic-scholar-tool-service:
     <<: *eirel-ai-run
     command: ["semantic-scholar-tool-service"]
-    volumes:
-      - ..:/app
     environment:
       EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN: ${EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN:-}
       EIREL_SEMANTIC_SCHOLAR_API_KEY: ${EIREL_SEMANTIC_SCHOLAR_API_KEY:-}
@@ -263,8 +226,6 @@ services:
   sandbox-tool-service:
     <<: *eirel-ai-run
     command: ["sandbox-tool-service"]
-    volumes:
-      - ..:/app
     # Hardening: run unprivileged, drop all caps, no new privileges,
     # no network, read-only fs with scratch tmpfs. The SubprocessBackend
     # enforces resource limits inside this container; the container
@@ -357,13 +318,6 @@ services:
       - "${GRAFANA_HOST_PORT:-13000}:3000"
     depends_on:
       - prometheus
-
-  subnet-tests:
-    profiles: ["test"]
-    <<: *eirel-ai-test
-    command: ["pytest", "tests/test_control_plane_reset.py", "-q"]
-    volumes:
-      - ..:/app
 
 volumes:
   postgres_data:
