@@ -16,7 +16,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: research-tool-service
-          image: ghcr.io/eirel/research-tool-service:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["research-tool-service"]
           envFrom:
@@ -66,7 +66,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: owner-api
-          image: ghcr.io/eirel/owner-api:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["owner-api"]
           envFrom:
@@ -122,7 +122,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: api-gateway
-          image: ghcr.io/eirel/api-gateway:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["api-gateway"]
           envFrom:
@@ -171,7 +171,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: execution-worker
-          image: ghcr.io/eirel/execution-worker:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["execution-worker"]
           envFrom:
@@ -220,7 +220,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: consumer-chat-api
-          image: ghcr.io/eirel/consumer-chat-api:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["consumer-chat-api"]
           envFrom:
@@ -269,7 +269,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: validator-engine
-          image: ghcr.io/eirel/validator-engine:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["validator-engine"]
           envFrom:
@@ -318,7 +318,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: metagraph-listener
-          image: ghcr.io/eirel/metagraph-listener:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["metagraph-listener"]
           envFrom:
@@ -367,7 +367,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: weight-setter
-          image: ghcr.io/eirel/weight-setter:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["weight-setter"]
           envFrom:
@@ -416,7 +416,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: provider-proxy
-          image: ghcr.io/eirel/provider-proxy:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["eirel-provider-proxy"]
           envFrom:

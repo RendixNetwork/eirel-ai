@@ -14,7 +14,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: cluster-smoke
-          image: ghcr.io/eirel/owner-api:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["eirel-cluster-smoke"]
           args:

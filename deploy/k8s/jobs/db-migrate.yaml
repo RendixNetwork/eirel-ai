@@ -14,7 +14,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: db-migrate
-          image: ghcr.io/eirel/owner-api:latest
+          image: rendixnetwork/eirel-ai:latest
           imagePullPolicy: Always
           command: ["eirel-ai", "migrate"]
           envFrom:

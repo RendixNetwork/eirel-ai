@@ -3,17 +3,18 @@ kind: ConfigMap
 metadata:
   name: owner-api-config
   namespace: eirel-control-plane
+# -----------------------------------------------------------------------------
+# Deployment-agnostic defaults for owner-api. Anything environment-specific
+# (chain, wallets, images, endpoints) is supplied by configmap.env via
+# kustomize configMapGenerator with behavior: merge (see kustomization.yaml).
+# -----------------------------------------------------------------------------
 data:
-  # -- Runtime backend (kubernetes, in-cluster) ---
+  # -- Runtime backend (in-cluster k3s) ---
   OWNER_RUNTIME_BACKEND: kubernetes
   EIREL_OWNER_KUBECONFIG_PATH: ""
   EIREL_OWNER_RUNTIME_NAMESPACE: eirel-miners
   EIREL_OWNER_RUNTIME_SYSTEM_NAMESPACE: eirel-system
   EIREL_OWNER_RUNTIME_SERVICE_DOMAIN: svc.cluster.local
-  # Replace with your own registry before applying this manifest, e.g.
-  # `kubectl -n eirel-control-plane patch cm owner-api-config --patch \
-  #   '{"data":{"EIREL_OWNER_RUNTIME_IMAGE":"registry.example.com:5000/miner-runtime:v1"}}'`
-  EIREL_OWNER_RUNTIME_IMAGE: registry.example.com:5000/miner-runtime:v1
   EIREL_OWNER_RUNTIME_SHARED_SECRET_NAME: eirel-runtime-shared
   EIREL_OWNER_RUNTIME_SUBMISSION_CPU_MILLIS: "2000"
   EIREL_OWNER_RUNTIME_SUBMISSION_MEMORY_MB: "2048"
@@ -30,19 +31,11 @@ data:
   OWNER_RUNTIME_CAPACITY_CPU_HEADROOM_MILLIS: "500"
   OWNER_RUNTIME_CAPACITY_MEMORY_HEADROOM_MB: "512"
   OWNER_RUNTIME_CAPACITY_POD_HEADROOM: "1"
-  # -- Bittensor / metagraph ---
-  BITTENSOR_NETWORK: test
-  BITTENSOR_NETUID: "144"
+  # -- Metagraph ---
   MINIMUM_VALIDATOR_STAKE: "0"
   METAGRAPH_SNAPSHOT_PATH: ""
-  # -- Owner identity ---
-  # Point these at the local Bittensor wallet that signs owner-admin API
-  # requests. The wallet is expected at
-  # ~/.bittensor/wallets/<NAME>/hotkeys/<HOTKEY> on the k3s node.
-  EIREL_OWNER_WALLET_NAME: your-owner-wallet
-  EIREL_OWNER_HOTKEY_NAME: your-owner-hotkey
   # -- Tool backend toggles ---
-  EIREL_WEB_SEARCH_TOOL_BACKEND: catalog
+  EIREL_WEB_SEARCH_TOOL_BACKENDS: brave,serper,tavily
   PLATFORM_TOOLS_ENABLED: "true"
   # -- Archive / submission limits ---
   ARCHIVE_LIMIT_BYTES: "209715200"
@@ -54,10 +47,32 @@ data:
   OBJECT_STORAGE_BACKEND: filesystem
   ARTIFACT_STORAGE_ROOT: /tmp/eirel-managed-artifacts
   ARTIFACT_STORAGE_BUCKET: eirel-managed-local
-  # -- Dataset paths ---
+  # -- Dataset paths (in-image data) ---
   EIREL_OWNER_DATASET_ROOT_PATH: /app/eirel-ai/data/owner_datasets/families
   EIREL_OWNER_DATASET_SOURCE_TYPE: filesystem
+  EIREL_CALIBRATION_FIXTURES_ROOT_PATH: /app/eirel-ai/data/calibration
+  EIREL_WORKFLOW_CORPUS_ROOT_PATH: /app/eirel-ai/data/workflow_corpus
+  EIREL_RESEARCH_TOOL_CATALOG_PATH: /app/eirel-ai/data/research_tool_catalog.json
   # -- Self-referencing URL (pod-local) ---
   OWNER_API_INTERNAL_URL: http://localhost:8000
+  # -- Redis pool ---
+  USE_REDIS_POOL: "1"
+  # -- Launch family pinning (only general_chat is active) ---
+  EIREL_ACTIVE_FAMILIES: general_chat
+  EIREL_FAMILY_WEIGHTS: general_chat:1.0
+  # -- Task / execution queue (must match compose-hosted execution-worker) ---
+  TASK_QUORUM: "1"
+  MAX_TASK_ATTEMPTS: "3"
+  MAX_INFLIGHT_TASKS_PER_SUBMISSION: "2"
+  LEASE_SECONDS: "60"
+  ASSIGNMENT_TIMEOUT_SECONDS: "600"
+  RESULT_AGGREGATION_INTERVAL_SECONDS: "3"
+  EXECUTION_STREAM_NAME: eirel:tasks
+  EXECUTION_STREAM_GROUP: execution-workers
+  # -- general_chat latency budgets (seconds) ---
+  EIREL_GENERAL_CHAT_INSTANT_LATENCY_S: "15"
+  EIREL_GENERAL_CHAT_THINKING_LATENCY_S: "60"
+  EIREL_GENERAL_CHAT_INSTANT_WEB_LATENCY_S: "20"
+  EIREL_GENERAL_CHAT_THINKING_WEB_LATENCY_S: "75"
   # -- Validator / scoring ---
   VALIDATOR_EPOCH_QUORUM: "1"

@@ -12,7 +12,7 @@ from control_plane.owner_api.dashboard.schemas import (
     MinerRunsResponse,
     OverviewResponse,
     RunDetailResponse,
-    WindowLiteral,
+    RunListResponse,
 )
 from control_plane.owner_api.managed import ManagedOwnerServices
 
@@ -39,8 +39,13 @@ def _ttl_for(response: object) -> float:
     entries = getattr(response, "entries", None)
     if entries and any(getattr(e, "is_running", False) for e in entries):
         return _OPEN_RUN_TTL
-    # RunDetailResponse for an open run.
+    # RunDetailResponse or OverviewResponse for an open run.
     if getattr(response, "status", None) == "open":
+        return _OPEN_RUN_TTL
+    if getattr(response, "current_run_status", None) == "open":
+        return _OPEN_RUN_TTL
+    # LeaderboardResponse targeting an open run.
+    if getattr(response, "run_status", None) == "open":
         return _OPEN_RUN_TTL
     return _CLOSED_RUN_TTL
 
@@ -54,7 +59,7 @@ async def get_overview(request: Request) -> OverviewResponse:
         return cached  # type: ignore[return-value]
     with services.db.sessionmaker() as session:
         result = queries.fetch_overview(session, services=services)
-    _CACHE.set(key, result, ttl=_CLOSED_RUN_TTL)
+    _CACHE.set(key, result, ttl=_ttl_for(result))
     return result
 
 
@@ -71,17 +76,32 @@ async def get_families(request: Request) -> FamiliesResponse:
     return result
 
 
+@router.get("/runs", response_model=RunListResponse)
+async def get_runs(request: Request) -> RunListResponse:
+    services: ManagedOwnerServices = request.app.state.services
+    key = ("runs",)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+    with services.db.sessionmaker() as session:
+        result = queries.fetch_runs(session, services=services)
+    # Short TTL if any run is open, otherwise 30s.
+    ttl = _OPEN_RUN_TTL if any(r.status == "open" for r in result.runs) else _CLOSED_RUN_TTL
+    _CACHE.set(key, result, ttl=ttl)
+    return result
+
+
 @router.get("/leaderboard", response_model=LeaderboardResponse)
 async def get_leaderboard(
     request: Request,
     family_id: str = Query(...),
-    window: WindowLiteral = Query(default="latest"),
+    run_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> LeaderboardResponse:
     family_id = _validate_family_id(family_id)
     services: ManagedOwnerServices = request.app.state.services
-    key = ("leaderboard", family_id, window, limit, offset)
+    key = ("leaderboard", family_id, run_id or "latest", limit, offset)
     cached = _CACHE.get(key)
     if cached is not None:
         return cached  # type: ignore[return-value]
@@ -90,7 +110,7 @@ async def get_leaderboard(
             session,
             services=services,
             family_id=family_id,
-            window=window,
+            run_id=run_id,
             limit=limit,
             offset=offset,
         )

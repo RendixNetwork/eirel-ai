@@ -1,0 +1,56 @@
+# Secrets / env overlays — NEVER bake into images
+.env
+.env.*
+*.env
+!.env.example
+!.env.*.example
+deploy/k8s/**/secret.env
+deploy/k8s/**/configmap.env
+
+# Git & local state
+.git
+.gitignore
+.gitattributes
+
+# Python build noise
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.tox
+**/.coverage
+**/htmlcov
+**/.venv
+**/venv
+*.egg-info
+build/
+dist/
+
+# Node (leaderboard frontend if co-located)
+**/node_modules
+**/.next
+**/out
+
+# Editor / OS
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docker build-time artifacts (don't need them inside the image)
+docker-compose*.yml
+.dockerignore
+Dockerfile*
+
+# Local databases / logs / artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+artifacts/
+/tmp/

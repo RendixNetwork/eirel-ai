@@ -10,7 +10,11 @@ __pycache__/
 .env.local
 .env.validator
 deploy/k8s/overlays/staging/secret.env
+deploy/k8s/overlays/staging/configmap.env
 deploy/k8s/owner-api-hybrid/secret.env
+deploy/k8s/owner-api-hybrid/configmap.env
+deploy/k8s/overlays/production/secret.env
+deploy/k8s/overlays/production/configmap.env
 local/*
 !local/.gitkeep
 !local/*.example

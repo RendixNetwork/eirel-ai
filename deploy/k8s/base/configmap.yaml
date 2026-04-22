@@ -3,11 +3,22 @@ kind: ConfigMap
 metadata:
   name: eirel-control-plane-config
   namespace: eirel
+# -----------------------------------------------------------------------------
+# Mode-B "full k8s" base ConfigMap. Deployment-agnostic defaults only; every
+# environment-specific value (chain, wallets, external URLs, external DB/Redis,
+# judge endpoints, rate limits) comes from overlays/{staging,production}/
+# configmap.env via kustomize configMapGenerator(behavior: merge).
+#
+# In-cluster service URLs below assume the overlay namespace is `eirel`. For
+# production the overlay patches the namespace and these hostnames (`eirel-prod`
+# etc.) via configmap-patch.yaml.
+# -----------------------------------------------------------------------------
 data:
+  # -- In-cluster service URLs (namespace-dependent; overlay may patch) ---
   REDIS_URL: redis://redis.eirel.svc.cluster.local:6379/0
   OWNER_API_URL: http://owner-api.eirel.svc.cluster.local:8000
-  OWNER_API_PUBLIC_URL: http://owner-api.eirel.svc.cluster.local:8000
   OWNER_API_INTERNAL_URL: http://owner-api.eirel.svc.cluster.local:8000
+  OWNER_API_PUBLIC_URL: http://owner-api.eirel.svc.cluster.local:8000
   API_GATEWAY_URL: http://api-gateway.eirel.svc.cluster.local:8000
   API_GATEWAY_PUBLIC_URL: http://api-gateway.eirel.svc.cluster.local:8000
   CONTROL_PLANE_INTERNAL_URL: http://api-gateway.eirel.svc.cluster.local:8000
@@ -16,15 +27,17 @@ data:
   METAGRAPH_LISTENER_PUBLIC_URL: http://metagraph-listener.eirel.svc.cluster.local:8011
   WEIGHT_SETTER_PUBLIC_URL: http://weight-setter.eirel.svc.cluster.local:8012
   PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel.svc.cluster.local:8092
-  RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel.svc.cluster.local:8085
   EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel.svc.cluster.local:8092
+  EIREL_BENCHMARK_RETRIEVAL_SERVICE_URL: http://retrieval-service.eirel.svc.cluster.local:8081
+  RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel.svc.cluster.local:8085
   EIREL_RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel.svc.cluster.local:8085
+  # -- Research tool policy (stable defaults) ---
   EIREL_RESEARCH_TOOL_POLICY_VERSION: research-live-v1
   EIREL_RESEARCH_TOOL_MAX_REQUESTS: "8"
   EIREL_RESEARCH_TOOL_MAX_QUERIES: "6"
   EIREL_RESEARCH_TOOL_MAX_SELECTED_SOURCES: "5"
   EIREL_RESEARCH_TOOL_TIMEOUT_SECONDS: "15"
-  EIREL_BENCHMARK_RETRIEVAL_SERVICE_URL: http://retrieval-service.eirel.svc.cluster.local:8081
+  # -- Rate limits / scheduling (stable defaults) ---
   VALIDATOR_EPOCH_QUORUM: "1"
   GATEWAY_RATE_LIMIT_REQUESTS: "120"
   GATEWAY_RATE_LIMIT_WINDOW_SECONDS: "60"
@@ -38,11 +51,20 @@ data:
   EXECUTION_WORKER_MAX_RETRIES: "3"
   EXECUTION_WORKER_POLL_INTERVAL_SECONDS: "0.5"
   MINIMUM_VALIDATOR_STAKE: "0"
-  BITTENSOR_NETWORK: finney
-  BITTENSOR_NETUID: "0"
-  OWNER_RUNTIME_BACKEND: baremetal
-  OWNER_KUBECTL_BINARY_PATH: /usr/bin/kubectl
+  METAGRAPH_SYNC_INTERVAL_SECONDS: "60"
+  # -- Owner runtime (k8s backend for Mode B) ---
+  OWNER_RUNTIME_BACKEND: kubernetes
+  EIREL_OWNER_KUBECONFIG_PATH: ""
   EIREL_OWNER_RUNTIME_NAMESPACE: eirel-miners
+  EIREL_OWNER_RUNTIME_SYSTEM_NAMESPACE: eirel-system
+  EIREL_OWNER_RUNTIME_SERVICE_DOMAIN: svc.cluster.local
+  EIREL_OWNER_RUNTIME_SHARED_SECRET_NAME: eirel-runtime-shared
+  EIREL_OWNER_RUNTIME_SUBMISSION_CPU_MILLIS: "2000"
+  EIREL_OWNER_RUNTIME_SUBMISSION_MEMORY_MB: "2048"
+  EIREL_OWNER_RUNTIME_PROBE_PERIOD_SECONDS: "5"
+  EIREL_OWNER_RUNTIME_REAPER_INTERVAL_SECONDS: "30"
+  EIREL_OWNER_PENDING_CAPACITY_RETRY_INTERVAL_SECONDS: "30"
+  OWNER_KUBECTL_BINARY_PATH: /usr/bin/kubectl
   OWNER_RUNTIME_SERVICE_ACCOUNT: default
   OWNER_RUNTIME_INIT_IMAGE: curlimages/curl:8.7.1
   OWNER_RUNTIME_HEALTH_TIMEOUT_SECONDS: "60"
@@ -55,6 +77,7 @@ data:
   OWNER_RUNTIME_CAPACITY_CPU_HEADROOM_MILLIS: "500"
   OWNER_RUNTIME_CAPACITY_MEMORY_HEADROOM_MB: "512"
   OWNER_RUNTIME_CAPACITY_POD_HEADROOM: "1"
+  # -- Artifact storage (overlay may switch OBJECT_STORAGE_BACKEND to s3) ---
   OBJECT_STORAGE_BACKEND: filesystem
   OBJECT_STORAGE_ENDPOINT_URL: ""
   OBJECT_STORAGE_REGION: ""
@@ -63,4 +86,14 @@ data:
   OBJECT_STORAGE_ADDRESSING_STYLE: auto
   ARTIFACT_STORAGE_ROOT: /var/lib/eirel/artifacts
   ARTIFACT_STORAGE_BUCKET: eirel-managed
+  # -- Tool backend toggles (stable defaults) ---
+  EIREL_WEB_SEARCH_TOOL_BACKEND: catalog
+  PLATFORM_TOOLS_ENABLED: "true"
+  # -- Archive / submission limits (stable defaults) ---
+  ARCHIVE_LIMIT_BYTES: "209715200"
+  EIREL_SUBMISSION_FEE_TAO: "0"
+  EIREL_SUBMISSION_TREASURY_ADDRESS: ""
+  # -- Dataset paths (in-image data) ---
+  EIREL_OWNER_DATASET_ROOT_PATH: /app/eirel-ai/data/owner_datasets/families
+  EIREL_OWNER_DATASET_SOURCE_TYPE: filesystem
   METAGRAPH_SNAPSHOT_PATH: ""

@@ -2,19 +2,23 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: eirel-control-plane-config
+  # Match base's ORIGINAL namespace. The overlay's top-level namespace:
+  # directive rewrites this to eirel-prod after the patch applies.
   namespace: eirel
+# -----------------------------------------------------------------------------
+# Static patches for production namespace (eirel-prod). Values that differ from
+# the base ConfigMap but are stable across production deploys — hostnames
+# pointing at the eirel-prod namespace, object storage backend toggle.
+#
+# Dynamic / per-deployment values (wallets, chain, judge URLs) come from
+# configmap.env via configMapGenerator(behavior: merge). That gets the final
+# word.
+# -----------------------------------------------------------------------------
 data:
-  REDIS_URL: redis://redis.eirel-prod.svc.cluster.local:6379/0
-  OBJECT_STORAGE_BACKEND: s3
-  OBJECT_STORAGE_ENDPOINT_URL: https://s3.example.com
-  OBJECT_STORAGE_REGION: us-east-1
-  OBJECT_STORAGE_PREFIX: production
-  OBJECT_STORAGE_USE_SSL: "true"
-  OBJECT_STORAGE_ADDRESSING_STYLE: path
-  ARTIFACT_STORAGE_BUCKET: eirel-production-artifacts
+  # -- In-cluster URLs pinned to eirel-prod namespace ---
   OWNER_API_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
-  OWNER_API_PUBLIC_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
   OWNER_API_INTERNAL_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
+  OWNER_API_PUBLIC_URL: http://owner-api.eirel-prod.svc.cluster.local:8000
   API_GATEWAY_URL: http://api-gateway.eirel-prod.svc.cluster.local:8000
   API_GATEWAY_PUBLIC_URL: http://api-gateway.eirel-prod.svc.cluster.local:8000
   CONTROL_PLANE_INTERNAL_URL: http://api-gateway.eirel-prod.svc.cluster.local:8000
@@ -24,4 +28,12 @@ data:
   WEIGHT_SETTER_PUBLIC_URL: http://weight-setter.eirel-prod.svc.cluster.local:8012
   PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
   EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
-  EIREL_OWNER_RUNTIME_NAMESPACE: eirel-prod
+  RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel-prod.svc.cluster.local:8085
+  EIREL_RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel-prod.svc.cluster.local:8085
+  # -- Object storage (production uses external S3) ---
+  OBJECT_STORAGE_BACKEND: s3
+  OBJECT_STORAGE_USE_SSL: "true"
+  OBJECT_STORAGE_ADDRESSING_STYLE: path
+  ARTIFACT_STORAGE_BUCKET: eirel-production-artifacts
+  # -- Miner runtime namespace pinned ---
+  EIREL_OWNER_RUNTIME_NAMESPACE: eirel-prod-miners
