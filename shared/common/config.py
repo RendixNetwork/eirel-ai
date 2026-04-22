@@ -183,7 +183,11 @@ class Settings:
         default_factory=lambda: os.getenv("EIREL_EPOCH_SEED_COMMITMENT", "")
     )
     validator_poll_interval_seconds: float = field(
-        default_factory=lambda: float(os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS", "1"))
+        default_factory=lambda: float(
+            os.getenv("EIREL_VALIDATOR_POLL_INTERVAL_SECONDS")
+            or os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS")
+            or "1"
+        )
     )
     validator_max_concurrent_jobs: int = field(
         default_factory=lambda: int(os.getenv("VALIDATOR_MAX_CONCURRENT_JOBS", "2"))
@@ -441,9 +445,9 @@ class Settings:
     owner_kubectl_binary_path: str = field(
         default_factory=lambda: os.getenv("OWNER_KUBECTL_BINARY_PATH", "/usr/bin/kubectl")
     )
-    owner_runtime_namespace: str = field(
-        default_factory=lambda: os.getenv("OWNER_RUNTIME_NAMESPACE", "eirel")
-    )
+    # owner_runtime_namespace is defined below with EIREL_OWNER_RUNTIME_NAMESPACE;
+    # the earlier duplicate declaration that read OWNER_RUNTIME_NAMESPACE was
+    # shadowed and therefore dead — removed.
     owner_runtime_service_account: str = field(
         default_factory=lambda: os.getenv("OWNER_RUNTIME_SERVICE_ACCOUNT", "default")
     )

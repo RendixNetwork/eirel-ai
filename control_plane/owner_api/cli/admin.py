@@ -18,9 +18,12 @@ Usage:
   eirel-ai admin deployments list [--limit N]
 
 Configuration (env vars):
-  EIREL_ADMIN_API_URL       Owner API base URL (default: http://127.0.0.1:18020)
-  EIREL_ADMIN_WALLET_NAME   Bittensor wallet name (default: owner)
-  EIREL_ADMIN_HOTKEY_NAME   Bittensor hotkey name (default: op1)
+  OWNER_API_PUBLIC_URL      Owner API base URL (default: http://127.0.0.1:18020)
+                            Fallback: EIREL_ADMIN_API_URL (legacy)
+  EIREL_OWNER_WALLET_NAME   Bittensor wallet name (default: owner)
+                            Fallback: EIREL_ADMIN_WALLET_NAME (legacy)
+  EIREL_OWNER_HOTKEY_NAME   Bittensor hotkey name (default: op1)
+                            Fallback: EIREL_ADMIN_HOTKEY_NAME (legacy)
 """
 from __future__ import annotations
 
@@ -37,18 +40,35 @@ from shared.common.bittensor_signing import load_signer, LoadedSigner
 
 
 def _default_base_url() -> str:
-    return os.getenv("EIREL_ADMIN_API_URL", "http://127.0.0.1:18020").rstrip("/")
+    # Canonical is OWNER_API_PUBLIC_URL (same var every other piece uses).
+    # EIREL_ADMIN_API_URL kept as legacy fallback.
+    return (
+        os.getenv("OWNER_API_PUBLIC_URL")
+        or os.getenv("EIREL_ADMIN_API_URL")
+        or "http://127.0.0.1:18020"
+    ).rstrip("/")
 
 
 def _load_owner_signer() -> LoadedSigner:
-    wallet_name = os.getenv("EIREL_ADMIN_WALLET_NAME", "owner")
-    hotkey_name = os.getenv("EIREL_ADMIN_HOTKEY_NAME", "op1")
+    # Aligns with EIREL_OWNER_WALLET_NAME / EIREL_OWNER_HOTKEY_NAME used
+    # everywhere else (.env.compose.example, owner-api ConfigMap, operator
+    # stack). Legacy EIREL_ADMIN_* names still accepted for backward compat.
+    wallet_name = (
+        os.getenv("EIREL_OWNER_WALLET_NAME")
+        or os.getenv("EIREL_ADMIN_WALLET_NAME")
+        or "owner"
+    )
+    hotkey_name = (
+        os.getenv("EIREL_OWNER_HOTKEY_NAME")
+        or os.getenv("EIREL_ADMIN_HOTKEY_NAME")
+        or "op1"
+    )
     try:
         return load_signer(wallet_name=wallet_name, hotkey_name=hotkey_name)
     except Exception as exc:
         sys.stderr.write(
             f"Failed to load wallet {wallet_name}/{hotkey_name}: {exc}\n"
-            f"Set EIREL_ADMIN_WALLET_NAME and EIREL_ADMIN_HOTKEY_NAME if different.\n"
+            f"Set EIREL_OWNER_WALLET_NAME and EIREL_OWNER_HOTKEY_NAME if different.\n"
         )
         sys.exit(2)
 

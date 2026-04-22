@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -15,8 +17,36 @@ from shared.common.metagraph import MetagraphNeuron
 from validation.metagraph_listener.listener import MetagraphSyncService
 
 
+logger = logging.getLogger(__name__)
+
+
 class SyncRunRequest(BaseModel):
     neurons: list[MetagraphNeuron] = Field(default_factory=list)
+
+
+async def _periodic_sync_loop(
+    service: MetagraphSyncService, *, interval_seconds: int,
+) -> None:
+    """Background task: re-sync the metagraph every ``interval_seconds``.
+
+    Runs a sync immediately so the DB is populated without waiting a full
+    interval after startup. Catches and logs per-iteration failures so a
+    transient subtensor RPC error doesn't kill the loop. Re-raises
+    ``asyncio.CancelledError`` for clean shutdown.
+    """
+    interval = max(5, int(interval_seconds or 60))
+    while True:
+        try:
+            result = await service.run_sync(neurons=None)
+            logger.info(
+                "metagraph sync ok: neurons=%s validators=%s",
+                result.get("neuron_count"), result.get("validator_count"),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("metagraph sync failed: %s", exc)
+        await asyncio.sleep(interval)
 
 
 @asynccontextmanager
@@ -24,14 +54,29 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     db = Database(settings.database_url)
     db.create_all()
-    app.state.sync_service = MetagraphSyncService(
+    service = MetagraphSyncService(
         db=db,
         network=settings.bittensor_network,
         netuid=settings.bittensor_netuid,
         snapshot_path=settings.metagraph_snapshot_path,
     )
-    yield
-    db.engine.dispose()
+    app.state.sync_service = service
+
+    sync_task = asyncio.create_task(
+        _periodic_sync_loop(
+            service,
+            interval_seconds=settings.metagraph_sync_interval_seconds,
+        )
+    )
+    try:
+        yield
+    finally:
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            pass
+        db.engine.dispose()
 
 
 app = FastAPI(title="metagraph-listener", lifespan=lifespan)

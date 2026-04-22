@@ -10,6 +10,20 @@ Dispatches to subcommands that implement operator-side administration:
 """
 
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _autoload_env() -> None:
+    """Auto-load .env from CWD and the eirel-ai repo root, if present.
+
+    Real shell exports always win (override=False). Falls through silently
+    if the file doesn't exist.
+    """
+    for candidate in (Path.cwd() / ".env", Path(__file__).resolve().parents[3] / ".env"):
+        load_dotenv(candidate, override=False)
+
 
 _USAGE = """\
 usage: eirel-ai <command> [args]
@@ -24,6 +38,7 @@ Run `eirel-ai admin` for admin subcommands.
 
 
 def main() -> None:
+    _autoload_env()
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
         sys.stdout.write(_USAGE)
         sys.exit(0 if len(sys.argv) >= 2 else 2)

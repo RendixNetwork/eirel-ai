@@ -12,9 +12,11 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+import os
 import uvicorn
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -415,6 +417,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="owner-api", lifespan=lifespan)
 app.add_middleware(RawBodyCaptureMiddleware)
 app.add_middleware(RequestIdMiddleware)
+
+# CORS for the public dashboard endpoints. Non-browser callers (validators,
+# orchestrator, internal service callers) do not care; this exists solely so
+# the leaderboard UI can call /api/v1/dashboard/* from a browser. Defaults to
+# "*" for dev convenience; set EIREL_CORS_ALLOW_ORIGINS="https://leaderboard.example,..."
+# in prod to pin it.
+_cors_origins_raw = os.getenv("EIREL_CORS_ALLOW_ORIGINS", "*").strip()
+_cors_origins = (
+    ["*"] if _cors_origins_raw == "*"
+    else [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 app.include_router(health.router)
 app.include_router(submissions.router)
