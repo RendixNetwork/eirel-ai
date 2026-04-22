@@ -24,4 +24,4 @@ data:
   WEIGHT_SETTER_PUBLIC_URL: http://weight-setter.eirel-prod.svc.cluster.local:8012
   PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
   EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
-  OWNER_RUNTIME_NAMESPACE: eirel-prod
+  EIREL_OWNER_RUNTIME_NAMESPACE: eirel-prod

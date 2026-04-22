@@ -90,12 +90,43 @@ class WeightSubmissionConfig:
 
 
 def submission_config_from_env() -> WeightSubmissionConfig:
+    # Weight-setter is run by the validator operator and should share the
+    # validator's wallet. Names resolve in this order:
+    #   1. EIREL_VALIDATOR_* (canonical — same vars the validator-engine uses)
+    #   2. EIREL_WEIGHT_SETTER_* (explicit override, useful when the setter
+    #      wallet is deliberately different from the engine's)
+    #   3. WEIGHT_SETTER_* (legacy, kept for backward compat)
+    def _pick(*names: str) -> str | None:
+        for name in names:
+            value = os.getenv(name)
+            if value:
+                return value
+        return None
+
     return WeightSubmissionConfig(
-        network=os.getenv("WEIGHT_SETTER_NETWORK", os.getenv("BITTENSOR_NETWORK", "finney")),
-        netuid=int(os.getenv("WEIGHT_SETTER_NETUID", os.getenv("BITTENSOR_NETUID", "0"))),
-        wallet_name=os.getenv("WEIGHT_SETTER_WALLET_NAME"),
-        hotkey_name=os.getenv("WEIGHT_SETTER_HOTKEY_NAME"),
-        wallet_path=os.getenv("WEIGHT_SETTER_WALLET_PATH"),
+        network=(
+            _pick("EIREL_WEIGHT_SETTER_NETWORK", "WEIGHT_SETTER_NETWORK", "BITTENSOR_NETWORK")
+            or "finney"
+        ),
+        netuid=int(
+            _pick("EIREL_WEIGHT_SETTER_NETUID", "WEIGHT_SETTER_NETUID", "BITTENSOR_NETUID")
+            or "0"
+        ),
+        wallet_name=_pick(
+            "EIREL_VALIDATOR_WALLET_NAME",
+            "EIREL_WEIGHT_SETTER_WALLET_NAME",
+            "WEIGHT_SETTER_WALLET_NAME",
+        ),
+        hotkey_name=_pick(
+            "EIREL_VALIDATOR_HOTKEY_NAME",
+            "EIREL_WEIGHT_SETTER_HOTKEY_NAME",
+            "WEIGHT_SETTER_HOTKEY_NAME",
+        ),
+        wallet_path=_pick(
+            "EIREL_VALIDATOR_WALLET_PATH",
+            "EIREL_WEIGHT_SETTER_WALLET_PATH",
+            "WEIGHT_SETTER_WALLET_PATH",
+        ),
     )
 
 

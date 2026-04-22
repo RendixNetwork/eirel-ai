@@ -162,7 +162,11 @@ async def _resolve_targets(
 # Distributed evaluation: autonomous polling loop
 # ---------------------------------------------------------------------------
 
-_POLL_INTERVAL_SECONDS = float(os.getenv("EIREL_VALIDATOR_POLL_INTERVAL_SECONDS", "30"))
+_POLL_INTERVAL_SECONDS = float(
+    os.getenv("EIREL_VALIDATOR_POLL_INTERVAL_SECONDS")
+    or os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS")
+    or "30"
+)
 _BATCH_SIZE = int(os.getenv("EIREL_VALIDATOR_BATCH_SIZE", "3"))
 _MAX_PARALLEL = int(os.getenv("EIREL_VALIDATOR_MAX_PARALLEL", "3"))
 _ACTIVE_FAMILIES = [
