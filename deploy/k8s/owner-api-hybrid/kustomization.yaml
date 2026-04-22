@@ -1,18 +1,49 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ----------------------------------------------------------------------------
+# Owner-api "hybrid" deployment. Owner-api runs in k3s; everything else
+# (postgres, redis, tool services, orchestrator, validators) runs in compose
+# on the same host. See README.md for the full flow.
+# ----------------------------------------------------------------------------
+
 resources:
   - namespace.yaml
   - serviceaccount.yaml
   - clusterrole.yaml
-  - configmap.yaml
+  - configmap.yaml       # deployment-agnostic defaults
   - deployment.yaml
   - service.yaml
   - networkpolicy.yaml
 
+# Stable resource names (no hash suffix) so rolling updates don't churn
+# ConfigMap/Secret references on the Deployment.
 generatorOptions:
   disableNameSuffixHash: true
 
+# configmap.env holds the host-specific values (chain, wallets, images,
+# endpoints). behavior: merge overlays these keys onto the committed
+# configmap.yaml — values here win on conflict.
+configMapGenerator:
+  - name: owner-api-config
+    namespace: eirel-control-plane
+    behavior: merge
+    envs:
+      - configmap.env
+
+# Sensitive values (DB password, internal token, provider keys). Gitignored.
 secretGenerator:
   - name: owner-api-secrets
     namespace: eirel-control-plane
     envs:
       - secret.env
     type: Opaque
+
+# Image ref — deployment.yaml specifies rendixnetwork/eirel-ai by name.
+# Override the tag at apply time:
+#     kustomize edit set image rendixnetwork/eirel-ai=rendixnetwork/eirel-ai:v0.2.0
+# …or replace the image entirely:
+#     kustomize edit set image rendixnetwork/eirel-ai=my-registry.example.com/eirel-ai:latest
+images:
+  - name: rendixnetwork/eirel-ai
+    newTag: latest

@@ -1,16 +1,47 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# -----------------------------------------------------------------------------
+# Production overlay — full-k8s (Mode B) topology. Assumes EXTERNAL Postgres,
+# Redis, and S3-compatible object storage (provided via secret.env + static
+# patches below). No in-cluster dependencies.yaml — production uses managed
+# services.
+# -----------------------------------------------------------------------------
+
 namespace: eirel-prod
 
 resources:
   - ../../base
   - ingress.yaml
+  - ../../jobs                        # runs `eirel-ai migrate` once per apply
 
 patches:
+  # Static overrides (namespace-specific hostnames, storage backend toggle).
   - path: configmap-patch.yaml
 
 generatorOptions:
   disableNameSuffixHash: true
 
+# configmap.env overlays onto base + configmap-patch (env-specific keys).
+configMapGenerator:
+  - name: eirel-control-plane-config
+    # Match base's ORIGINAL namespace. The overlay's top-level namespace:
+    # directive rewrites it to eirel-prod after merge.
+    namespace: eirel
+    behavior: merge
+    envs:
+      - configmap.env
+
+# Sensitive values: DB URL w/ password, Redis URL, S3 creds, internal tokens,
+# Chutes keys, validator mnemonics.
 secretGenerator:
   - name: eirel-control-plane-secrets
     envs:
       - secret.env
+    type: Opaque
+
+# Pin the monolith image to a specific tag in production.
+#     kustomize edit set image rendixnetwork/eirel-ai=rendixnetwork/eirel-ai:v0.2.0
+images:
+  - name: rendixnetwork/eirel-ai
+    newTag: latest

@@ -247,7 +247,7 @@ async def test_leaderboard_entry_has_general_chat_metrics(tmp_path):
     with db.sessionmaker() as session:
         result = queries.fetch_leaderboard(
             session, services=services, family_id="general_chat",
-            window="latest", limit=10, offset=0,
+            run_id=None, limit=10, offset=0,
         )
     entry = result.entries[0]
     assert entry.metrics.quality_mean == 0.9
@@ -273,7 +273,7 @@ async def test_leaderboard_in_progress_run_uses_task_avg_marks_is_running(tmp_pa
     with db.sessionmaker() as session:
         result = queries.fetch_leaderboard(
             session, services=services, family_id="general_chat",
-            window="latest", limit=10, offset=0,
+            run_id=None, limit=10, offset=0,
         )
     assert [e.hotkey for e in result.entries] == ["hk-b", "hk-a"]
     assert result.entries[0].raw_score == 0.8
@@ -296,7 +296,7 @@ async def test_leaderboard_trend_up_down_across_adjacent_runs(tmp_path):
     with db.sessionmaker() as session:
         result = queries.fetch_leaderboard(
             session, services=services, family_id="general_chat",
-            window="latest", limit=10, offset=0,
+            run_id=None, limit=10, offset=0,
         )
     by_hk = {e.hotkey: e for e in result.entries}
     assert by_hk["hk-bravo"].trend == "up"
@@ -480,7 +480,7 @@ async def test_leaderboard_marks_winner_from_run_family_result(tmp_path):
     with db.sessionmaker() as session:
         result = queries.fetch_leaderboard(
             session, services=services, family_id="general_chat",
-            window="latest", limit=10, offset=0,
+            run_id=None, limit=10, offset=0,
         )
     entry = result.entries[0]
     assert entry.is_serving_winner is True

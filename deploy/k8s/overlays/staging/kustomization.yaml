@@ -1,15 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# -----------------------------------------------------------------------------
+# Staging overlay — full-k8s (Mode B) topology with in-cluster Postgres + Redis.
+# See README.md for deploy flow and the "KNOWN COMPOSITION GAPS" section.
+# -----------------------------------------------------------------------------
+
 namespace: eirel
 
 resources:
   - ../../base
-  - dependencies.yaml
+  - dependencies.yaml        # in-cluster postgres + redis
   - ingress.yaml
   - hpa.yaml
+  - ../../jobs       # runs `eirel-ai migrate` once per apply
 
 generatorOptions:
   disableNameSuffixHash: true
 
+# configmap.env overlays onto base/configmap.yaml (env-specific keys).
+configMapGenerator:
+  - name: eirel-control-plane-config
+    namespace: eirel
+    behavior: merge
+    envs:
+      - configmap.env
+
+# Sensitive values (DB password, internal tokens, Chutes keys, mnemonics).
 secretGenerator:
   - name: eirel-control-plane-secrets
     envs:
       - secret.env
+    type: Opaque
+
+# Retag or swap the monolith image. All 9 Deployments + the db-migrate Job
+# use rendixnetwork/eirel-ai, so one entry retargets everything.
+#
+#     kustomize edit set image rendixnetwork/eirel-ai=rendixnetwork/eirel-ai:v0.2.0
+images:
+  - name: rendixnetwork/eirel-ai
+    newTag: latest

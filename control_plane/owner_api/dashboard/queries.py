@@ -33,9 +33,10 @@ from .schemas import (
     ModeLiteral,
     OverviewResponse,
     RunDetailResponse,
+    RunListResponse,
+    RunSummary,
     TaskEvaluation,
     TrendLiteral,
-    WindowLiteral,
 )
 
 
@@ -43,13 +44,6 @@ from .schemas import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-
-_WINDOW_TO_N: dict[str, int | None] = {
-    "latest": 1,
-    "7d": 7,
-    "30d": 30,
-    "all": None,
-}
 
 _FAMILY_LABELS: dict[str, str] = {
     "general_chat": "General Chat",
@@ -72,16 +66,23 @@ def _compute_trend(rank: int, previous_rank: int | None) -> TrendLiteral:
     return "stable"
 
 
-def _recent_run_ids(session: Session, *, limit: int | None) -> list[str]:
-    stmt = select(EvaluationRun.id).order_by(EvaluationRun.sequence.desc())
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    return [row for row in session.execute(stmt).scalars()]
-
-
 def _latest_run(session: Session) -> EvaluationRun | None:
     stmt = select(EvaluationRun).order_by(EvaluationRun.sequence.desc()).limit(1)
     return session.execute(stmt).scalar_one_or_none()
+
+
+def _current_or_latest_run(session: Session) -> EvaluationRun | None:
+    """Prefer an open run; fall back to the most recent closed run."""
+    open_stmt = (
+        select(EvaluationRun)
+        .where(EvaluationRun.status == "open")
+        .order_by(EvaluationRun.sequence.desc())
+        .limit(1)
+    )
+    run = session.execute(open_stmt).scalar_one_or_none()
+    if run is not None:
+        return run
+    return _latest_run(session)
 
 
 def _as_mode(value: Any) -> ModeLiteral | None:
@@ -193,7 +194,28 @@ def fetch_overview(session: Session, *, services: Any) -> OverviewResponse:
     active_families = [f.strip() for f in services.settings.active_families.split(",") if f.strip()]
     total_families = len(active_families) or len(LAUNCH_FAMILIES)
 
-    current = _latest_run(session)
+    current = _current_or_latest_run(session)
+
+    sub_counts = dict(
+        session.execute(
+            select(ManagedMinerSubmission.status, func.count(ManagedMinerSubmission.id))
+            .group_by(ManagedMinerSubmission.status)
+        ).all()
+    )
+    # Real submission lifecycle values (written by deployment_manager):
+    #   received → pending_capacity → building → deployed_for_eval → retired
+    #   build_failed is a terminal error branch.
+    _QUEUED = ("received", "pending_capacity", "building")
+    _EVALUATING = ("deployed_for_eval",)
+    queued = sum(int(sub_counts.get(s, 0)) for s in _QUEUED)
+    evaluating = sum(int(sub_counts.get(s, 0)) for s in _EVALUATING)
+    retired = int(sub_counts.get("retired", 0))
+    build_failed = int(sub_counts.get("build_failed", 0))
+    completed = retired + build_failed
+
+    started_iso = current.started_at.isoformat() if current and current.started_at else None
+    ends_iso = current.ends_at.isoformat() if current and current.ends_at else None
+
     return OverviewResponse(
         total_miners=int(total_miners),
         active_validators=int(active_validators),
@@ -202,6 +224,14 @@ def fetch_overview(session: Session, *, services: Any) -> OverviewResponse:
         network=str(getattr(services.settings, "bittensor_network", "") or ""),
         current_run_id=current.id if current else None,
         current_run_sequence=current.sequence if current else None,
+        current_run_status=current.status if current else None,
+        current_run_started_at=started_iso,
+        current_run_ends_at=ends_iso,
+        queued_submissions=queued,
+        evaluating_submissions=evaluating,
+        completed_submissions=completed,
+        retired_submissions=retired,
+        build_failed_submissions=build_failed,
     )
 
 
@@ -281,37 +311,6 @@ def _collect_single_run_rows(
     ]
 
 
-def _collect_window_rows(
-    session: Session,
-    *,
-    run_ids: list[str],
-    family_id: str,
-) -> list[dict[str, Any]]:
-    if not run_ids:
-        return []
-    rows = session.execute(
-        select(
-            DeploymentScoreRecord.miner_hotkey,
-            func.avg(DeploymentScoreRecord.raw_score).label("raw_score"),
-            func.avg(DeploymentScoreRecord.normalized_score).label("normalized_score"),
-        )
-        .where(
-            DeploymentScoreRecord.run_id.in_(run_ids),
-            DeploymentScoreRecord.family_id == family_id,
-        )
-        .group_by(DeploymentScoreRecord.miner_hotkey)
-    ).all()
-    return [
-        {
-            "miner_hotkey": r.miner_hotkey,
-            "raw_score": float(r.raw_score or 0.0),
-            "normalized_score": float(r.normalized_score or 0.0),
-            "is_running": False,
-        }
-        for r in rows
-    ]
-
-
 def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sorted_rows = sorted(rows, key=lambda r: (-(r["raw_score"] or 0.0), r["miner_hotkey"]))
     for idx, row in enumerate(sorted_rows, start=1):
@@ -319,58 +318,72 @@ def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted_rows
 
 
+def fetch_runs(session: Session, *, services: Any) -> RunListResponse:
+    del services
+    runs = session.execute(
+        select(EvaluationRun).order_by(EvaluationRun.sequence.desc())
+    ).scalars().all()
+    items = [
+        RunSummary(
+            id=r.id,
+            sequence=r.sequence,
+            status=r.status,
+            started_at=r.started_at.isoformat() if r.started_at else None,
+            ends_at=r.ends_at.isoformat() if r.ends_at else None,
+            closed_at=r.closed_at.isoformat() if r.closed_at else None,
+        )
+        for r in runs
+    ]
+    return RunListResponse(runs=items)
+
+
 def fetch_leaderboard(
     session: Session,
     *,
     services: Any,
     family_id: str,
-    window: WindowLiteral,
+    run_id: str | None,
     limit: int,
     offset: int,
 ) -> LeaderboardResponse:
     family_id = ensure_family_id(family_id)
-    n = _WINDOW_TO_N[window]
 
-    latest = _latest_run(session)
-    if latest is None:
+    if run_id is None or run_id == "latest":
+        target = _current_or_latest_run(session)
+    else:
+        target = session.execute(
+            select(EvaluationRun).where(EvaluationRun.id == run_id)
+        ).scalar_one_or_none()
+
+    if target is None:
         return LeaderboardResponse(
-            run_id=None, run_sequence=None, window=window, family_id=family_id,
+            run_id=None, run_sequence=None, run_status=None, family_id=family_id,
             total=0, entries=[],
         )
 
-    if window == "latest":
-        rows = _collect_single_run_rows(session, run=latest, family_id=family_id)
-        prior_run = session.execute(
-            select(EvaluationRun)
-            .where(EvaluationRun.sequence < latest.sequence)
-            .order_by(EvaluationRun.sequence.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        prev_rows = (
-            _collect_single_run_rows(session, run=prior_run, family_id=family_id)
-            if prior_run is not None else []
-        )
-    else:
-        run_ids = _recent_run_ids(session, limit=n)
-        rows = _collect_window_rows(session, run_ids=run_ids, family_id=family_id)
-        prior_ids: list[str] = []
-        if n is not None:
-            all_ids = _recent_run_ids(session, limit=2 * n)
-            if len(all_ids) > n:
-                prior_ids = all_ids[n:2 * n]
-        prev_rows = _collect_window_rows(session, run_ids=prior_ids, family_id=family_id)
+    rows = _collect_single_run_rows(session, run=target, family_id=family_id)
+    prior_run = session.execute(
+        select(EvaluationRun)
+        .where(EvaluationRun.sequence < target.sequence)
+        .order_by(EvaluationRun.sequence.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    prev_rows = (
+        _collect_single_run_rows(session, run=prior_run, family_id=family_id)
+        if prior_run is not None else []
+    )
 
     ranked = _rank_rows(rows)
     prev_ranks = {r["miner_hotkey"]: r.get("rank") for r in _rank_rows(prev_rows)}
 
     metrics_by_hk = _metrics_for_tasks(
-        session, run_id=latest.id, family_id=family_id, hotkey=None,
+        session, run_id=target.id, family_id=family_id, hotkey=None,
     )
     summaries_by_hk: dict[str, MinerEvaluationSummary] = {
         s.miner_hotkey: s
         for s in session.execute(
             select(MinerEvaluationSummary).where(
-                MinerEvaluationSummary.run_id == latest.id,
+                MinerEvaluationSummary.run_id == target.id,
                 MinerEvaluationSummary.family_id == family_id,
             )
         ).scalars()
@@ -382,7 +395,7 @@ def fetch_leaderboard(
 
     rfr = session.execute(
         select(RunFamilyResult).where(
-            RunFamilyResult.run_id == latest.id,
+            RunFamilyResult.run_id == target.id,
             RunFamilyResult.family_id == family_id,
         )
     ).scalar_one_or_none()
@@ -437,9 +450,9 @@ def fetch_leaderboard(
     total = len(entries)
     entries = entries[offset:offset + limit]
     return LeaderboardResponse(
-        run_id=latest.id,
-        run_sequence=latest.sequence,
-        window=window,
+        run_id=target.id,
+        run_sequence=target.sequence,
+        run_status=target.status,
         family_id=family_id,
         total=total,
         entries=entries,

@@ -5,7 +5,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-WindowLiteral = Literal["latest", "7d", "30d", "all"]
 TrendLiteral = Literal["up", "down", "stable", "new"]
 ModeLiteral = Literal["instant", "thinking"]
 
@@ -38,6 +37,14 @@ class OverviewResponse(BaseModel):
     network: str
     current_run_id: str | None
     current_run_sequence: int | None
+    current_run_status: str | None = None
+    current_run_started_at: str | None = None
+    current_run_ends_at: str | None = None
+    queued_submissions: int = 0
+    evaluating_submissions: int = 0
+    completed_submissions: int = 0
+    retired_submissions: int = 0
+    build_failed_submissions: int = 0
 
 
 class FamilySummary(BaseModel):
@@ -69,10 +76,23 @@ class LeaderboardEntry(BaseModel):
 class LeaderboardResponse(BaseModel):
     run_id: str | None
     run_sequence: int | None
-    window: WindowLiteral
+    run_status: str | None = None
     family_id: str
     total: int
     entries: list[LeaderboardEntry] = Field(default_factory=list)
+
+
+class RunSummary(BaseModel):
+    id: str
+    sequence: int
+    status: str
+    started_at: str | None = None
+    ends_at: str | None = None
+    closed_at: str | None = None
+
+
+class RunListResponse(BaseModel):
+    runs: list[RunSummary] = Field(default_factory=list)
 
 
 class MinerProfileResponse(BaseModel):

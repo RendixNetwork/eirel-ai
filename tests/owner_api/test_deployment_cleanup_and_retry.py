@@ -349,17 +349,41 @@ async def test_pending_unschedulable_recovers_when_capacity_returns(make_service
 # -- test_retry_picks_up_queued_deployments_after_run_open -------------
 
 
-async def test_retry_picks_up_queued_deployments_after_run_open(make_services):
-    """Deployment submitted AFTER the current run opened must get built
-    by the retry loop.
+async def test_retry_does_not_activate_pooled_submissions_for_future_run(make_services):
+    """Submissions arriving during an open run target run-N+1 and must
+    stay pooled (``placement_status='queued'``) until run-N+1 opens.
 
-    Regression guard for the operator footgun we hit twice during the
-    multi-miner E2E: ``start_queued_deployments`` only fires on
-    run-open events, so a miner submitting during an open run would
-    sit in ``standby_cold / queued`` indefinitely until the next
-    rollover.  ``_retry_pending_capacity`` is the scheduled sweep —
-    it has to include ``placement_status='queued'`` or queued
-    deployments never get un-queued.
+    The retry loop MUST NOT eagerly promote them — activating a
+    deployment whose target run is still scheduled lets validators
+    evaluate it in the wrong run window.
+    """
+    services = make_services()
+
+    with services.db.sessionmaker() as session:
+        _make_run(session)  # creates run-1 open + run-2 scheduled
+        session.commit()
+
+    hk = "5HKQueRe_" + "Q" * 39
+    with services.db.sessionmaker() as session:
+        sub, dep = _submit(services, session, hotkey=hk)
+        # Miner submits during open run-1 → submission targets run-2
+        assert sub.introduced_run_id == "run-2"
+        assert dep.placement_status == "queued"
+
+    await _retry_pending_capacity(services)
+
+    with services.db.sessionmaker() as session:
+        dep = session.get(ManagedDeployment, dep.id)
+        # Still queued — target run (run-2) is scheduled, not open.
+        assert dep.status == "queued"
+        assert dep.placement_status == "queued"
+
+
+async def test_retry_picks_up_queued_deployments_when_target_run_open(make_services):
+    """If a queued deployment's ``introduced_run_id`` matches the
+    currently-open run (e.g. owner-api restarted between run-open and
+    the sync ``start_queued_deployments`` call), the retry loop must
+    unblock it.
     """
     services = make_services()
 
@@ -369,16 +393,16 @@ async def test_retry_picks_up_queued_deployments_after_run_open(make_services):
 
     hk = "5HKQueRe_" + "Q" * 39
     with services.db.sessionmaker() as session:
-        _sub, dep = _submit(services, session, hotkey=hk)
+        sub, dep = _submit(services, session, hotkey=hk)
     dep_id = dep.id
 
-    # Simulate "miner submitted after run-open": skip the normal
-    # start_queued_deployments that would have fired at open time.
+    # Simulate the run-2 transition having already happened: retarget
+    # the submission to the currently-open run and drop the normal
+    # run-open promotion so we exercise the retry loop's gap-close path.
     with services.db.sessionmaker() as session:
-        dep = session.get(ManagedDeployment, dep_id)
-        assert dep.placement_status == "queued", (
-            "fresh submissions must land in queued so this test exercises the gap"
-        )
+        sub_row = session.get(type(sub), sub.id)
+        sub_row.introduced_run_id = "run-1"
+        session.commit()
 
     await _retry_pending_capacity(services)
 
