@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eirel-ai"
-version = "0.2.1"
+version = "0.2.2"
 description = "Orchestrator, owner API, validator engine, and consumer API for the EIREL subnet."
 readme = "README.md"
 requires-python = ">=3.12"
