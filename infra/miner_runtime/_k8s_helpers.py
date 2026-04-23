@@ -180,6 +180,9 @@ def _build_k8s_deployment(
     port: int,
     probe_period_seconds: int,
     deployment_id: str | None = None,
+    internal_service_token: str = "",
+    provider_proxy_url: str = "",
+    provider_proxy_token: str = "",
 ) -> dict[str, Any]:
     from .runtime_manager import _deployment_manifest_common
 
@@ -190,9 +193,9 @@ def _build_k8s_deployment(
         deployment_id=deployment_id,
         artifact_url=image,
         manifest=manifest,
-        internal_service_token="",
-        provider_proxy_url="",
-        provider_proxy_token="",
+        internal_service_token=internal_service_token,
+        provider_proxy_url=provider_proxy_url,
+        provider_proxy_token=provider_proxy_token,
         assigned_node_name=assigned_node_name,
         requested_cpu_millis=requested_cpu_millis,
         requested_memory_bytes=requested_memory_bytes,

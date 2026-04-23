@@ -547,7 +547,7 @@ async def run_distributed_benchmarks(
         # Invoke the miner
         try:
             task_run: BenchmarkTaskRun = await _invoke_task(
-                miner=miner_target, task=task_obj, timeout_seconds=90.0,
+                miner=miner_target, task=task_obj, timeout_seconds=180.0,
             )
         except Exception as exc:
             task_run = BenchmarkTaskRun(

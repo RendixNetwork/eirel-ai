@@ -109,7 +109,7 @@ class ManagedDeploymentRuntimeManager:
             raise RuntimeManagerError(f"runtime for deployment {deployment_id} is unhealthy")
         family_id = ensure_active_family_id(str(request.family_id))
         if manifest.runtime.invoke_path == "/v1/agent/infer":
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=150.0) as client:
                 response = await client.post(
                     f"{handle.endpoint_url}{manifest.runtime.invoke_path}",
                     json=request.model_dump(mode="json"),
@@ -128,7 +128,7 @@ class ManagedDeploymentRuntimeManager:
             )
 
         payload = self._chat_payload(request=request)
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=150.0) as client:
             response = await client.post(
                 f"{handle.endpoint_url}{manifest.runtime.invoke_path}",
                 json=payload,

@@ -20,7 +20,7 @@
 
     - name: Health check — owner-api via NodePort
       ansible.builtin.uri:
-        url: "http://{{ ansible_default_ipv4.address }}:30020/healthz"
+        url: "http://{{ ansible_facts['default_ipv4']['address'] }}:30020/healthz"
         method: GET
         status_code: 200
         return_content: true

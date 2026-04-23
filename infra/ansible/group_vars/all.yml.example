@@ -18,3 +18,11 @@ eirel_control_plane_node_label_value: control-plane
 eirel_control_plane_registry: "registry.example.com:5000"
 eirel_control_plane_image_repo: "eirel-ai"
 eirel_ai_project_dir: /path/to/eirel-ai
+
+internal_service_token: "replace_with_your_own_token"
+provider_proxy_token: "replace_with_your_own_token"
+research_tool_token: "replace_with_your_own_token"
+web_search_tool_token: "replace_with_your_own_token"
+semantic_scholar_tool_token: "replace_with_your_own_token"
+x_tool_token: "replace_with_your_own_token"
+sandbox_tool_token: "replace_with_your_own_token"

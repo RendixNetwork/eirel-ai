@@ -6,7 +6,7 @@
   tasks:
     - name: Apply control-plane label to server node
       ansible.builtin.command: >
-        kubectl label node {{ ansible_hostname }}
+        kubectl label node {{ ansible_facts['hostname'] }}
         {{ eirel_control_plane_node_label_key }}={{ eirel_control_plane_node_label_value }}
         --overwrite
       environment:

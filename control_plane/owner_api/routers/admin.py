@@ -175,6 +175,48 @@ async def admin_current_run(
         }
 
 
+@router.post("/v1/admin/runs/advance")
+async def admin_advance_run(
+    request: Request,
+    _owner: str = Depends(require_owner_signature),
+) -> dict[str, Any]:
+    services: ManagedOwnerServices = request.app.state.services
+    with services.db.sessionmaker() as session:
+        previous = services.runs.current_run(session)
+        previous_id = previous.id if previous else None
+        previous_sequence = previous.sequence if previous else None
+        if previous is not None:
+            # Set ends_at to the past so the rotation branch in
+            # ensure_current_run fires.
+            previous.ends_at = _utcnow()
+            previous.updated_at = _utcnow()
+            session.commit()
+    # Use the async wrapper so queued deployments buffered by
+    # start_queued_deployments actually get scheduled (the sync
+    # runs.ensure_current_run only transitions DB rows to status=received +
+    # placement_status=pending; the runtime pods are spun up here).
+    new_run = await services.deployments.ensure_current_run_and_reconcile()
+    if previous_id is not None and new_run.id == previous_id:
+        raise HTTPException(
+            status_code=500,
+            detail="advance failed: ensure_current_run did not rotate the run",
+        )
+    logger.info(
+        "admin: advanced run %s (seq %s) → %s (seq %s)",
+        previous_id, previous_sequence, new_run.id, new_run.sequence,
+    )
+    return {
+        "result": "advanced",
+        "previous_run_id": previous_id,
+        "previous_sequence": previous_sequence,
+        "id": new_run.id,
+        "sequence": new_run.sequence,
+        "status": new_run.status,
+        "started_at": new_run.started_at.isoformat() if new_run.started_at else None,
+        "ends_at": new_run.ends_at.isoformat() if new_run.ends_at else None,
+    }
+
+
 # ------------------------------------------------------------------
 # Metagraph (read-only; sync is on the listener service)
 # ------------------------------------------------------------------

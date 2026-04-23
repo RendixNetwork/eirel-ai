@@ -12,6 +12,8 @@
     --disable-network-policy
     --disable=traefik
     --write-kubeconfig-mode=0644
+    --cluster-cidr={{ k3s_cluster_cidr }}
+    --service-cidr={{ k3s_service_cidr }}
     --token={{ k3s_cluster_token }}
     {% for san in k3s_tls_san | default([]) %}--tls-san={{ san }} {% endfor %}
   args:

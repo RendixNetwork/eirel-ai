@@ -17,23 +17,43 @@ x-eirel-ai-run: &eirel-ai-run
   image: ${DOCKERHUB_NAMESPACE:-rendixnetwork}/eirel-ai:${EIREL_AI_IMAGE_TAG:-latest}
   working_dir: /app/eirel-ai
   env_file: .env
+  # Bind-mount host datasets read-only at the container paths the code expects
+  # (EIREL_*_ROOT_PATH in .env). Mounted as subdirs (not /app/data wholesale)
+  # so the image's baked-in /app/data/research_tool_catalog.json is preserved.
+  volumes:
+    - ./data/owner_datasets:/app/data/owner_datasets:ro
+    - ./data/calibration:/app/data/calibration:ro
+    - ./data/workflow_corpus:/app/data/workflow_corpus:ro
 
 services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: eirel
-      POSTGRES_USER: eirel
-      POSTGRES_PASSWORD: eirel
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_HOST_PORT:-15432}:5432"
+      # Bind to node's primary IP so the k3s owner-api pod can reach
+      # postgres at ${SERVER_A_HOST_IP}:${POSTGRES_HOST_PORT}. The host
+      # firewall (ufw) MUST block external traffic on this port — see
+      # README / .env for the required ufw rules.
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${POSTGRES_HOST_PORT:-25432}:5432"
+    restart: unless-stopped
 
   redis:
     image: redis:7
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
     ports:
-      - "${REDIS_HOST_PORT:-16379}:6379"
+      # Bind to node's primary IP so the k3s owner-api pod can reach
+      # redis at ${SERVER_A_HOST_IP}:${REDIS_HOST_PORT}. The host firewall
+      # (ufw) MUST block external traffic on this port.
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${REDIS_HOST_PORT:-16379}:6379"
+    restart: unless-stopped
 
   # owner-api runs in k3s (deploy/k8s/owner-api-hybrid/).  Compose
   # services reach it via ``${SERVER_A_HOST_IP}:${OWNER_API_NODEPORT}``
@@ -43,8 +63,8 @@ services:
     <<: *eirel-ai-run
     command: ["orchestrator"]
     environment:
-      DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
       EIREL_INTERNAL_SERVICE_TOKEN: ${EIREL_INTERNAL_SERVICE_TOKEN:-internal-token}
       OWNER_API_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
       OWNER_API_INTERNAL_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
@@ -68,14 +88,14 @@ services:
       sandbox-tool-service:
         condition: service_healthy
     ports:
-      - "${ORCHESTRATOR_HOST_PORT:-18050}:8050"
+      - "127.0.0.1:${ORCHESTRATOR_HOST_PORT:-18050}:8050"
 
   execution-worker:
     <<: *eirel-ai-run
     command: ["execution-worker"]
     environment:
-      DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
       OWNER_API_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
       ORCHESTRATOR_URL: http://orchestrator:8050
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
@@ -99,7 +119,7 @@ services:
       sandbox-tool-service:
         condition: service_healthy
     ports:
-      - "${EXECUTION_WORKER_HOST_PORT:-18006}:8006"
+      - "127.0.0.1:${EXECUTION_WORKER_HOST_PORT:-18006}:8006"
 
   consumer-chat-api:
     <<: *eirel-ai-run
@@ -125,7 +145,7 @@ services:
     <<: *eirel-ai-run
     command: ["metagraph-listener"]
     environment:
-      DATABASE_URL: postgresql+psycopg://eirel:eirel@postgres:5432/eirel
+      DATABASE_URL: ${DATABASE_URL}
       METAGRAPH_SNAPSHOT_PATH: ${METAGRAPH_SNAPSHOT_PATH:-}
       METAGRAPH_SYNC_INTERVAL_SECONDS: ${METAGRAPH_SYNC_INTERVAL_SECONDS:-60}
       BITTENSOR_NETWORK: ${BITTENSOR_NETWORK:-test}
@@ -134,7 +154,7 @@ services:
     depends_on:
       - postgres
     ports:
-      - "${METAGRAPH_LISTENER_HOST_PORT:-18011}:8011"
+      - "127.0.0.1:${METAGRAPH_LISTENER_HOST_PORT:-18011}:8011"
 
   # validator-engine + weight-setter moved to docker-compose.validator.yml so
   # third-party validators run a lean stack without the operator's services.
@@ -143,7 +163,7 @@ services:
     <<: *eirel-ai-run
     command: ["eirel-provider-proxy"]
     environment:
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL}
       EIREL_PROVIDER_PROXY_MASTER_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
       EIREL_PROVIDER_PROXY_ALLOW_MOCK: ${EIREL_PROVIDER_PROXY_ALLOW_MOCK:-false}
       EIREL_RUN_BUDGET_USD: ${EIREL_RUN_BUDGET_USD:-30.0}
@@ -152,7 +172,7 @@ services:
     depends_on:
       - redis
     ports:
-      - "${PROVIDER_PROXY_HOST_PORT:-18092}:8092"
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${PROVIDER_PROXY_HOST_PORT:-18092}:8092"
 
   web-search-tool-service:
     <<: *eirel-ai-run
@@ -166,7 +186,7 @@ services:
       EIREL_TAVILY_API_KEY: ${EIREL_TAVILY_API_KEY:-}
       EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS: ${EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS:-10.0}
       EIREL_WEB_SEARCH_MOCK: ${EIREL_WEB_SEARCH_MOCK:-false}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:
         condition: service_started
@@ -178,7 +198,7 @@ services:
       start_period: 10s
     restart: unless-stopped
     ports:
-      - "${WEB_SEARCH_TOOL_SERVICE_HOST_PORT:-18085}:8085"
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${WEB_SEARCH_TOOL_SERVICE_HOST_PORT:-18085}:8085"
 
   x-tool-service:
     <<: *eirel-ai-run
@@ -188,7 +208,7 @@ services:
       EIREL_X_BEARER_TOKEN: ${EIREL_X_BEARER_TOKEN:-}
       EIREL_X_API_CALLS_PER_TASK: ${EIREL_X_API_CALLS_PER_TASK:-1}
       EIREL_X_MOCK: ${EIREL_X_MOCK:-false}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:
         condition: service_started
@@ -200,7 +220,7 @@ services:
       start_period: 10s
     restart: unless-stopped
     ports:
-      - "${X_TOOL_SERVICE_HOST_PORT:-18086}:8086"
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${X_TOOL_SERVICE_HOST_PORT:-18086}:8086"
 
   semantic-scholar-tool-service:
     <<: *eirel-ai-run
@@ -209,7 +229,7 @@ services:
       EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN: ${EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN:-}
       EIREL_SEMANTIC_SCHOLAR_API_KEY: ${EIREL_SEMANTIC_SCHOLAR_API_KEY:-}
       EIREL_SEMANTIC_SCHOLAR_TOOL_PORT: 8087
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:
         condition: service_started
@@ -221,7 +241,7 @@ services:
       start_period: 10s
     restart: unless-stopped
     ports:
-      - "${SEMANTIC_SCHOLAR_TOOL_SERVICE_HOST_PORT:-18087}:8087"
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${SEMANTIC_SCHOLAR_TOOL_SERVICE_HOST_PORT:-18087}:8087"
 
   sandbox-tool-service:
     <<: *eirel-ai-run
@@ -246,7 +266,7 @@ services:
       EIREL_SANDBOX_TOOL_DEFAULT_TIMEOUT_SECONDS: ${EIREL_SANDBOX_TOOL_DEFAULT_TIMEOUT_SECONDS:-5.0}
       EIREL_SANDBOX_TOOL_DEFAULT_MEMORY_MB: ${EIREL_SANDBOX_TOOL_DEFAULT_MEMORY_MB:-128}
       EIREL_SANDBOX_TOOL_MAX_CODE_BYTES: ${EIREL_SANDBOX_TOOL_MAX_CODE_BYTES:-65536}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:
         condition: service_started
@@ -260,7 +280,7 @@ services:
     pids_limit: 100
     restart: unless-stopped
     ports:
-      - "${SANDBOX_TOOL_SERVICE_HOST_PORT:-18091}:8091"
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${SANDBOX_TOOL_SERVICE_HOST_PORT:-18091}:8091"
 
   prometheus:
     profiles: ["monitoring"]
@@ -278,7 +298,7 @@ services:
       - ./monitoring/prometheus/alerts:/etc/prometheus/alerts:ro
       - prometheus_data:/prometheus
     ports:
-      - "${PROMETHEUS_HOST_PORT:-19090}:9090"
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-19090}:9090"
     depends_on:
       - orchestrator
       - consumer-chat-api
@@ -305,7 +325,7 @@ services:
       ALERTMANAGER_DEFAULT_WEBHOOK_URL: ${ALERTMANAGER_DEFAULT_WEBHOOK_URL:-http://localhost:9999/default-noop}
       ALERTMANAGER_CRITICAL_WEBHOOK_URL: ${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:9999/critical-noop}
     ports:
-      - "${ALERTMANAGER_HOST_PORT:-19093}:9093"
+      - "127.0.0.1:${ALERTMANAGER_HOST_PORT:-19093}:9093"
 
   grafana:
     profiles: ["monitoring"]
@@ -315,7 +335,7 @@ services:
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "${GRAFANA_HOST_PORT:-13000}:3000"
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-13000}:3000"
     depends_on:
       - prometheus
 

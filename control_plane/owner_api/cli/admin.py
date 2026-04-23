@@ -12,6 +12,7 @@ Usage:
   eirel-ai admin validators enable <hotkey>
   eirel-ai admin validators disable <hotkey>
   eirel-ai admin runs list
+  eirel-ai admin runs advance
   eirel-ai admin runs current
   eirel-ai admin neurons list
   eirel-ai admin submissions list [--limit N]
@@ -83,7 +84,10 @@ def _request(
     base_url = _default_base_url()
     body_bytes = json.dumps(body).encode() if body is not None else b""
     body_hash = hashlib.sha256(body_bytes).hexdigest()
-    headers = signer.signed_headers(method=method, path=path, body_hash=body_hash)
+    # Server verifies against request.url.path (no query string), so sign the
+    # bare path. The query is still sent over the wire via the URL below.
+    sign_path = path.split("?", 1)[0]
+    headers = signer.signed_headers(method=method, path=sign_path, body_hash=body_hash)
     if body is not None:
         headers["Content-Type"] = "application/json"
 
@@ -163,6 +167,10 @@ def cmd_runs_current(_args) -> None:
     _print(_request(method="GET", path="/v1/admin/runs/current"))
 
 
+def cmd_runs_advance(_args) -> None:
+    _print(_request(method="POST", path="/v1/admin/runs/advance"))
+
+
 def cmd_neurons_list(_args) -> None:
     _print(_request(method="GET", path="/v1/admin/neurons"))
 
@@ -214,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     r_sub = r.add_subparsers(dest="cmd", required=True)
     r_sub.add_parser("list", help="List the last 20 runs")
     r_sub.add_parser("current", help="Show the currently-open run")
+    r_sub.add_parser("advance", help="Force-close the open run and open the next one")
 
     # neurons
     n = sub.add_parser("neurons", help="View metagraph-registered hotkeys")
@@ -248,6 +257,7 @@ def main() -> None:
         ("validators", "disable"): cmd_validator_disable,
         ("runs", "list"): cmd_runs_list,
         ("runs", "current"): cmd_runs_current,
+        ("runs", "advance"): cmd_runs_advance,
         ("neurons", "list"): cmd_neurons_list,
         ("submissions", "list"): cmd_submissions_list,
         ("deployments", "list"): cmd_deployments_list,

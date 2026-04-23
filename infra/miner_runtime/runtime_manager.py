@@ -204,9 +204,9 @@ def _deployment_manifest_common(
         {"name": "EIREL_PROVIDER_MAX_WALL_CLOCK_SECONDS", "value": "3600"},
         # Per-request timeout must exceed typical Chutes first-call
         # latency (up to ~60s for some models) but stay under the
-        # validator's httpx budget (90s) and owner-api proxy budget
-        # (90s) so the whole chain drains in order on a slow call.
-        {"name": "EIREL_PROVIDER_PER_REQUEST_TIMEOUT_SECONDS", "value": "75"},
+        # owner-api proxy budget (150s) and validator httpx budget
+        # (180s) so the whole chain drains in order on a slow call.
+        {"name": "EIREL_PROVIDER_PER_REQUEST_TIMEOUT_SECONDS", "value": "120"},
     ]
     # Cost-attribution key used in X-Eirel-Job-Id on provider-proxy calls.
     # Must match the key owner-api uses when querying
@@ -216,6 +216,12 @@ def _deployment_manifest_common(
     # submission_id for older callers that don't pass it.
     _job_id = f"miner-{deployment_id}" if deployment_id else f"miner-{submission_id}"
     miner_env.append({"name": "EIREL_PROVIDER_PROXY_JOB_ID", "value": _job_id})
+    # Provider proxy URL/token must be EIREL_-prefixed for the miner SDK's
+    # MinerProviderConfig.validate_for_runtime check. The shared Secret today
+    # only carries unprefixed PROVIDER_PROXY_TOKEN and no URL, so inject both
+    # explicitly from the values owner-api already has in settings.
+    miner_env.append({"name": "EIREL_PROVIDER_PROXY_URL", "value": provider_proxy_url})
+    miner_env.append({"name": "EIREL_PROVIDER_PROXY_TOKEN", "value": provider_proxy_token})
     if shared_secret_name is not None:
         container["envFrom"] = [{"secretRef": {"name": shared_secret_name}}]
         container["env"] = miner_env
@@ -991,6 +997,9 @@ class KubernetesMinerRuntimeManager(MinerRuntimeManager):
                 health_path=health_path,
                 port=port,
                 probe_period_seconds=self._probe_period_seconds,
+                internal_service_token=str(kwargs.get("internal_service_token", "")),
+                provider_proxy_url=str(kwargs.get("provider_proxy_url", "")),
+                provider_proxy_token=str(kwargs.get("provider_proxy_token", "")),
             )
             await _create_or_replace(
                 self._apps.create_namespaced_deployment,

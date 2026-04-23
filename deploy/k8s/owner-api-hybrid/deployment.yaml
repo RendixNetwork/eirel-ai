@@ -41,7 +41,7 @@ spec:
             - name: DATABASE_URL
               value: "postgresql+psycopg://eirel:$(DATABASE_PASSWORD)@$(SERVER_A_HOST_IP):25432/eirel"
             - name: REDIS_URL
-              value: "redis://$(SERVER_A_HOST_IP):16379/0"
+              value: "redis://:$(REDIS_PASSWORD)@$(SERVER_A_HOST_IP):16379/0"
             - name: EIREL_PROVIDER_PROXY_URL
               value: "http://$(SERVER_A_HOST_IP):18092"
             - name: EIREL_WEB_SEARCH_TOOL_URL

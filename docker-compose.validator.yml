@@ -70,15 +70,14 @@ services:
     container_name: validator-engine
     command: ["validator-engine"]
     environment:
-      OWNER_API_URL: ${OWNER_API_URL}
-      EIREL_VALIDATOR_WALLET_NAME: ${EIREL_VALIDATOR_WALLET_NAME}
-      EIREL_VALIDATOR_HOTKEY_NAME: ${EIREL_VALIDATOR_HOTKEY_NAME}
-      EIREL_VALIDATOR_ACTIVE_FAMILIES: ${EIREL_VALIDATOR_ACTIVE_FAMILIES:-general_chat}
+      # Wallet/network values come from env_file: .env.validator. Don't
+      # restate them here as `${VAR}` because compose substitutes from the
+      # project .env / shell (not from env_file), which would silently blank
+      # them when those aren't set.
       EIREL_VALIDATOR_AUTO_LOOP: "true"
+      EIREL_VALIDATOR_ACTIVE_FAMILIES: ${EIREL_VALIDATOR_ACTIVE_FAMILIES:-general_chat}
       EIREL_JUDGE_SERVICE_URL: ${EIREL_JUDGE_SERVICE_URL:-http://eiretes-judge:8095}
       EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
-      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK}
-      BITTENSOR_NETUID: ${BITTENSOR_NETUID}
     depends_on:
       eiretes-judge:
         condition: service_healthy
@@ -92,12 +91,7 @@ services:
     <<: *validator-run
     container_name: weight-setter
     command: ["weight-setter"]
-    environment:
-      OWNER_API_URL: ${OWNER_API_URL}
-      EIREL_VALIDATOR_WALLET_NAME: ${EIREL_VALIDATOR_WALLET_NAME}
-      EIREL_VALIDATOR_HOTKEY_NAME: ${EIREL_VALIDATOR_HOTKEY_NAME}
-      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK}
-      BITTENSOR_NETUID: ${BITTENSOR_NETUID}
+    environment: {}  # all from env_file: .env.validator
     ports:
       - "${WEIGHT_SETTER_HOST_PORT:-18012}:8012"
 
