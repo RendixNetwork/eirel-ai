@@ -282,32 +282,49 @@ async def run_weight_setting_loop() -> None:
                     continue
                 logger.info("weight-setting: circuit half-open, retrying")
 
-            # 1. Fetch {hotkey: weight} from owner-api
+            # 1. Fetch {hotkey: weight} from owner-api. If owner-api is
+            #    unreachable we still want to set weights on-chain (burning
+            #    to UID 0) so the validator keeps its vtrust and doesn't
+            #    skip the weight-setting window.
             path = "/v1/weights"
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(
-                    f"{owner_url}{path}",
-                    headers=_signed_headers(signer=signer, method="GET", path=path, body=b""),
+            owner_api_down = False
+            data: dict[str, Any] = {}
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(
+                        f"{owner_url}{path}",
+                        headers=_signed_headers(signer=signer, method="GET", path=path, body=b""),
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "weight-setting: owner-api fetch failed (%s) — falling back to burn-to-uid-0",
+                    exc,
                 )
-                response.raise_for_status()
-                data = response.json()
+                owner_api_down = True
 
-            if not data.get("ready"):
-                logger.info("weight-setting: no weights ready, sleeping")
-                await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
-                continue
+            if owner_api_down:
+                current_run_id = None
+                weights_by_hotkey: dict[str, float] = {}
+                family_winners: list[dict[str, Any]] = []
+            else:
+                if not data.get("ready"):
+                    logger.info("weight-setting: no weights ready, sleeping")
+                    await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
+                    continue
 
-            current_run_id = data.get("run_id")
-            if current_run_id and current_run_id == _last_published_run_id:
-                logger.info(
-                    "weight-setting: run %s already published, skipping",
-                    current_run_id,
-                )
-                await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
-                continue
+                current_run_id = data.get("run_id")
+                if current_run_id and current_run_id == _last_published_run_id:
+                    logger.info(
+                        "weight-setting: run %s already published, skipping",
+                        current_run_id,
+                    )
+                    await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
+                    continue
 
-            weights_by_hotkey: dict[str, float] = data.get("weights", {})
-            family_winners = data.get("family_winners", [])
+                weights_by_hotkey = data.get("weights", {})
+                family_winners = data.get("family_winners", [])
 
             # 2. Sync metagraph to resolve hotkey → UID
             subtensor = bt.Subtensor(network=network)
@@ -354,8 +371,12 @@ async def run_weight_setting_loop() -> None:
             weight_vals = [uid_weights[uid] for uid in uids]
 
             logger.info(
-                "weight-setting: setting weights for %d UIDs run=%s uids=%s weights=%s",
-                len(uids), data.get("run_id"), uids, [round(w, 4) for w in weight_vals],
+                "weight-setting: setting weights for %d UIDs run=%s mode=%s uids=%s weights=%s",
+                len(uids),
+                current_run_id,
+                "owner_api_down_burn" if owner_api_down else "normal",
+                uids,
+                [round(w, 4) for w in weight_vals],
             )
 
             # 5. Set weights on-chain with retry + exponential backoff
@@ -385,7 +406,7 @@ async def run_weight_setting_loop() -> None:
                     if success:
                         logger.info(
                             "weight-setting: set_weights succeeded on attempt %d run=%s msg=%s",
-                            attempt, data.get("run_id"), last_message,
+                            attempt, current_run_id, last_message,
                         )
                         break
                     logger.warning(
@@ -450,11 +471,11 @@ async def run_weight_setting_loop() -> None:
                     expected_weights=weight_vals,
                 )
                 if verification.get("verified"):
-                    logger.info("weight-setting: chain verification passed run=%s", data.get("run_id"))
+                    logger.info("weight-setting: chain verification passed run=%s", current_run_id)
                 else:
                     logger.warning(
                         "weight-setting: chain verification failed run=%s mismatches=%s",
-                        data.get("run_id"), verification.get("mismatches") or verification.get("reason"),
+                        current_run_id, verification.get("mismatches") or verification.get("reason"),
                     )
             except Exception:
                 logger.warning("weight-setting: chain verification error", exc_info=True)
