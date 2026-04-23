@@ -257,18 +257,6 @@ class Settings:
     x_tool_service_token: str = field(
         default_factory=lambda: os.getenv("EIREL_X_TOOL_TOKEN", "")
     )
-    semantic_scholar_tool_service_url: str = field(
-        default_factory=lambda: os.getenv(
-            "EIREL_SEMANTIC_SCHOLAR_TOOL_URL",
-            "http://semantic-scholar-tool-service:8087",
-        )
-    )
-    semantic_scholar_tool_service_token: str = field(
-        default_factory=lambda: os.getenv("EIREL_SEMANTIC_SCHOLAR_TOOL_TOKEN", "")
-    )
-    semantic_scholar_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_SEMANTIC_SCHOLAR_API_KEY", "")
-    )
     sandbox_tool_service_url: str = field(
         default_factory=lambda: os.getenv(
             "EIREL_SANDBOX_TOOL_URL", "http://sandbox-tool-service:8091"

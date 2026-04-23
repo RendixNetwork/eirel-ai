@@ -239,8 +239,6 @@ def _deployment_manifest_common(
             {"name": "X_TOOL_TOKEN", "value": os.getenv("EIREL_X_TOOL_SERVICE_TOKEN", "")},
             {"name": "SEC_EDGAR_TOOL_URL", "value": os.getenv("EIREL_SEC_EDGAR_TOOL_SERVICE_URL", "http://sec-edgar-tool-service:8087")},
             {"name": "SEC_EDGAR_TOOL_TOKEN", "value": os.getenv("EIREL_SEC_EDGAR_TOOL_SERVICE_TOKEN", "")},
-            {"name": "SEMANTIC_SCHOLAR_TOOL_URL", "value": os.getenv("EIREL_SEMANTIC_SCHOLAR_TOOL_SERVICE_URL", "http://semantic-scholar-tool-service:8088")},
-            {"name": "SEMANTIC_SCHOLAR_TOOL_TOKEN", "value": os.getenv("EIREL_SEMANTIC_SCHOLAR_TOOL_SERVICE_TOKEN", "")},
             {"name": "SANDBOX_TOOL_URL", "value": os.getenv("EIREL_SANDBOX_TOOL_SERVICE_URL", "http://sandbox-tool-service:8091")},
             {"name": "SANDBOX_TOOL_TOKEN", "value": os.getenv("EIREL_SANDBOX_TOOL_SERVICE_TOKEN", "")},
         ]

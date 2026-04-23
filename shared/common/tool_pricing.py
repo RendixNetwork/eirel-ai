@@ -19,7 +19,6 @@ class ToolPrice:
 TOOL_PRICING: dict[str, ToolPrice] = {
     "web_search": ToolPrice(per_call_usd=0.001),
     "x_api": ToolPrice(per_call_usd=0.050),
-    "semantic_scholar": ToolPrice(per_call_usd=0.000),
     "sandbox": ToolPrice(per_call_usd=0.002),
 }
 

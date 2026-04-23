@@ -117,8 +117,8 @@ async def test_tool_proxy_without_budget_config_works_as_before():
     try:
         result = await proxy.proxy_call(
             conversation_id="c3",
-            tool_name="semantic_scholar",
-            target_url="http://semantic-scholar:8088/v1/search",
+            tool_name="sandbox",
+            target_url="http://sandbox-tool-service:8091/v1/exec",
             args={"query": "test"},
         )
     finally:

@@ -20,10 +20,10 @@ def _make_store() -> tuple[fakeredis.aioredis.FakeRedis, RedisTraceStore]:
 async def test_append_and_get_round_trip():
     _, store = _make_store()
     await store.append("c1", TraceEntry(tool_name="web_search", args={"q": "a"}))
-    await store.append("c1", TraceEntry(tool_name="semantic_scholar", args={"q": "b"}))
+    await store.append("c1", TraceEntry(tool_name="sandbox", args={"q": "b"}))
     trace = await store.get_trace("c1")
     assert trace.conversation_id == "c1"
-    assert [e.tool_name for e in trace.entries] == ["web_search", "semantic_scholar"]
+    assert [e.tool_name for e in trace.entries] == ["web_search", "sandbox"]
 
 
 async def test_get_missing_key_returns_empty():
@@ -44,7 +44,7 @@ async def test_clear_removes_entries():
 async def test_clear_many_batches_deletes():
     _, store = _make_store()
     await store.append("c1", TraceEntry(tool_name="web_search", args={}))
-    await store.append("c2", TraceEntry(tool_name="semantic_scholar", args={}))
+    await store.append("c2", TraceEntry(tool_name="sandbox", args={}))
     await store.append("c3", TraceEntry(tool_name="x_api", args={}))
     await store.clear_many(["c1", "c2"])
     assert (await store.get_trace("c1")).entries == []

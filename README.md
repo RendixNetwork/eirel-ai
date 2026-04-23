@@ -55,7 +55,7 @@ Started via `docker-compose.yml` at the repo root.
 | `owner-api` | Submission lifecycle, deployment management, run orchestration, score aggregation, chain-publication readiness checks |
 | `metagraph-listener` | Syncs registered neurons from Bittensor chain state; gates miner submission acceptance |
 | `provider-proxy` | LLM provider fan-out with per-run USD budget enforcement |
-| `web-search-tool-service` / `x-tool-service` / `semantic-scholar-tool-service` / `sandbox-tool-service` | Subnet-owned tool endpoints available to miner agents |
+| `web-search-tool-service` / `x-tool-service` / `sandbox-tool-service` | Subnet-owned tool endpoints available to miner agents |
 | `postgres`, `redis` | Storage + coordination |
 
 **Consumer-facing product** (optional — only if you run the subnet's end-user chat product on top of the subnet):
@@ -186,7 +186,6 @@ metagraph-listener       # Chain state sync
 eirel-provider-proxy     # LLM provider fan-out
 web-search-tool-service  # Tool: web search
 x-tool-service           # Tool: X / twitter
-semantic-scholar-tool-service  # Tool: Semantic Scholar
 sandbox-tool-service     # Tool: Python sandbox
 # consumer product (optional):
 orchestrator

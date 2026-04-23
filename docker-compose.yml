@@ -70,7 +70,6 @@ services:
       OWNER_API_INTERNAL_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
       EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
-      EIREL_SEMANTIC_SCHOLAR_TOOL_URL: ${EIREL_SEMANTIC_SCHOLAR_TOOL_URL:-http://semantic-scholar-tool-service:8087}
       EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
       EIREL_PROVIDER_PROXY_URL: http://provider-proxy:8092
       EIREL_PROVIDER_PROXY_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
@@ -82,8 +81,6 @@ services:
       web-search-tool-service:
         condition: service_healthy
       x-tool-service:
-        condition: service_healthy
-      semantic-scholar-tool-service:
         condition: service_healthy
       sandbox-tool-service:
         condition: service_healthy
@@ -101,7 +98,6 @@ services:
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
       EIREL_WEB_SEARCH_TOOL_BACKEND: ${EIREL_WEB_SEARCH_TOOL_BACKEND:-catalog}
       EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
-      EIREL_SEMANTIC_SCHOLAR_TOOL_URL: ${EIREL_SEMANTIC_SCHOLAR_TOOL_URL:-http://semantic-scholar-tool-service:8087}
       EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
     depends_on:
       postgres:
@@ -113,8 +109,6 @@ services:
       web-search-tool-service:
         condition: service_healthy
       x-tool-service:
-        condition: service_healthy
-      semantic-scholar-tool-service:
         condition: service_healthy
       sandbox-tool-service:
         condition: service_healthy
@@ -221,27 +215,6 @@ services:
     restart: unless-stopped
     ports:
       - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${X_TOOL_SERVICE_HOST_PORT:-18086}:8086"
-
-  semantic-scholar-tool-service:
-    <<: *eirel-ai-run
-    command: ["semantic-scholar-tool-service"]
-    environment:
-      EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN: ${EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN:-}
-      EIREL_SEMANTIC_SCHOLAR_API_KEY: ${EIREL_SEMANTIC_SCHOLAR_API_KEY:-}
-      EIREL_SEMANTIC_SCHOLAR_TOOL_PORT: 8087
-      REDIS_URL: ${REDIS_URL}
-    depends_on:
-      redis:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8087/healthz')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    ports:
-      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${SEMANTIC_SCHOLAR_TOOL_SERVICE_HOST_PORT:-18087}:8087"
 
   sandbox-tool-service:
     <<: *eirel-ai-run

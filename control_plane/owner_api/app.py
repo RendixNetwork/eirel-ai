@@ -258,7 +258,7 @@ async def lifespan(app: FastAPI):
     logger.info(
         "owner-api startup: backend=%s, database_url=%s, redis_url=%s, "
         "provider_proxy_url=%s, web_search_tool_url=%s, x_tool_url=%s, "
-        "semantic_scholar_tool_url=%s, sandbox_tool_url=%s, "
+        "sandbox_tool_url=%s, "
         "namespace=%s, system_namespace=%s, control_plane_namespace=%s",
         settings.owner_runtime_backend,
         settings.database_url,
@@ -266,7 +266,6 @@ async def lifespan(app: FastAPI):
         settings.provider_proxy_url,
         settings.web_search_tool_service_url,
         settings.x_tool_service_url,
-        settings.semantic_scholar_tool_service_url,
         settings.sandbox_tool_service_url,
         settings.owner_runtime_namespace,
         settings.owner_runtime_system_namespace,

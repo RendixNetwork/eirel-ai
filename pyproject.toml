@@ -56,7 +56,6 @@ weight-setter = "validation.weight_setter.main:main"
 # Supporting services
 web-search-tool-service = "tool_platforms.web_search_tool_service.app:main"
 x-tool-service = "tool_platforms.x_tool_service.app:main"
-semantic-scholar-tool-service = "tool_platforms.semantic_scholar_tool_service.app:main"
 sandbox-tool-service = "tool_platforms.sandbox_tool_service.app:main"
 eirel-provider-proxy = "tool_platforms.provider_proxy.main:main"
 
