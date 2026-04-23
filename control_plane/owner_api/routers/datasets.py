@@ -1,38 +1,23 @@
 """Owner-signed admin endpoints for dataset bindings.
 
-Post-refactor the only supported family is ``general_chat``. The forge
-generates a ``GeneralChatBundle`` deterministically from a seed and
-serializes it into an ``OwnerDatasetBinding`` row so validators can read
-it back through the normal loader path.
+Operators register out-of-band-generated bundles in the
+``OwnerDatasetBinding`` table and flip their status via these endpoints.
+Validators read bundles back through the normal loader path.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from shared.common.models import OwnerDatasetBinding
-from shared.dataset_forge import (
-    FORGE_GENERATOR_VERSION,
-    ForgeError,
-    forge_general_chat_bundle,
-)
-from shared.dataset_forge.validator import (
-    BundleValidationError,
-    validate_general_chat_bundle,
-)
 
 from control_plane.owner_api.dependencies import require_owner_signature
 from control_plane.owner_api.managed import ManagedOwnerServices
 from control_plane.owner_api.schemas import (
     DatasetBindingListResponse,
     DatasetBindingResponse,
-    DatasetForgeRequest,
-    DatasetForgeResponse,
 )
 
 
@@ -61,104 +46,7 @@ def _binding_to_response(row: OwnerDatasetBinding) -> DatasetBindingResponse:
     )
 
 
-def _derive_rng_seed(run_id: str) -> int:
-    digest = hashlib.sha256(f"gc-forge:{run_id}".encode("utf-8")).digest()
-    return int.from_bytes(digest[:4], "big")
-
-
 # -- endpoints ----------------------------------------------------------
-
-
-@router.post(
-    "/v1/operators/datasets/{family_id}/forge",
-    response_model=DatasetForgeResponse,
-)
-async def forge_dataset(
-    family_id: str,
-    payload: DatasetForgeRequest,
-    request: Request,
-    _: str = Depends(require_owner_signature),
-) -> DatasetForgeResponse:
-    if family_id != "general_chat":
-        raise HTTPException(
-            status_code=400,
-            detail=f"family={family_id!r} is not supported (general_chat only at launch)",
-        )
-    services: ManagedOwnerServices = request.app.state.services
-
-    try:
-        bundle = forge_general_chat_bundle(
-            size=200,
-            rng_seed=_derive_rng_seed(payload.run_id),
-        )
-    except ForgeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-    try:
-        report = validate_general_chat_bundle(bundle)
-    except BundleValidationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-    canonical_bytes = json.dumps(
-        bundle.model_dump(mode="json"), sort_keys=True
-    ).encode("utf-8")
-    bundle_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
-    bundle_uri = f"memory://general_chat/{payload.run_id}"
-
-    activate = payload.activate
-    activated_at = datetime.now(UTC).replace(tzinfo=None) if activate else None
-    with services.db.sessionmaker() as session:
-        existing = (
-            session.query(OwnerDatasetBinding)
-            .filter_by(family_id=family_id, run_id=payload.run_id)
-            .one_or_none()
-        )
-        if existing is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"binding for ({family_id}, {payload.run_id}) already exists; "
-                    f"supersede it before re-forging"
-                ),
-            )
-        if activate:
-            session.query(OwnerDatasetBinding).filter_by(
-                family_id=family_id, status="active"
-            ).update({"status": "superseded"})
-        binding = OwnerDatasetBinding(
-            family_id=family_id,
-            run_id=payload.run_id,
-            bundle_uri=bundle_uri,
-            bundle_sha256=bundle_sha256,
-            generator_version=FORGE_GENERATOR_VERSION,
-            generated_by="owner",
-            signature_hex="",
-            generator_provider="general_chat_forge",
-            generator_model="deterministic",
-            status="active" if activate else "pending",
-            provenance_json={
-                "bundle_id": bundle.bundle_id,
-                "metadata": dict(bundle.metadata or {}),
-            },
-            activated_at=activated_at,
-        )
-        session.add(binding)
-        session.commit()
-        session.refresh(binding)
-        binding_response = _binding_to_response(binding)
-
-    return DatasetForgeResponse(
-        binding=binding_response,
-        validation={
-            "total_fixtures": report.total_fixtures,
-            "scripted_count": report.scripted_count,
-            "simulated_count": report.simulated_count,
-            "category_distribution": report.category_distribution,
-            "difficulty_distribution": report.difficulty_distribution,
-        },
-        bundle_uri=bundle_uri,
-        history_record_uri=f"memory://general_chat/history/{payload.run_id}",
-    )
 
 
 @router.get(

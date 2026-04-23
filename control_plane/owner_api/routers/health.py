@@ -18,7 +18,8 @@ from shared.common.models import (
     RuntimeNodeSnapshot,
     ServingDeployment,
     ServingRelease,
-    MinerEvaluationTask,
+    TaskEvaluation,
+    TaskMinerResult,
     WorkflowEpisodeRecord,
 )
 from control_plane.owner_api.managed import ManagedOwnerServices
@@ -72,7 +73,7 @@ async def metrics(request: Request) -> Response:
         unhealthy_count = session.query(ManagedDeployment).filter_by(health_status="unhealthy").count()
         open_run_count = session.query(EpochTargetSnapshot).filter_by(status="open").count()
         aggregate_pending = session.query(AggregateFamilyScoreSnapshot).filter_by(status="pending").count()
-        validator_submission_count = session.query(MinerEvaluationTask).filter_by(status="evaluated").count()
+        validator_submission_count = session.query(TaskMinerResult).count()
         runtime_capacity = services.runtime_capacity_summary(session)
         workflow_episode_records = list(session.query(WorkflowEpisodeRecord).all())
         workflow_runtime_health = services._workflow_runtime_health_summary(
@@ -431,29 +432,27 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         (run_id, family_id): winner
         for run_id, family_id, winner in winner_rows
     }
+    # Per-(run, family, miner) counts derived from TaskMinerResult. Under
+    # the pairwise redesign every row represents a completed judgment, so
+    # total == evaluated; errored judgments are still rows with verdict=error.
     task_rows = (
         session.query(
-            MinerEvaluationTask.run_id,
-            MinerEvaluationTask.family_id,
-            MinerEvaluationTask.miner_hotkey,
-            MinerEvaluationTask.status,
+            TaskMinerResult.run_id,
+            TaskMinerResult.family_id,
+            TaskMinerResult.miner_hotkey,
             func.count(),
         )
-        .filter(MinerEvaluationTask.run_id.in_(run_ids))
+        .filter(TaskMinerResult.run_id.in_(run_ids))
         .group_by(
-            MinerEvaluationTask.run_id,
-            MinerEvaluationTask.family_id,
-            MinerEvaluationTask.miner_hotkey,
-            MinerEvaluationTask.status,
+            TaskMinerResult.run_id,
+            TaskMinerResult.family_id,
+            TaskMinerResult.miner_hotkey,
         )
         .all()
     )
     task_totals: dict[tuple[str, str, str], dict[str, int]] = {}
-    for run_id, family_id, hotkey, status, count in task_rows:
-        bucket = task_totals.setdefault((run_id, family_id, hotkey), {"evaluated": 0, "total": 0})
-        bucket["total"] += count
-        if status == "evaluated":
-            bucket["evaluated"] += count
+    for run_id, family_id, hotkey, count in task_rows:
+        task_totals[(run_id, family_id, hotkey)] = {"evaluated": count, "total": count}
 
     allowed_pairs = {
         (run_id, family_id)
@@ -575,14 +574,17 @@ def _collect_live_run_rows(session) -> dict[str, Any]:
         return {"run_id": None, "tasks": [], "progress": {}}
 
     tasks = (
-        session.query(MinerEvaluationTask)
+        session.query(TaskMinerResult)
         .filter_by(run_id=open_run.id)
         .all()
     )
     rows: list[dict[str, Any]] = []
     progress: dict[tuple[str, str, str], int] = {}
     for task in tasks:
-        status = task.status if task.status in _LIVE_RUN_STATUSES else "pending"
+        # Under the pairwise schema every TaskMinerResult row represents a
+        # landed judgment. A verdict of "error" is the analog of old "failed";
+        # everything else is "evaluated".
+        status = "evaluated" if task.agreement_verdict != "error" else "failed"
         response = (task.miner_response_json or {}).get("response") or {}
         output = response.get("output") or {}
         out_meta = output.get("metadata") or {}
@@ -597,10 +599,10 @@ def _collect_live_run_rows(session) -> dict[str, Any]:
                 "family_id": task.family_id,
                 "hotkey": task.miner_hotkey,
                 "task_id": task.task_id,
-                "task_index": int(task.task_index or 0),
+                "task_index": 0,
                 "status": status,
-                "score": float(task.task_score or 0.0),
-                "latency_ms": int(response.get("latency_ms") or 0),
+                "score": float(task.agreement_score or 0.0),
+                "latency_ms": int(task.latency_seconds * 1000) if task.latency_seconds else 0,
                 "web_search_enabled": bool(out_meta.get("web_search_enabled", False)),
                 "web_search_used": 1 if web_search_used else 0,
                 "tool_call_count": len(tool_calls),

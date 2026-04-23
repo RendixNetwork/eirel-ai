@@ -300,10 +300,12 @@ def _build_network_policy(
         ],
         "ports": [{"port": 53, "protocol": "UDP"}],
     })
-    egress_rules.append({
-        "to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}],
-        "ports": [{"port": 443, "protocol": "TCP"}],
-    })
+    # Deliberately NO blanket 0.0.0.0/0:443 rule. Miners must route LLM
+    # traffic through provider-proxy (chutes-only) and retrieval through
+    # the owner-operated tool services — no direct outbound HTTPS to
+    # api.openai.com, api.anthropic.com, or anywhere else. This preserves
+    # the baseline-as-reference property (miners run open-source models
+    # through the proxy, they can't clone GPT-5 to win).
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",

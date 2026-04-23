@@ -87,6 +87,72 @@ def _signed_headers(*, signer, method: str, path: str, body: bytes) -> dict[str,
     return signer.signed_headers(method, path, sha256_hex(body))
 
 
+def _extract_answer_text(run) -> str:
+    """Pull the miner's final-answer text out of a BenchmarkTaskRun.
+
+    The agreement judge sees ONLY the final answer — no tool_calls, no
+    citations, no trace. Most miner SDKs put the answer at
+    ``response.output.content`` (dict) or ``response.output.text``.
+    Fall back to str(response) when structure is unknown.
+    """
+    resp = getattr(run, "response", None) or {}
+    if isinstance(resp, dict):
+        output = resp.get("output") or {}
+        if isinstance(output, dict):
+            content = output.get("content") or output.get("text")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                # some SDKs emit content as a list of text blocks
+                return "\n\n".join(
+                    (b.get("text") if isinstance(b, dict) else str(b))
+                    for b in content if b
+                )
+        # Fallback: flatten the whole response dict as text without URLs.
+        text = resp.get("text") or resp.get("content") or ""
+        if isinstance(text, str) and text:
+            return text
+    return str(resp) if resp else ""
+
+
+def _extract_miner_citations(run) -> list[dict[str, Any]]:
+    """Pull the miner's cited URLs out of a BenchmarkTaskRun for dashboard
+    display only. These do NOT participate in scoring.
+
+    Looks in two likely locations:
+      * ``response.output.citations`` — structured list of citation dicts
+      * ``response.output.tool_calls`` of type ``web_search`` — URL results
+    Returns an empty list when no citations are present.
+    """
+    resp = getattr(run, "response", None) or {}
+    if not isinstance(resp, dict):
+        return []
+    output = resp.get("output") or {}
+    if not isinstance(output, dict):
+        return []
+    citations: list[dict[str, Any]] = []
+    structured = output.get("citations")
+    if isinstance(structured, list):
+        for c in structured:
+            if isinstance(c, dict):
+                citations.append({
+                    "url": str(c.get("url") or ""),
+                    "title": str(c.get("title") or ""),
+                })
+    tool_calls = output.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tc in tool_calls:
+            if not isinstance(tc, dict) or tc.get("tool_name") != "web_search":
+                continue
+            for result in (tc.get("result") or {}).get("results", []) or []:
+                if isinstance(result, dict) and result.get("url"):
+                    citations.append({
+                        "url": str(result.get("url") or ""),
+                        "title": str(result.get("title") or ""),
+                    })
+    return citations
+
+
 async def _resolve_targets(
     *,
     run_id: str,
@@ -472,67 +538,89 @@ async def run_distributed_benchmarks(
     *,
     run_id: str | None = None,
     family_id: str,
-    batch_size: int = 5,
-    max_parallel: int = 5,
-    rubric_version: str = "family_rubric_v2",
+    batch_size: int = 2,
+    max_parallel: int = 2,
+    rubric_version: str = "pairwise_general_chat_v1",
     judge_model: str = "local-rubric-judge",
 ) -> dict[str, Any]:
-    """Claim tasks from the owner-api, evaluate them in parallel, submit results.
+    """Claim task-level evaluations, fan out to all miners + OpenAI baseline,
+    pairwise-judge, and submit the full batch of per-miner results.
 
-    If *run_id* is ``None`` the owner-api defaults to the current open run.
+    Redesigned flow (see plan `im-gonna-update-the-reflective-curry.md`):
+      1. Claim a batch of tasks (task-level lease, one row per task).
+      2. For each claimed task, in parallel under `max_parallel`:
+         a. Fan out to every miner listed on the claim + call OpenAI baseline.
+            Wall clock cap 3 minutes; per-miner failures don't kill the task.
+         b. Pairwise-judge each miner response vs the baseline, with A/B
+            position randomized per miner.
+         c. Submit one result payload carrying all per-miner verdicts.
+      3. Repeat until no pending tasks remain.
 
-    The validator acts as a generic worker:
-    1. Claim a batch of tasks (may span different miners)
-    2. Execute all claimed tasks in parallel (invoke miner + judge)
-    3. Submit results as they complete
-    4. Repeat until no pending tasks remain
-
-    Multiple validators run this loop concurrently.  The owner-api's
-    ``FOR UPDATE SKIP LOCKED`` guarantees each task is assigned to
-    exactly one validator at a time.  If a validator crashes, its
-    claimed tasks expire and become available to other validators.
+    If the OpenAI baseline call fails, the task is released back to pending
+    via ``mark_baseline_failed`` so another validator can try.
     """
     import asyncio
     import json as _json
+    import secrets
 
     from shared.benchmark._invocation import _invoke_task
     from shared.benchmark._judge import build_judge_excerpt
     from shared.core.evaluation_models import BenchmarkTaskRun
     from shared.core.judge_client import JudgeServiceClient
+    from validation.validator.openai_baseline import (
+        OpenAIBaselineClient,
+        OpenAIBaselineError,
+    )
 
     family_id = ensure_active_family_id(family_id)
     signer = _load_validator_signer()
     owner_url = _owner_api_url()
 
-    # Decentralized judge: each validator runs its own eiretes-judge
-    # sidecar at EIREL_JUDGE_SERVICE_URL (defaults to http://eiretes-judge:8095).
-    # The LLM judge call + its cost live on the validator side; anti-gaming
-    # scoring (trace integrity gate, honeytoken detection, latency penalty)
-    # still runs server-side inside submit_task_result so the gaming
-    # heuristics + honeytoken URLs don't leak to miners.
+    # Pairwise judge + OpenAI baseline clients are reused across tasks.
     judge_client = JudgeServiceClient()
+    baseline_client = OpenAIBaselineClient()
 
     total_claimed = 0
     total_submitted = 0
     total_failed = 0
+    total_baseline_failed = 0
     _benchmark_started_at = time.perf_counter()
     _metrics.benchmark_runs_started_total.labels(family=family_id).inc()
     _benchmark_outcome = "success"
 
-    async def _evaluate_and_submit(task_claim: dict[str, Any]) -> bool:
-        """Evaluate a single task and submit the result. Returns True on success."""
-        task_assignment_id = task_claim["task_assignment_id"]
+    _FAN_OUT_TIMEOUT_SECONDS = 180.0
+
+    async def _invoke_one_miner(
+        miner: dict[str, Any], task_obj: Any, task_id: str,
+    ) -> tuple[str, BenchmarkTaskRun]:
+        miner_target = MinerBenchmarkTarget(
+            hotkey=miner["hotkey"],
+            endpoint=miner["endpoint"],
+            stake=0,
+            metadata={"auth_headers": miner.get("auth_headers", {})},
+        )
+        try:
+            run = await _invoke_task(
+                miner=miner_target, task=task_obj, timeout_seconds=_FAN_OUT_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            run = BenchmarkTaskRun(
+                task_id=task_id, family_id=family_id,
+                prompt=task_obj.prompt, expected_output=task_obj.expected_output,
+                response={}, status="failed", error=str(exc), metadata={},
+            )
+        return miner["hotkey"], run
+
+    async def _evaluate_task(task_claim: dict[str, Any]) -> str:
+        """Evaluate one task across all miners. Returns 'ok',
+        'baseline_failed', or 'submit_failed'."""
+        task_evaluation_id = task_claim["task_evaluation_id"]
         task_payload = task_claim["task_payload"]
         task_id = task_claim["task_id"]
+        miners = task_claim.get("miners") or []
+        if not miners:
+            return "ok"  # nothing to evaluate
 
-        miner_target = MinerBenchmarkTarget(
-            hotkey=task_claim["miner_hotkey"],
-            endpoint=task_claim["miner_endpoint"],
-            stake=0,
-            metadata={"auth_headers": task_claim.get("miner_auth_headers", {})},
-        )
-
-        # Build a task-like object for _invoke_task
         class _TaskProxy:
             pass
         task_obj = _TaskProxy()
@@ -543,72 +631,126 @@ async def run_distributed_benchmarks(
         task_obj.inputs = _hydrate_agent_inputs(task_payload)
         task_obj.metadata = task_payload.get("metadata", {})
         task_obj.execution_mode = task_payload.get("execution_mode")
+        task_mode = str(task_obj.inputs.get("mode") or "instant")
 
-        # Invoke the miner
-        try:
-            task_run: BenchmarkTaskRun = await _invoke_task(
-                miner=miner_target, task=task_obj, timeout_seconds=180.0,
-            )
-        except Exception as exc:
-            task_run = BenchmarkTaskRun(
-                task_id=task_id, family_id=family_id,
-                prompt=task_obj.prompt, expected_output=task_obj.expected_output,
-                response={}, status="failed", error=str(exc), metadata={},
-            )
+        # Fan out: all miners + baseline concurrently, bounded by wall clock
+        baseline_task = asyncio.create_task(
+            baseline_client.generate(prompt=task_obj.prompt)
+        )
+        miner_tasks = [
+            asyncio.create_task(_invoke_one_miner(m, task_obj, task_id)) for m in miners
+        ]
 
-        # Decentralized judge: call our local eiretes-judge sidecar. The
-        # LLM judge call + its cost live on the validator side. The
-        # resulting ``quality_score`` is sent in ``/tasks/<id>/result`` as
-        # ``task_score``; the owner-api then applies layered anti-gaming
-        # scoring (trace integrity gate, honeytoken detection, latency
-        # penalty) before storing the final score. That way miners never
-        # see the anti-gaming heuristics or the honeytoken URL list.
-        judge_output: dict[str, Any] | None = None
-        task_score = 0.0
-        _judge_started_at = time.perf_counter()
-        _judge_outcome = "success"
         try:
-            excerpt = build_judge_excerpt(family_id=family_id, run=task_run)
-            mode = str(task_obj.inputs.get("mode") or "instant")
-            rubric_variant = task_payload.get("rubric_variant")
-            # JudgeServiceClient is synchronous; offload to a thread so the
-            # validator's max_parallel concurrency model keeps working.
-            judge_result = await asyncio.to_thread(
-                judge_client.judge,
-                family_id=family_id,
-                prompt=task_obj.prompt,
-                response_excerpt=excerpt,
-                mode=mode,
-                rubric_variant=rubric_variant,
-            )
-            task_score = float(judge_result.score or 0.0)
-            judge_output = judge_result.model_dump(mode="json")
-        except Exception as exc:
+            async with asyncio.timeout(_FAN_OUT_TIMEOUT_SECONDS):
+                miner_runs = await asyncio.gather(*miner_tasks, return_exceptions=True)
+                baseline = await baseline_task
+        except OpenAIBaselineError as exc:
             logger.warning(
-                "local judge call failed for task=%s: %s; submitting empty judge_output",
-                task_assignment_id, exc,
+                "baseline failed for task_eval=%s: %s; releasing task",
+                task_evaluation_id, exc,
             )
-            _judge_outcome = "failed"
-        finally:
-            _metrics.judge_duration_seconds.labels(family=family_id).observe(
-                time.perf_counter() - _judge_started_at
+            for t in miner_tasks:
+                t.cancel()
+            await _release_baseline_failed(
+                task_evaluation_id=task_evaluation_id, signer=signer, owner_url=owner_url,
             )
-            _metrics.judge_invocations_total.labels(
-                judge_model=judge_model, outcome=_judge_outcome
-            ).inc()
+            return "baseline_failed"
+        except TimeoutError:
+            logger.warning(
+                "fan-out exceeded %.0fs for task_eval=%s",
+                _FAN_OUT_TIMEOUT_SECONDS, task_evaluation_id,
+            )
+            for t in (*miner_tasks, baseline_task):
+                if not t.done():
+                    t.cancel()
+            return "submit_failed"
 
-        # Submit result back to owner-api
-        result_path = f"/v1/families/{family_id}/tasks/{task_assignment_id}/result"
+        baseline_text = baseline.response_text
+        task_category = task_payload.get("category") or (task_obj.metadata or {}).get("category")
+
+        # Agreement-judge each miner concurrently with position randomization.
+        # The judge sees only the final answer text — citations are stripped.
+        async def _judge_miner(miner_run: tuple[str, BenchmarkTaskRun]) -> dict[str, Any]:
+            miner_hotkey, run = miner_run
+            miner_citations = _extract_miner_citations(run)
+            if run.status != "completed":
+                return {
+                    "miner_hotkey": miner_hotkey,
+                    "miner_response": run.model_dump(mode="json"),
+                    "miner_citations": miner_citations,
+                    "judge_output": None,
+                    "agreement_score": 0.0,
+                    "verdict": "error",
+                    "latency_seconds": 0.0,
+                }
+            try:
+                miner_answer = _extract_answer_text(run)
+                swap = bool(secrets.randbits(1))
+                judge_started = time.perf_counter()
+                judge_result = await asyncio.to_thread(
+                    judge_client.judge_agreement,
+                    family_id=family_id,
+                    prompt=task_obj.prompt,
+                    response_a=miner_answer,
+                    response_b=baseline_text,
+                    task_mode=task_mode,
+                    task_category=task_category,
+                    swap=swap,
+                )
+                judge_latency = max(0.0, time.perf_counter() - judge_started)
+                return {
+                    "miner_hotkey": miner_hotkey,
+                    "miner_response": run.model_dump(mode="json"),
+                    "miner_citations": miner_citations,
+                    "judge_output": judge_result.model_dump(mode="json"),
+                    "agreement_score": float(judge_result.agreement_score or 0.0),
+                    "verdict": judge_result.verdict,
+                    "latency_seconds": judge_latency,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "agreement judge failed for miner=%s task_eval=%s: %s",
+                    miner_hotkey[:16], task_evaluation_id, exc,
+                )
+                return {
+                    "miner_hotkey": miner_hotkey,
+                    "miner_response": run.model_dump(mode="json"),
+                    "miner_citations": miner_citations,
+                    "judge_output": None,
+                    "agreement_score": 0.0,
+                    "verdict": "error",
+                    "latency_seconds": 0.0,
+                }
+
+        # Materialize the gather results (handle exceptions from miner fan-out)
+        resolved_runs: list[tuple[str, BenchmarkTaskRun]] = []
+        for miner, result in zip(miners, miner_runs):
+            if isinstance(result, BaseException):
+                resolved_runs.append((
+                    miner["hotkey"],
+                    BenchmarkTaskRun(
+                        task_id=task_id, family_id=family_id,
+                        prompt=task_obj.prompt, expected_output=task_obj.expected_output,
+                        response={}, status="failed", error=str(result), metadata={},
+                    ),
+                ))
+            else:
+                resolved_runs.append(result)
+
+        judge_results = await asyncio.gather(*[_judge_miner(r) for r in resolved_runs])
+
+        # Submit the batch
+        result_path = f"/v1/families/{family_id}/task-evaluations/{task_evaluation_id}/result"
         result_body = {
-            "miner_response": task_run.model_dump(mode="json"),
-            "judge_output": judge_output,
-            "task_score": task_score,
-            "task_status": task_run.status,
-            "metadata": {"validator_hotkey": signer.hotkey, "judge_model": judge_model},
+            "baseline_response": baseline.model_dump(mode="json"),
+            "miner_results": judge_results,
+            "validator_hotkey": signer.hotkey,
+            "judge_model": judge_model,
         }
         result_body_bytes = _json.dumps(result_body).encode()
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     f"{owner_url}{result_path}",
                     content=result_body_bytes,
@@ -618,59 +760,63 @@ async def run_distributed_benchmarks(
                     },
                 )
                 resp.raise_for_status()
-            return True
-        except Exception:
-            return False
+            return "ok"
+        except Exception as exc:
+            logger.warning("submit failed for task_eval=%s: %s", task_evaluation_id, exc)
+            return "submit_failed"
 
-    # Main loop: claim → parallel evaluate → submit → repeat
     sem = asyncio.Semaphore(max_parallel)
 
-    async def _bounded_evaluate(task_claim: dict[str, Any]) -> bool:
+    async def _bounded_evaluate(task_claim: dict[str, Any]) -> str:
         async with sem:
-            return await _evaluate_and_submit(task_claim)
+            return await _evaluate_task(task_claim)
 
-    while True:
-        # Claim a batch
-        claim_path = f"/v1/families/{family_id}/tasks/claim"
-        claim_body: dict[str, Any] = {"batch_size": batch_size}
-        if run_id:
-            claim_body["run_id"] = run_id
-        claim_body_bytes = _json.dumps(claim_body).encode()
+    try:
+        while True:
+            claim_path = f"/v1/families/{family_id}/tasks/claim"
+            claim_body: dict[str, Any] = {"batch_size": batch_size}
+            if run_id:
+                claim_body["run_id"] = run_id
+            claim_body_bytes = _json.dumps(claim_body).encode()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            claim_response = await client.post(
-                f"{owner_url}{claim_path}",
-                content=claim_body_bytes,
-                headers={
-                    **_signed_headers(signer=signer, method="POST", path=claim_path, body=claim_body_bytes),
-                    "Content-Type": "application/json",
-                },
-            )
-            if claim_response.status_code == 404:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                claim_response = await client.post(
+                    f"{owner_url}{claim_path}",
+                    content=claim_body_bytes,
+                    headers={
+                        **_signed_headers(signer=signer, method="POST", path=claim_path, body=claim_body_bytes),
+                        "Content-Type": "application/json",
+                    },
+                )
+                if claim_response.status_code == 404:
+                    break
+                claim_response.raise_for_status()
+                claim_data = claim_response.json()
+
+            tasks = claim_data.get("tasks", [])
+            if not tasks:
                 break
-            claim_response.raise_for_status()
-            claim_data = claim_response.json()
 
-        tasks = claim_data.get("tasks", [])
-        if not tasks:
-            break
+            total_claimed += len(tasks)
 
-        total_claimed += len(tasks)
+            results = await asyncio.gather(
+                *[_bounded_evaluate(t) for t in tasks],
+                return_exceptions=True,
+            )
+            for r in results:
+                if r == "ok":
+                    total_submitted += 1
+                elif r == "baseline_failed":
+                    total_baseline_failed += 1
+                else:
+                    total_failed += 1
+    finally:
+        judge_client.close()
+        await baseline_client.aclose()
 
-        # Evaluate all claimed tasks in parallel
-        results = await asyncio.gather(
-            *[_bounded_evaluate(t) for t in tasks],
-            return_exceptions=True,
-        )
-        for r in results:
-            if r is True:
-                total_submitted += 1
-            else:
-                total_failed += 1
-
-    if total_claimed > 0 and total_failed == total_claimed:
+    if total_claimed > 0 and (total_failed + total_baseline_failed) == total_claimed:
         _benchmark_outcome = "failed"
-    elif total_claimed > 0 and total_failed > 0:
+    elif total_claimed > 0 and (total_failed + total_baseline_failed) > 0:
         _benchmark_outcome = "partial"
     _metrics.benchmark_run_duration_seconds.labels(family=family_id).observe(
         time.perf_counter() - _benchmark_started_at
@@ -678,7 +824,6 @@ async def run_distributed_benchmarks(
     _metrics.benchmark_runs_completed_total.labels(
         family=family_id, outcome=_benchmark_outcome
     ).inc()
-    judge_client.close()
 
     return {
         "run_id": run_id,
@@ -686,4 +831,26 @@ async def run_distributed_benchmarks(
         "total_claimed": total_claimed,
         "total_submitted": total_submitted,
         "total_failed": total_failed,
+        "total_baseline_failed": total_baseline_failed,
     }
+
+
+async def _release_baseline_failed(
+    *, task_evaluation_id: str, signer, owner_url: str,
+) -> None:
+    """POST to owner-api to release a claim after baseline failure."""
+    import json as _json
+    path = f"/v1/families/general_chat/task-evaluations/{task_evaluation_id}/baseline-failed"
+    body = _json.dumps({}).encode()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await client.post(
+                f"{owner_url}{path}",
+                content=body,
+                headers={
+                    **_signed_headers(signer=signer, method="POST", path=path, body=body),
+                    "Content-Type": "application/json",
+                },
+            )
+    except Exception as exc:
+        logger.warning("failed to release baseline-failed task=%s: %s", task_evaluation_id, exc)

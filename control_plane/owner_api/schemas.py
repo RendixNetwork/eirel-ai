@@ -282,13 +282,6 @@ class WeightsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class DatasetForgeRequest(BaseModel):
-    run_id: str = Field(min_length=1, max_length=128)
-    activate: bool = False
-    dry_run: bool = False
-    base_uri: str | None = None
-
-
 class DatasetBindingResponse(BaseModel):
     id: str
     family_id: str
@@ -304,13 +297,6 @@ class DatasetBindingResponse(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     activated_at: datetime | None = None
-
-
-class DatasetForgeResponse(BaseModel):
-    binding: DatasetBindingResponse
-    validation: dict[str, Any] = Field(default_factory=dict)
-    bundle_uri: str
-    history_record_uri: str
 
 
 class DatasetBindingListResponse(BaseModel):

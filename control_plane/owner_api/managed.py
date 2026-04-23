@@ -115,7 +115,6 @@ class ManagedOwnerServices:
     runtime_manager: ManagedDeploymentRuntimeManager
     artifact_store: ArtifactStore
     object_store: ObjectStore | None = None
-    dataset_forge_keypair: Any | None = None
     bundle_signature_verifier: Any | None = None
     top_k_per_group: int = 3
     benchmark_version: str = "family_benchmark_v2"
@@ -143,15 +142,6 @@ class ManagedOwnerServices:
     def __post_init__(self) -> None:
         if self.object_store is None:
             self.object_store = ObjectStore.from_settings(self.settings)
-        if self.bundle_signature_verifier is None and self.dataset_forge_keypair is not None:
-            # If a keypair was supplied (tests + production wiring), use it
-            # as the verification key for bundles loaded via binding. The
-            # forge and the loader verify against the same hotkey by design.
-            from control_plane.owner_api.dataset_loader import KeypairSignatureVerifier
-
-            self.bundle_signature_verifier = KeypairSignatureVerifier(
-                self.dataset_forge_keypair
-            )
         self.weights = WeightManager(self)
         self.leases = LeaseManager(self)
         self.tasks = TaskOrchestrator(self)

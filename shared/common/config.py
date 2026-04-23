@@ -81,24 +81,6 @@ def _validate_dataset_source_type(value: str) -> None:
         )
 
 
-def _validate_forge_cross_vendor(
-    *,
-    generator_provider: str,
-    generator_base_url: str,
-    judge_base_url: str,
-    must_differ: bool,
-) -> None:
-    if not must_differ:
-        return
-    if not generator_provider and not generator_base_url:
-        return  # Forge not configured yet; no collision to check.
-    if generator_base_url and judge_base_url and generator_base_url == judge_base_url:
-        raise ValueError(
-            "invalid EIREL_DATASET_FORGE_GENERATOR_BASE_URL: must differ from EIREL_JUDGE_BASE_URL "
-            "(set EIREL_DATASET_FORGE_JUDGE_PROVIDER_MUST_DIFFER=false to override)"
-        )
-
-
 def _resolve_baremetal_inventory_path() -> str:
     """Resolve the baremetal inventory path.
 
@@ -749,32 +731,6 @@ class Settings:
         )
     )
 
-    # -- Dataset forge (generator LLM config) ---------------------------
-    dataset_forge_generator_provider: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_PROVIDER", "")
-    )
-    dataset_forge_generator_model: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_MODEL", "")
-    )
-    dataset_forge_generator_base_url: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_BASE_URL", "")
-    )
-    dataset_forge_generator_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_API_KEY", "")
-    )
-    dataset_forge_generator_timeout_seconds: float = field(
-        default_factory=lambda: _float_env("EIREL_DATASET_FORGE_GENERATOR_TIMEOUT_SECONDS", 60.0)
-    )
-    dataset_forge_judge_provider_must_differ: bool = field(
-        default_factory=lambda: _bool_env("EIREL_DATASET_FORGE_JUDGE_PROVIDER_MUST_DIFFER", True)
-    )
-    dataset_forge_owner_secret: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_OWNER_SECRET", "")
-    )
-    auto_trigger_dataset_forge: bool = field(
-        default_factory=lambda: _bool_env("EIREL_AUTO_TRIGGER_DATASET_FORGE", False)
-    )
-
     # -- Owner identity / signing ---------------------------------------
     # The owner SS58 is derived from the wallet + hotkey names at startup.
     # `owner_hotkey_ss58` is runtime-only (resolved from the wallet files).
@@ -789,25 +745,6 @@ class Settings:
     def __post_init__(self) -> None:
         self.owner_dataset_root_path = _validate_owner_dataset_root(self.owner_dataset_root_path)
         _validate_dataset_source_type(self.owner_dataset_source_type)
-        _validate_forge_cross_vendor(
-            generator_provider=self.dataset_forge_generator_provider,
-            generator_base_url=self.dataset_forge_generator_base_url,
-            judge_base_url=self.judge_base_url,
-            must_differ=self.dataset_forge_judge_provider_must_differ,
-        )
-        # H1: in S3 mode the forge must use a non-empty owner secret so the
-        # hidden allocation RNG and the task-ID hash (C1) depend on something
-        # only the owner knows. In filesystem/dev mode an empty secret is
-        # allowed for convenience but logged as a warning by the forge CLI.
-        if (
-            self.owner_dataset_source_type == "s3"
-            and not self.dataset_forge_owner_secret
-        ):
-            raise ValueError(
-                "EIREL_DATASET_FORGE_OWNER_SECRET must be set when "
-                "EIREL_OWNER_DATASET_SOURCE_TYPE=s3 — without it the hidden "
-                "allocation RNG and task-ID hash are predictable from run_id alone"
-            )
 
         # Interval and timeout validation
         for _field_name in (

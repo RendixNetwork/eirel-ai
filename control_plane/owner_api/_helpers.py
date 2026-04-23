@@ -162,20 +162,13 @@ def _stamp_specialist_tasks(
 # Per-task metadata keys that must not reach validators or miners.
 # - ``hidden_fixture`` / ``visibility`` label a task as hidden — leaking
 #   either defeats the whole point of hidden fixtures.
-# - ``seed_id`` names the forge seed template the task was generated from.
-#   Across multiple runs a miner could cluster tasks by seed_id and learn
-#   which templates contribute hidden fixtures.
+# - ``seed_id`` names a seed template the task was generated from. Across
+#   multiple runs a miner could cluster tasks by seed_id and learn which
+#   templates contribute hidden fixtures.
 # - ``topic`` names the entry drawn from the topic pool. Similar cross-run
 #   inference attack surface.
 _SENSITIVE_TASK_METADATA_KEYS: frozenset[str] = frozenset(
     {"hidden_fixture", "visibility", "seed_id", "topic"}
-)
-
-# Bundle-level ``metadata.forge_provenance`` fields that are safe to expose.
-# Everything else in forge_provenance is scrubbed. These are the audit
-# breadcrumbs a validator/miner can see without compromising anti-gaming.
-_FORGE_PROVENANCE_SAFE_FIELDS: frozenset[str] = frozenset(
-    {"run_id", "generator_version", "generated_at", "seed_counts", "history_window"}
 )
 
 
@@ -211,14 +204,6 @@ def _strip_sensitive_task_metadata(task_dict: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _scrub_forge_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in provenance.items()
-        if key in _FORGE_PROVENANCE_SAFE_FIELDS
-    }
-
-
 def _strip_sensitive_bundle_metadata(bundle_dict: dict[str, Any]) -> dict[str, Any]:
     """Remove fields that must not be disclosed to validators or miners.
 
@@ -229,16 +214,11 @@ def _strip_sensitive_bundle_metadata(bundle_dict: dict[str, Any]) -> dict[str, A
 
     Stripped:
       - ``metadata.hidden_fixture_ids`` — the full list of hidden task IDs
-      - ``metadata.forge_provenance.{hidden_seed_ids, reasoning_puzzles_drawn,
-        topic_pool_slots, ...}`` — scrubbed to ``_FORGE_PROVENANCE_SAFE_FIELDS``
       - per-task ``metadata.{hidden_fixture, visibility, seed_id, topic}``
     """
     bundle_dict = dict(bundle_dict)
     meta = dict(bundle_dict.get("metadata") or {})
     meta.pop("hidden_fixture_ids", None)
-    forge_provenance = meta.get("forge_provenance")
-    if isinstance(forge_provenance, dict):
-        meta["forge_provenance"] = _scrub_forge_provenance(forge_provenance)
     bundle_dict["metadata"] = meta
 
     tasks = bundle_dict.get("tasks")
@@ -253,9 +233,8 @@ def _strip_sensitive_bundle_metadata(bundle_dict: dict[str, Any]) -> dict[str, A
 def _enforce_strict_analyst_contract(bundle: FamilyEvaluationBundle) -> None:
     """Loader-side analyst constraint enforcement.
 
-    Re-runs the same checks the dataset_forge validator does, but at the *load*
-    boundary so a hand-crafted bundle (or one whose metadata changed under us)
-    cannot bypass the contract.
+    Enforces the analyst contract at the *load* boundary so a hand-crafted
+    bundle (or one whose metadata changed under us) cannot bypass it.
     """
     if bundle.family_id != "analyst":
         return
@@ -298,8 +277,9 @@ def _load_owner_evaluation_bundle_seed(
 
     Reads ``<root_path>/<family_id>.json`` from disk and re-runs the analyst
     contract. This path is used in dev mode and as a fallback when no
-    ``OwnerDatasetBinding`` exists for the run; production with the dataset
-    forge enabled goes through ``load_owner_evaluation_bundle_via_binding``.
+    ``OwnerDatasetBinding`` exists for the run; production with bundles
+    registered in the bindings table goes through
+    ``load_owner_evaluation_bundle_via_binding``.
     """
     family_id = ensure_family_id(family_id)
     payload = json.loads((Path(root_path) / f"{family_id}.json").read_text(encoding="utf-8"))

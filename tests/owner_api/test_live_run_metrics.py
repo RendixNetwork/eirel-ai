@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+"""Live-run metrics tests.
+
+Post-pairwise-redesign the live_run endpoint reads ``TaskMinerResult``
+rows (one per landed judgment) instead of ``MinerEvaluationTask``. A row
+with ``agreement_verdict="error"`` is rendered as status="failed";
+anything else renders as "evaluated".
+"""
+
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from shared.common.database import Database
 from shared.common.models import (
     EvaluationRun,
-    ManagedDeployment,
-    ManagedMinerSubmission,
-    MinerEvaluationTask,
-    SubmissionArtifact,
+    TaskEvaluation,
+    TaskMinerResult,
 )
 from control_plane.owner_api.routers.health import (
     _collect_live_run_rows,
@@ -31,7 +37,7 @@ def _seed_run(session, *, sequence: int, status: str, run_id: str | None = None)
         sequence=sequence,
         status=status,
         benchmark_version="test",
-        rubric_version="test",
+        rubric_version="pairwise_general_chat_v1",
         judge_model="test-judge",
         min_scores_json={},
         started_at=now - timedelta(minutes=5 * sequence),
@@ -43,46 +49,56 @@ def _seed_run(session, *, sequence: int, status: str, run_id: str | None = None)
     return run
 
 
-def _seed_task(
-    session,
-    *,
-    run_id: str,
-    hotkey: str,
-    task_id: str,
-    task_index: int,
-    status: str,
-    task_score: float | None = None,
-    miner_response_json: dict | None = None,
-    family_id: str = "general_chat",
-) -> MinerEvaluationTask:
-    t = MinerEvaluationTask(
+def _seed_task_eval(session, *, run_id: str, task_id: str, task_index: int = 0) -> TaskEvaluation:
+    te = TaskEvaluation(
         run_id=run_id,
-        family_id=family_id,
-        miner_hotkey=hotkey,
+        family_id="general_chat",
         task_id=task_id,
         task_index=task_index,
-        status=status,
-        task_score=task_score or 0.0,
-        miner_response_json=miner_response_json or {},
+        status="evaluated",
     )
-    session.add(t)
+    session.add(te)
     session.flush()
-    return t
+    return te
+
+
+def _seed_result(
+    session,
+    *,
+    task_evaluation: TaskEvaluation,
+    hotkey: str,
+    agreement_verdict: str = "matches",
+    agreement_score: float = 0.7,
+    latency_seconds: float = 0.5,
+    miner_response_json: dict | None = None,
+) -> TaskMinerResult:
+    r = TaskMinerResult(
+        task_evaluation_id=task_evaluation.id,
+        run_id=task_evaluation.run_id,
+        family_id=task_evaluation.family_id,
+        task_id=task_evaluation.task_id,
+        miner_hotkey=hotkey,
+        miner_response_json=miner_response_json or {},
+        miner_citations_json=[],
+        judge_output_json={},
+        agreement_verdict=agreement_verdict,
+        agreement_score=agreement_score,
+        latency_seconds=latency_seconds,
+    )
+    session.add(r)
+    session.flush()
+    return r
 
 
 def test_live_run_picks_open_run_only(tmp_path):
     db = _make_db(tmp_path)
     with db.sessionmaker() as s:
-        _seed_run(s, sequence=1, status="completed", run_id="run-old")
+        old_run = _seed_run(s, sequence=1, status="completed", run_id="run-old")
         open_run = _seed_run(s, sequence=2, status="open", run_id="run-now")
-        _seed_task(
-            s, run_id=open_run.id, hotkey="5Alice",
-            task_id="t-1", task_index=0, status="pending",
-        )
-        _seed_task(
-            s, run_id="run-old", hotkey="5Alice",
-            task_id="t-old", task_index=0, status="evaluated",
-        )
+        te_old = _seed_task_eval(s, run_id=old_run.id, task_id="t-old")
+        te_now = _seed_task_eval(s, run_id=open_run.id, task_id="t-1")
+        _seed_result(s, task_evaluation=te_old, hotkey="5Alice")
+        _seed_result(s, task_evaluation=te_now, hotkey="5Alice")
         s.commit()
 
         data = _collect_live_run_rows(s)
@@ -106,6 +122,10 @@ def test_live_run_extracts_tool_calls_and_score(tmp_path):
     db = _make_db(tmp_path)
     with db.sessionmaker() as s:
         run = _seed_run(s, sequence=1, status="open")
+        te_web = _seed_task_eval(s, run_id=run.id, task_id="t-web")
+        te_plain = _seed_task_eval(s, run_id=run.id, task_id="t-plain", task_index=1)
+        te_err = _seed_task_eval(s, run_id=run.id, task_id="t-err", task_index=2)
+
         response_with_web = {
             "response": {
                 "latency_ms": 924,
@@ -115,19 +135,21 @@ def test_live_run_extracts_tool_calls_and_score(tmp_path):
                 },
             }
         }
-        _seed_task(
-            s, run_id=run.id, hotkey="5Alice", task_id="t-web",
-            task_index=0, status="evaluated", task_score=0.825,
+        _seed_result(
+            s, task_evaluation=te_web, hotkey="5Alice",
+            agreement_verdict="matches", agreement_score=0.825,
+            latency_seconds=0.924,
             miner_response_json=response_with_web,
         )
-        _seed_task(
-            s, run_id=run.id, hotkey="5Alice", task_id="t-plain",
-            task_index=1, status="evaluated", task_score=0.49,
+        _seed_result(
+            s, task_evaluation=te_plain, hotkey="5Alice",
+            agreement_verdict="contradicts", agreement_score=0.49,
+            latency_seconds=0.3,
             miner_response_json={"response": {"latency_ms": 300, "output": {"tool_calls": [], "metadata": {}}}},
         )
-        _seed_task(
-            s, run_id=run.id, hotkey="5Alice", task_id="t-pending",
-            task_index=2, status="pending",
+        _seed_result(
+            s, task_evaluation=te_err, hotkey="5Alice",
+            agreement_verdict="error", agreement_score=0.0, latency_seconds=0.0,
         )
         s.commit()
         data = _collect_live_run_rows(s)
@@ -135,42 +157,11 @@ def test_live_run_extracts_tool_calls_and_score(tmp_path):
     by_task = {row["task_id"]: row for row in data["tasks"]}
     assert by_task["t-web"]["score"] == 0.825
     assert by_task["t-web"]["web_search_used"] == 1
-    assert by_task["t-web"]["latency_ms"] == 924
+    assert by_task["t-web"]["status"] == "evaluated"
     assert by_task["t-plain"]["web_search_used"] == 0
-    assert by_task["t-pending"]["is_evaluated"] == 0
-
-
-def test_live_run_formats_all_gauges(tmp_path):
-    db = _make_db(tmp_path)
-    with db.sessionmaker() as s:
-        run = _seed_run(s, sequence=1, status="open")
-        _seed_task(
-            s, run_id=run.id, hotkey="5Alice", task_id="t-1",
-            task_index=0, status="evaluated", task_score=0.7,
-            miner_response_json={
-                "response": {"latency_ms": 500, "output": {"tool_calls": [{"tool_name": "web_search"}], "metadata": {}}},
-            },
-        )
-        _seed_task(
-            s, run_id=run.id, hotkey="5Bob", task_id="t-1",
-            task_index=0, status="claimed",
-        )
-        s.commit()
-        data = _collect_live_run_rows(s)
-
-    body = _format_live_run_metrics(data)
-    # Status rows exist for both statuses
-    assert 'eirel_owner_task_status{run_id="run-1",family="general_chat",hotkey="5Alice",task_id="t-1",status="evaluated"} 1' in body
-    assert 'eirel_owner_task_status{run_id="run-1",family="general_chat",hotkey="5Bob",task_id="t-1",status="claimed"} 1' in body
-    # Score only emitted for evaluated
-    assert 'eirel_owner_task_score{run_id="run-1",family="general_chat",hotkey="5Alice",task_id="t-1"}' in body
-    assert 'eirel_owner_task_score{run_id="run-1",family="general_chat",hotkey="5Bob"' not in body
-    # Latency and web_search_used present for evaluated
-    assert 'eirel_owner_task_latency_ms{run_id="run-1",family="general_chat",hotkey="5Alice",task_id="t-1"} 500' in body
-    assert 'eirel_owner_task_web_search_used{run_id="run-1",family="general_chat",hotkey="5Alice",task_id="t-1"} 1' in body
-    # Progress gauge counts each (family,hotkey,status) bucket
-    assert 'eirel_owner_task_progress{run_id="run-1",family="general_chat",hotkey="5Alice",state="evaluated"} 1' in body
-    assert 'eirel_owner_task_progress{run_id="run-1",family="general_chat",hotkey="5Bob",state="claimed"} 1' in body
+    # Error verdict surfaces as "failed" status
+    assert by_task["t-err"]["status"] == "failed"
+    assert by_task["t-err"]["is_evaluated"] == 0
 
 
 def test_live_run_skips_retired_runs(tmp_path):

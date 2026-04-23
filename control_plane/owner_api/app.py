@@ -212,7 +212,7 @@ async def _claim_expiry_sweeper_loop(app: FastAPI) -> None:
     the same run+family.
     """
     from sqlalchemy import update
-    from shared.common.models import MinerEvaluationTask
+    from shared.common.models import TaskEvaluation
     from control_plane.owner_api._helpers import utcnow
 
     services: ManagedOwnerServices = app.state.services
@@ -222,9 +222,9 @@ async def _claim_expiry_sweeper_loop(app: FastAPI) -> None:
             with services.db.sessionmaker() as session:
                 now = utcnow()
                 result = session.execute(
-                    update(MinerEvaluationTask)
-                    .where(MinerEvaluationTask.status == "claimed")
-                    .where(MinerEvaluationTask.claim_expires_at <= now)
+                    update(TaskEvaluation)
+                    .where(TaskEvaluation.status == "claimed")
+                    .where(TaskEvaluation.claim_expires_at <= now)
                     .values(
                         status="pending",
                         claimed_by_validator=None,

@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from shared.core.evaluation_models import JudgeResult
+from shared.core.evaluation_models import AgreementJudgeOutput, VERDICT_SCORES
 
 _logger = logging.getLogger(__name__)
 
@@ -17,11 +17,12 @@ _BASE_BACKOFF_SECONDS = 1.0
 
 
 class JudgeServiceClient:
-    """Thin HTTP client that calls the eiretes judge sidecar service.
+    """HTTP client for the eiretes outcome-only agreement judge.
 
-    Replaces direct ``LLMJudgeClient`` usage — all judge configuration
-    (model, API keys, rubric version, ensemble settings) lives in the
-    eiretes service environment, not here.
+    Calls ``POST /v1/judge/agreement`` and adapts the response into the
+    shared ``AgreementJudgeOutput`` model. The judge itself returns just a
+    verdict + rationale; this client derives the scalar ``agreement_score``
+    from the verdict using ``VERDICT_SCORES``.
     """
 
     def __init__(
@@ -29,6 +30,7 @@ class JudgeServiceClient:
         *,
         base_url: str | None = None,
         timeout_seconds: float | None = None,
+        transport: httpx.BaseTransport | None = None,
     ):
         self.base_url = (
             base_url
@@ -39,7 +41,10 @@ class JudgeServiceClient:
             if timeout_seconds is not None
             else os.getenv("EIREL_JUDGE_TIMEOUT_SECONDS", "60")
         )
-        self._client = httpx.Client(timeout=self.timeout_seconds)
+        if transport is not None:
+            self._client = httpx.Client(timeout=self.timeout_seconds, transport=transport)
+        else:
+            self._client = httpx.Client(timeout=self.timeout_seconds)
 
     def close(self) -> None:
         self._client.close()
@@ -85,69 +90,57 @@ class JudgeServiceClient:
                     raise
         raise last_exc  # type: ignore[misc]
 
-    def judge(
+    def judge_agreement(
         self,
         *,
         family_id: str,
         prompt: str,
-        response_excerpt: str,
-        mode: str = "instant",
-        rubric_variant: str | None = None,
-    ) -> JudgeResult:
-        """Synchronous judge call. ``mode`` is one of ``instant`` / ``thinking``."""
+        response_a: str,
+        response_b: str,
+        task_mode: str | None = None,
+        task_category: str | None = None,
+        swap: bool = False,
+    ) -> AgreementJudgeOutput:
+        """Call the eiretes agreement judge and return ``AgreementJudgeOutput``.
+
+        A is the candidate agent, B is the OpenAI baseline reference.
+        Citations must have already been stripped from both responses by
+        the caller — the judge never sees them.
+        """
         t0 = time.monotonic()
         resp = self._request_with_retry(
-            path="/v1/judge",
+            path="/v1/judge/agreement",
             json_body={
                 "family_id": family_id,
                 "prompt": prompt,
-                "response_excerpt": response_excerpt,
-                "mode": mode,
-                "rubric_variant": rubric_variant,
+                "response_a": response_a,
+                "response_b": response_b,
+                "task_mode": task_mode,
+                "task_category": task_category,
+                "swap": swap,
             },
         )
         latency = time.monotonic() - t0
         _logger.debug(
-            "judge call: family=%s variant=%s latency=%.2fs",
-            family_id, rubric_variant, latency,
+            "agreement judge call: family=%s task_mode=%s category=%s swap=%s latency=%.2fs",
+            family_id, task_mode, task_category, swap, latency,
         )
-        return JudgeResult.model_validate(resp.json())
-
-    def extract_research_claims(
-        self,
-        *,
-        prompt: str,
-        report_markdown: str,
-        expert_guidance: list[str] | None = None,
-        required_report_sections: list[str] | None = None,
-        claim_index: list[dict[str, Any]] | None = None,
-        batch_size: int = 20,
-    ) -> dict[str, Any]:
-        """Synchronous claim extraction matching ``LLMJudgeClient.extract_research_claims()``."""
-        t0 = time.monotonic()
-        resp = self._request_with_retry(
-            path="/v1/extract-claims",
-            json_body={
-                "prompt": prompt,
-                "report_markdown": report_markdown,
-                "expert_guidance": expert_guidance or [],
-                "required_report_sections": required_report_sections or [],
-                "claim_index": claim_index or [],
-                "batch_size": batch_size,
-            },
+        body = resp.json()
+        verdict = body.get("verdict")
+        if verdict not in VERDICT_SCORES:
+            verdict = "error"
+        return AgreementJudgeOutput(
+            verdict=verdict,
+            agreement_score=body.get("agreement_score", VERDICT_SCORES.get(verdict, 0.0)),
+            rationale=body.get("rationale", ""),
+            swap_applied=body.get("swap_applied", False),
+            model=body.get("model", ""),
+            rubric_name=body.get("rubric_name", ""),
+            metadata=body.get("metadata", {}),
         )
-        latency = time.monotonic() - t0
-        _logger.debug("extract_research_claims: latency=%.2fs", latency)
-        return resp.json()
 
     def healthcheck(self, *, expected_rubric_version: str | None = None) -> dict[str, Any]:
-        """Ping ``/healthz``; optionally assert the rubric version matches ours.
-
-        Call from lifespan startup so the first judge call isn't also the first
-        time the service URL is exercised. Raises :class:`httpx.HTTPError` if the
-        sidecar is unreachable and ``RuntimeError`` if the rubric version has
-        drifted.
-        """
+        """Ping ``/healthz``; optionally assert the rubric version matches ours."""
         resp = self._client.get(f"{self.base_url}/healthz")
         resp.raise_for_status()
         data = resp.json()
@@ -164,11 +157,7 @@ class JudgeServiceClient:
         return data
 
     def fetch_catalog(self) -> dict[str, Any]:
-        """Fetch the live rubric catalog from the judge service.
-
-        Returns ``{"rubric_version", "judge_model", "families": {...}}``.
-        Consumers should cache this and re-fetch when rubric_version changes.
-        """
+        """Fetch the live rubric catalog from the judge service."""
         resp = self._client.get(f"{self.base_url}/v1/catalog")
         resp.raise_for_status()
         return resp.json()

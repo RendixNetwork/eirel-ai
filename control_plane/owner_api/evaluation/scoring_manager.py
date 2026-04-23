@@ -848,16 +848,16 @@ class ScoringManager:
         run_id: str,
         family_id: str,
     ) -> dict[str, Any]:
-        from shared.common.models import MinerEvaluationTask
+        from shared.common.models import TaskEvaluation
 
         family_id = ensure_family_id(family_id)
         contributing = list(
             session.execute(
-                select(MinerEvaluationTask.claimed_by_validator)
-                .where(MinerEvaluationTask.run_id == run_id)
-                .where(MinerEvaluationTask.family_id == family_id)
-                .where(MinerEvaluationTask.status == "evaluated")
-                .where(MinerEvaluationTask.claimed_by_validator.isnot(None))
+                select(TaskEvaluation.claimed_by_validator)
+                .where(TaskEvaluation.run_id == run_id)
+                .where(TaskEvaluation.family_id == family_id)
+                .where(TaskEvaluation.status == "evaluated")
+                .where(TaskEvaluation.claimed_by_validator.isnot(None))
                 .distinct()
             ).scalars()
         )

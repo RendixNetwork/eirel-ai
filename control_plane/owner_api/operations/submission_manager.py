@@ -427,7 +427,7 @@ class SubmissionManager:
         deployment: ManagedDeployment | None,
         score_record: DeploymentScoreRecord | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        from shared.common.models import MinerEvaluationTask
+        from shared.common.models import TaskMinerResult
 
         if score_record is None:
             return [], []
@@ -438,19 +438,18 @@ class SubmissionManager:
         )
         tasks = list(
             session.execute(
-                select(MinerEvaluationTask)
-                .where(MinerEvaluationTask.run_id == score_record.run_id)
-                .where(MinerEvaluationTask.family_id == score_record.family_id)
-                .where(MinerEvaluationTask.miner_hotkey == miner_hotkey)
-                .where(MinerEvaluationTask.status == "evaluated")
+                select(TaskMinerResult)
+                .where(TaskMinerResult.run_id == score_record.run_id)
+                .where(TaskMinerResult.family_id == score_record.family_id)
+                .where(TaskMinerResult.miner_hotkey == miner_hotkey)
             ).scalars()
         )
         task_runs = [
             {
                 "task_id": task.task_id,
-                "status": task.task_status or "completed",
-                "score": task.task_score,
-                "error": (task.result_metadata_json or {}).get("error"),
+                "status": "completed" if task.agreement_verdict != "error" else "failed",
+                "score": task.agreement_score,
+                "error": None,
             }
             for task in tasks
         ]

@@ -614,30 +614,31 @@ class WorkflowEpisodeRecord(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
 
 
-class MinerEvaluationTask(Base):
-    """Per-miner per-task evaluation tracking for distributed task assignment.
+class TaskEvaluation(Base):
+    """Task-level evaluation tracking.
 
-    Each row represents one task for one miner in a given run/family.
-    Validators claim tasks via the owner-api, evaluate them, and submit results.
+    Each row represents one task in a given run/family. A validator claims a
+    task, fans out to all miners with that task, calls OpenAI for the baseline
+    response, and judges each miner response pairwise against the baseline.
+    Per-miner results are stored in `TaskMinerResult`.
     """
-    __tablename__ = "miner_evaluation_tasks"
+
+    __tablename__ = "task_evaluations"
     __table_args__ = (
         UniqueConstraint(
-            "epoch_id", "family_id", "miner_hotkey", "task_id",
-            name="uq_miner_eval_task_run_family_miner_task",
+            "epoch_id", "family_id", "task_id",
+            name="uq_task_eval_run_family_task",
         ),
-        Index("idx_met_claimable", "epoch_id", "family_id", "status", "claim_expires_at"),
-        Index("idx_met_miner", "epoch_id", "family_id", "miner_hotkey"),
+        Index("idx_te_claimable", "epoch_id", "family_id", "status", "claim_expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     run_id: Mapped[str] = mapped_column("epoch_id", String(128), nullable=False, index=True)
     family_id: Mapped[str] = mapped_column("family_id", String(64), nullable=False, index=True)
-    miner_hotkey: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     task_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     task_index: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # Status: pending -> claimed -> evaluated (or back to pending on timeout)
+    # Status: pending -> claimed -> evaluated | baseline_failed
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
 
     # Claim tracking
@@ -646,16 +647,64 @@ class MinerEvaluationTask(Base):
     claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True, index=True)
     claim_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # Result data (populated when status -> evaluated)
-    miner_response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    judge_output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    task_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    task_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    result_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Baseline response populated by validator from OpenAI Responses API
+    baseline_response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
+
+    @property
+    def epoch_id(self) -> str:
+        return self.run_id
+
+
+class TaskMinerResult(Base):
+    """Per-miner pairwise result for a given TaskEvaluation.
+
+    One row per (task, miner). Stores the miner's response, the pairwise judge
+    output vs the baseline, and the raw overall score (no anti-gaming modifiers
+    applied — the pairwise verdict is the primary signal).
+    """
+
+    __tablename__ = "task_miner_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_evaluation_id", "miner_hotkey",
+            name="uq_task_miner_result_task_miner",
+        ),
+        Index("idx_tmr_miner", "epoch_id", "family_id", "miner_hotkey"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    task_evaluation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("task_evaluations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Denormalized for aggregation queries
+    run_id: Mapped[str] = mapped_column("epoch_id", String(128), nullable=False, index=True)
+    family_id: Mapped[str] = mapped_column("family_id", String(64), nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+
+    miner_hotkey: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+
+    miner_response_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Miner's cited URLs extracted from miner_response_json. Stored
+    # separately for dashboard display — NOT used in scoring.
+    miner_citations_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list,
+    )
+    judge_output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # matches | partially_matches | contradicts | not_applicable | error
+    agreement_verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Scalar derived from the verdict (VERDICT_SCORES) or 0 on error.
+    agreement_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    latency_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
 
     @property
     def epoch_id(self) -> str:

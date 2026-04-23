@@ -56,8 +56,7 @@ class LoaderResult:
 class SignatureVerifier(Protocol):
     """Optional protocol for verifying bundle signatures.
 
-    Production wires a real ``bittensor.Keypair`` here. Tests can supply a
-    ``FakeKeypair`` from ``shared.dataset_forge.signer`` or pass ``None`` to
+    Production wires a real ``bittensor.Keypair`` here. Pass ``None`` to
     skip signature checks (sha256 integrity is always enforced).
     """
 
@@ -75,8 +74,8 @@ class KeypairSignatureVerifier:
     """SignatureVerifier backed by a :class:`Keypair`-shaped object.
 
     Accepts anything with ``ss58_address`` + ``verify(data, signature)``,
-    so both the production bittensor hotkey and the test-only ``FakeKeypair``
-    from ``shared.dataset_forge.signer`` plug in directly.
+    so the production bittensor hotkey (or a compatible test double) can
+    plug in directly.
     """
 
     __slots__ = ("_keypair",)
@@ -197,8 +196,8 @@ def _resolve_active_binding(
     """Look up the binding for ``(family_id, run_id)``.
 
     Prefers an ``active`` binding; falls back to a ``pending`` one so the
-    forge → activate → load flow works even if the operator forgets to flip
-    the status. ``superseded`` and ``failed`` are never returned.
+    register → activate → load flow works even if the operator forgets to
+    flip the status. ``superseded`` and ``failed`` are never returned.
     """
     rows = (
         session.query(OwnerDatasetBinding)
