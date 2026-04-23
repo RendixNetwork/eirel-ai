@@ -32,7 +32,6 @@ from control_plane.owner_api.operations import OperatorManager, SubmissionManage
 from control_plane.owner_api._constants import (  # noqa: F401
     ABV_FAMILIES,
     ABV_SERVING_SELECTION_REASON,
-    CHAIN_PUBLICATION_STATE_KEY,
     DEFAULT_FIXED_FAMILY_WEIGHTS,
     FAMILY_SERVING_FAMILY_WEIGHT,
     FAMILY_SERVING_RELIABILITY_WEIGHT,

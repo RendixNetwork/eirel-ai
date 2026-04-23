@@ -51,7 +51,6 @@ execution-worker = "orchestration.execution_worker.main:main"
 owner-api = "control_plane.owner_api.app:main"
 validator-engine = "validation.validator.main:main"
 metagraph-listener = "validation.metagraph_listener.main:main"
-weight-setter = "validation.weight_setter.main:main"
 
 # Supporting services
 web-search-tool-service = "tool_platforms.web_search_tool_service.app:main"

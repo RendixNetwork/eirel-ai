@@ -448,7 +448,6 @@ async def run_staging_validation(
     consumer_api_url: str,
     validator_engine_url: str,
     metagraph_listener_url: str,
-    weight_setter_url: str,
     provider_proxy_url: str,
     gateway_api_key: str,
     consumer_api_key: str,
@@ -463,14 +462,12 @@ async def run_staging_validation(
     baseline_checks = {
         "metagraph_listener_reachable": True,
         "validator_engine_reachable": True,
-        "weight_setter_reachable": True,
         "provider_proxy_reachable": True,
         "sandbox_service_reachable": True,
     }
     for name, url in {
         "metagraph_listener_reachable": metagraph_listener_url,
         "validator_engine_reachable": validator_engine_url,
-        "weight_setter_reachable": weight_setter_url,
         "provider_proxy_reachable": provider_proxy_url,
         "sandbox_service_reachable": sandbox_service_url,
     }.items():
@@ -490,7 +487,6 @@ async def run_staging_validation(
         owner_api_url=owner_api_url,
         validator_engine_url=validator_engine_url,
         metagraph_listener_url=metagraph_listener_url,
-        weight_setter_url=weight_setter_url,
         timeout_seconds=timeout_seconds,
     )
     deployment_check = await _ensure_family_deployments(

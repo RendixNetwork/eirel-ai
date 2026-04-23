@@ -312,7 +312,7 @@ async def run_weight_setting_loop() -> None:
     import asyncio
     import time as _time
     import bittensor as bt
-    from validation.weight_setter.chain_verifier import verify_weights_on_chain
+    from validation.validator.chain_verifier import verify_weights_on_chain
 
     signer = _load_validator_signer()
     owner_url = _owner_api_url()

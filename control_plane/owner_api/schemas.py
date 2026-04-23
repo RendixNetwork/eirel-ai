@@ -186,13 +186,6 @@ class RuntimeRemediationSuppressionRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ChainWeightsPublishRequest(BaseModel):
-    run_id: str | None = None
-    force: bool = False
-    dry_run: bool = False
-    submission_mode: str = "submitted"
-
-
 # ---------------------------------------------------------------------------
 # Distributed evaluation task schemas
 # ---------------------------------------------------------------------------

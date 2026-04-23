@@ -532,11 +532,6 @@ class Settings:
             "EXECUTION_WORKER_INTERNAL_URL", "http://execution-worker:8006"
         )
     )
-    weight_setter_internal_url: str = field(
-        default_factory=lambda: os.getenv(
-            "WEIGHT_SETTER_INTERNAL_URL", "http://weight-setter:8012"
-        )
-    )
     workflow_runtime_auto_remediation_enabled: bool = field(
         default_factory=lambda: _bool_env("WORKFLOW_RUNTIME_AUTO_REMEDIATION_ENABLED", False)
     )

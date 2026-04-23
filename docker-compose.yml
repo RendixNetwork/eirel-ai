@@ -150,8 +150,8 @@ services:
     ports:
       - "127.0.0.1:${METAGRAPH_LISTENER_HOST_PORT:-18011}:8011"
 
-  # validator-engine + weight-setter moved to docker-compose.validator.yml so
-  # third-party validators run a lean stack without the operator's services.
+  # validator-engine moved to docker-compose.validator.yml so third-party
+  # validators run a lean stack without the operator's services.
 
   provider-proxy:
     <<: *eirel-ai-run

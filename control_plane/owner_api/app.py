@@ -361,7 +361,6 @@ async def lifespan(app: FastAPI):
             fee_tao=settings.submission_fee_tao,
         )
     app.state.execution_worker_client_factory = None
-    app.state.weight_setter_client_factory = None
     app.state.runtime_remediation_policy_state = {
         "enabled": bool(settings.workflow_runtime_auto_remediation_enabled),
         "interval_seconds": float(settings.workflow_runtime_auto_remediation_interval_seconds),

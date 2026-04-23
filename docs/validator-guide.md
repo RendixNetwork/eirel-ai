@@ -128,14 +128,13 @@ Fill in `.env.validator`:
 docker compose -f docker-compose.validator.yml up -d
 ```
 
-Three containers come up:
+Two containers come up:
 
 - `eiretes-judge` — LLM judge, listens on port **18095** (host) / 8095
   (container). First request triggers a health check against Chutes.
-- `validator-engine` — claims + invokes miners + judges + submits.
-  Listens on port **18010**.
-- `weight-setter` — publishes weights on the subnet's scoring cadence.
-  Listens on port **18012**.
+- `validator-engine` — claims + invokes miners + judges + submits, and
+  also runs the in-process weight-setting loop that publishes consensus
+  weights on-chain every ~180 blocks. Listens on port **18010**.
 
 Watch logs:
 
@@ -187,7 +186,6 @@ Each container exposes a `/healthz` on its HTTP port:
 | Service | Port |
 |---------|------|
 | `validator-engine` | `18010` |
-| `weight-setter` | `18012` |
 | `eiretes-judge` | `18095` |
 
 ```bash
@@ -221,8 +219,8 @@ When the judge call fails the validator submits `task_score=0` +
 submission but your weight for that miner suffers.
 
 **`weight-setting: run run-N already published`.** Normal — the
-weight-setter tracks the last published run and no-ops until a new run
-closes.
+validator-engine's weight-setting loop tracks the last published run
+and no-ops until a new run closes.
 
 **`weight-setting: chain verification failed`.** Transient; the
 extrinsic was accepted on-chain, the post-commit metagraph read just

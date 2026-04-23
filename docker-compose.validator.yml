@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------------
 # Validator stack — what a third-party validator runs to participate in the
-# EIREL subnet. Three services:
+# EIREL subnet. Two services:
 #
 #   - eiretes-judge: LLM judge that scores miner responses locally on your
 #                    machine. You supply your own Chutes API key and pay
@@ -8,9 +8,9 @@
 #                    run with Kimi-K2.5 at current Chutes rates).
 #   - validator-engine: claims tasks from the operator's owner-api, invokes
 #                    miners (via owner-api proxy), calls local eiretes-judge,
-#                    submits results.
-#   - weight-setter:  aggregates scores from completed runs and publishes
-#                    weights on-chain via the Subtensor network.
+#                    submits results. Also runs the in-process weight-setting
+#                    loop that publishes consensus weights on-chain via the
+#                    Subtensor network every ~180 blocks.
 #
 # Validators do NOT run the operator services (owner-api, tool services,
 # miner runtime, etc.) — those are hosted by the subnet operator and
@@ -84,18 +84,7 @@ services:
     ports:
       - "${VALIDATOR_ENGINE_HOST_PORT:-18010}:8010"
 
-  # Aggregates scores from completed runs and publishes weights on-chain via
-  # the Subtensor network. Fires on its own cadence independently of the
-  # validator-engine loop.
-  weight-setter:
-    <<: *validator-run
-    container_name: weight-setter
-    command: ["weight-setter"]
-    environment: {}  # all from env_file: .env.validator
-    ports:
-      - "${WEIGHT_SETTER_HOST_PORT:-18012}:8012"
-
-  # Polls Docker Hub for new image digests and restarts the three validator
+  # Polls Docker Hub for new image digests and restarts the validator
   # services in place when a new image is published under the tracked tag
   # (default :latest). WATCHTOWER_POLL_INTERVAL is in seconds; 300 (5 min)
   # is a reasonable default, lower values hammer the registry.
@@ -111,4 +100,3 @@ services:
       - --cleanup
       - eiretes-judge
       - validator-engine
-      - weight-setter

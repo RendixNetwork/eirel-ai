@@ -34,7 +34,7 @@ aggregation, and chain publication.
              +------------+        +----------------+    |
                                                          v
                                       validator-side: eiretes-judge
-                                      + validator-engine + weight-setter
+                                      + validator-engine
 ```
 
 Each validator runs its own `eiretes-judge` sidecar and calls the
@@ -73,8 +73,7 @@ Started via `docker-compose.yml` at the repo root.
 | `prometheus`, `alertmanager`, `grafana` | Dashboards + alerts |
 
 Services that used to live here but now run validator-side:
-`eiretes-judge`, `validator-engine`, `weight-setter`. See
-`docker-compose.validator.yml`.
+`eiretes-judge`, `validator-engine`. See `docker-compose.validator.yml`.
 
 ## Launch family
 
@@ -193,7 +192,6 @@ execution-worker
 consumer-chat-api
 # validator-side (shipped in same image, started by docker-compose.validator.yml):
 validator-engine
-weight-setter
 ```
 
 **Operator CLI** — one entrypoint with subcommands:
