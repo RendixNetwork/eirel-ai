@@ -7,87 +7,20 @@ on:
     branches: [main]
 
 jobs:
-  k8s-integration:
+  tests:
+    name: Pytest
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install k3d
-        run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-
-      - name: Create k3d cluster
-        run: |
-          k3d cluster create test --agents 2 \
-            --k3s-arg "--flannel-backend=none@server:*" \
-            --k3s-arg "--disable-network-policy@server:*"
-
-      - name: Install Calico
-        run: |
-          kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/tigera-operator.yaml
-          kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/custom-resources.yaml
-
-      - name: Wait for Calico
-        run: |
-          echo "Waiting for calico-system namespace..."
-          until kubectl get ns calico-system 2>/dev/null; do sleep 5; done
-          echo "Waiting for Calico pods to appear..."
-          until kubectl get pods -n calico-system 2>/dev/null | grep -q .; do sleep 5; done
-          echo "Waiting for Calico pods to be ready..."
-          kubectl wait --for=condition=Ready pods --all -n calico-system --timeout=300s
-
-      - name: Label agent nodes
-        run: |
-          kubectl label nodes -l node-role.kubernetes.io/agent=true \
-            eirel.dev/runtime-pool=true \
-            eirel.dev/runtime-class=miner \
-            --overwrite
-
-      - name: Create namespaces and labels
-        run: |
-          kubectl create ns eirel-miners
-          kubectl create ns eirel-system
-          kubectl label ns eirel-miners name=eirel-miners
-          kubectl label ns eirel-system name=eirel-system
-
-      - name: Create runtime shared secret
-        run: |
-          kubectl -n eirel-miners create secret generic eirel-runtime-shared \
-            --from-literal=INTERNAL_SERVICE_TOKEN=ci-test \
-            --from-literal=PROVIDER_PROXY_TOKEN=ci-test
-
-      - name: Build runtime image
-        run: docker build -t miner-runtime:v1 -f ../eirel/Dockerfile.runtime ../eirel
-
-      - name: Import image into k3d
-        run: k3d image import miner-runtime:v1 -c test
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install -e ".[dev]"
-
-      - name: Run integration tests
-        env:
-          EIREL_K8S_INTEGRATION: "1"
-          EIREL_OWNER_RUNTIME_IMAGE: miner-runtime:v1
-          EIREL_OWNER_KUBECONFIG_PATH: /home/runner/.kube/config
-        run: |
-          source .venv/bin/activate
-          python -m pytest tests/owner_api/test_k8s_integration.py -v
-
-      - name: Debug output
-        if: failure()
-        run: |
-          kubectl get pods -A
-          kubectl describe nodes
-          kubectl logs -n eirel-miners --all-containers=true || true
-
-      - name: Cleanup
-        if: always()
-        run: k3d cluster delete test
+          cache: pip
+      - name: Install project
+        run: pip install -e ".[dev]"
+      - name: Pytest
+        # test_k8s_integration.py auto-skips unless EIREL_K8S_INTEGRATION=1
+        # (requires a real cluster). We leave it unset here; that test
+        # lives behind a separate opt-in workflow or manual run.
+        run: pytest tests -q
