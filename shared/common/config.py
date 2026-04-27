@@ -164,19 +164,6 @@ class Settings:
     epoch_seed_commitment: str = field(
         default_factory=lambda: os.getenv("EIREL_EPOCH_SEED_COMMITMENT", "")
     )
-    validator_poll_interval_seconds: float = field(
-        default_factory=lambda: float(
-            os.getenv("EIREL_VALIDATOR_POLL_INTERVAL_SECONDS")
-            or os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS")
-            or "1"
-        )
-    )
-    validator_max_concurrent_jobs: int = field(
-        default_factory=lambda: int(os.getenv("VALIDATOR_MAX_CONCURRENT_JOBS", "2"))
-    )
-    validator_max_concurrent_builds: int = field(
-        default_factory=lambda: int(os.getenv("VALIDATOR_MAX_CONCURRENT_BUILDS", "1"))
-    )
     owner_api_url: str = field(
         default_factory=lambda: os.getenv("OWNER_API_URL", "http://127.0.0.1:8000")
     )
@@ -339,18 +326,6 @@ class Settings:
     judge_timeout_seconds: float = field(
         default_factory=lambda: _float_env("EIREL_JUDGE_TIMEOUT_SECONDS", 30.0)
     )
-    ensemble_judge_base_url: str = field(
-        default_factory=lambda: os.getenv("EIREL_ENSEMBLE_JUDGE_BASE_URL", "")
-    )
-    ensemble_judge_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_ENSEMBLE_JUDGE_API_KEY", "")
-    )
-    ensemble_judge_timeout_seconds: float = field(
-        default_factory=lambda: _float_env("EIREL_ENSEMBLE_JUDGE_TIMEOUT_SECONDS", 30.0)
-    )
-    ensemble_judge_disagreement_threshold: float = field(
-        default_factory=lambda: _float_env("EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD", 0.20)
-    )
     bittensor_network: str = field(
         default_factory=lambda: os.getenv("BITTENSOR_NETWORK", "finney")
     )
@@ -462,7 +437,7 @@ class Settings:
     )
     owner_runtime_image: str = field(
         default_factory=lambda: os.getenv(
-            "EIREL_OWNER_RUNTIME_IMAGE", "registry.eirel.internal/miner-runtime:v1")
+            "EIREL_OWNER_RUNTIME_IMAGE", "registry.eirel.internal/eirel-miner-runtime:latest")
     )
     owner_runtime_shared_secret_name: str = field(
         default_factory=lambda: os.getenv(
@@ -595,9 +570,6 @@ class Settings:
     artifact_storage_bucket: str = field(
         default_factory=lambda: os.getenv("ARTIFACT_STORAGE_BUCKET", "eirel-managed")
     )
-    validator_epoch_quorum: int = field(
-        default_factory=lambda: int(os.getenv("VALIDATOR_EPOCH_QUORUM", "1"))
-    )
     run_duration_days: int = field(
         default_factory=lambda: int(os.getenv("EIREL_RUN_DURATION_DAYS", "3"))
     )
@@ -643,7 +615,7 @@ class Settings:
     )
     # Distributed evaluation settings
     task_claim_timeout_seconds: int = field(
-        default_factory=lambda: int(os.getenv("EIREL_TASK_CLAIM_TIMEOUT_SECONDS", "600"))
+        default_factory=lambda: int(os.getenv("EIREL_TASK_CLAIM_TIMEOUT_SECONDS", "900"))
     )
     first_run_start_time: str = field(
         default_factory=lambda: os.getenv("EIREL_FIRST_RUN_START_TIME", "")
