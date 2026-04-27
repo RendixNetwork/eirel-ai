@@ -147,11 +147,18 @@ class TaskEvaluation(BaseModel):
     mode: ModeLiteral | None
     category: str | None
     difficulty: str | None
+    # Whether the task's prompt is expected to need live web search. Mirrors
+    # the end-user toggle; the baseline uses this flag directly.
+    web_search: bool = False
     validator_hotkey: str | None = None
     task_status: str | None  # "completed" | "failed"
     evaluated_at: str | None
     prompt: str | None
     miner_response: dict | None
+    # OpenAI baseline text, extracted from TaskEvaluation.baseline_response_json.
+    # Rendered side-by-side with the miner response on the dashboard so users
+    # can see what the judge compared against.
+    baseline_response_text: str | None = None
     # Agreement verdict: "matches" | "partially_matches" | "not_applicable"
     # | "contradicts" | "error".
     agreement_verdict: str | None = None

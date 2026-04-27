@@ -27,12 +27,14 @@ def _owner_api_url() -> str:
 def _hydrate_agent_inputs(task_payload: dict[str, Any]) -> dict[str, Any]:
     """Fold top-level task fields into the ``inputs`` dict sent to the miner.
 
-    The benchmark task JSON carries ``mode`` and ``allowed_tools`` at the
-    top level but the miner agent reads its knobs from ``inputs.mode`` and
+    The benchmark task JSON carries ``mode`` and ``web_search`` at the top
+    level, but the miner agent reads its knobs from ``inputs.mode`` and
     ``inputs.web_search``. Without this bridge, every task is invoked with
-    the defaults (``mode=instant``, ``web_search=false``) regardless of
-    the task spec, so the web-search code path never runs during
-    evaluation. An existing value in ``inputs`` always wins.
+    defaults (``mode=instant``, ``web_search=false``) regardless of the
+    task spec, so the miner's web-search code path never runs during
+    evaluation and citations stay empty. An existing value in ``inputs``
+    always wins; ``allowed_tools`` is kept as a legacy fallback for older
+    datasets that haven't been migrated to the explicit boolean.
     """
     base = dict(task_payload.get("inputs") or {})
     if "mode" not in base:
@@ -40,9 +42,13 @@ def _hydrate_agent_inputs(task_payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(mode, str) and mode:
             base["mode"] = mode
     if "web_search" not in base:
-        allowed = task_payload.get("allowed_tools") or []
-        if isinstance(allowed, list) and "web_search" in allowed:
-            base["web_search"] = True
+        raw = task_payload.get("web_search")
+        if isinstance(raw, bool):
+            base["web_search"] = raw
+        else:
+            allowed = task_payload.get("allowed_tools") or []
+            if isinstance(allowed, list) and "web_search" in allowed:
+                base["web_search"] = True
     return base
 
 
@@ -233,8 +239,24 @@ _POLL_INTERVAL_SECONDS = float(
     or os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS")
     or "30"
 )
-_BATCH_SIZE = int(os.getenv("EIREL_VALIDATOR_BATCH_SIZE", "3"))
+_BATCH_SIZE = int(os.getenv("EIREL_VALIDATOR_BATCH_SIZE", "1"))
 _MAX_PARALLEL = int(os.getenv("EIREL_VALIDATOR_MAX_PARALLEL", "3"))
+
+# Miner latency SLA enforced at scoring time. A `completed` miner response
+# whose total wall-clock latency exceeds the mode's budget is stamped
+# `latency_violation` (counts as a loss in aggregation, regardless of
+# content). Tasks without a recognized mode skip the gate. Network-level
+# errors are not double-penalized.
+#
+# Mode-specific completion budgets:
+#   instant: 120s — miners should pick a cheap/non-thinking model.
+#   thinking: 600s — full reasoning + tool use allowed.
+_INSTANT_MINER_LATENCY_BUDGET_SECONDS = float(
+    os.getenv("EIREL_MINER_INSTANT_LATENCY_BUDGET_SECONDS", "120")
+)
+_THINKING_MINER_LATENCY_BUDGET_SECONDS = float(
+    os.getenv("EIREL_MINER_THINKING_LATENCY_BUDGET_SECONDS", "600")
+)
 _ACTIVE_FAMILIES = [
     f.strip()
     for f in os.getenv("EIREL_VALIDATOR_ACTIVE_FAMILIES", "analyst,builder,verifier").split(",")
@@ -559,7 +581,7 @@ async def run_distributed_benchmarks(
     *,
     run_id: str | None = None,
     family_id: str,
-    batch_size: int = 2,
+    batch_size: int = 1,
     max_parallel: int = 2,
     rubric_version: str = "pairwise_general_chat_v1",
     judge_model: str = "local-rubric-judge",
@@ -609,7 +631,13 @@ async def run_distributed_benchmarks(
     _metrics.benchmark_runs_started_total.labels(family=family_id).inc()
     _benchmark_outcome = "success"
 
-    _FAN_OUT_TIMEOUT_SECONDS = 180.0
+    # Outer wall-clock budget for the fan-out (miners + OpenAI baseline). Set
+    # generously above the largest configured downstream timeout so a slow
+    # baseline doesn't trip this wrapper before its own client timeout fires.
+    # Thinking-mode miners can run up to 600s (their completion SLA), so the
+    # wrapper has to clear that ceiling. The claim lease is 600s by default —
+    # bump EIREL_TASK_CLAIM_TIMEOUT_SECONDS if you raise this much further.
+    _FAN_OUT_TIMEOUT_SECONDS = 660.0
 
     async def _invoke_one_miner(
         miner: dict[str, Any], task_obj: Any, task_id: str,
@@ -653,10 +681,21 @@ async def run_distributed_benchmarks(
         task_obj.metadata = task_payload.get("metadata", {})
         task_obj.execution_mode = task_payload.get("execution_mode")
         task_mode = str(task_obj.inputs.get("mode") or "instant")
+        # Per-task web-search flag, mirroring the end-user toggle in the chat
+        # UI. Missing field defaults to False so a baseline never silently
+        # searches — task authors must opt in per task.
+        web_search_flag = bool(
+            task_payload.get("web_search")
+            or (task_obj.metadata or {}).get("web_search")
+            or False
+        )
 
         # Fan out: all miners + baseline concurrently, bounded by wall clock
         baseline_task = asyncio.create_task(
-            baseline_client.generate(prompt=task_obj.prompt)
+            baseline_client.generate(
+                prompt=task_obj.prompt,
+                use_web_search=web_search_flag,
+            )
         )
         miner_tasks = [
             asyncio.create_task(_invoke_one_miner(m, task_obj, task_id)) for m in miners
@@ -688,13 +727,26 @@ async def run_distributed_benchmarks(
             return "submit_failed"
 
         baseline_text = baseline.response_text
-        task_category = task_payload.get("category") or (task_obj.metadata or {}).get("category")
+        task_category = (
+            task_payload.get("category")
+            or (task_obj.metadata or {}).get("category")
+        )
+
+        # Pick the latency budget for this task based on its declared mode.
+        # Tasks without a recognized mode skip the gate entirely (None budget).
+        if task_mode == "instant":
+            latency_budget: float | None = _INSTANT_MINER_LATENCY_BUDGET_SECONDS
+        elif task_mode == "thinking":
+            latency_budget = _THINKING_MINER_LATENCY_BUDGET_SECONDS
+        else:
+            latency_budget = None
 
         # Agreement-judge each miner concurrently with position randomization.
         # The judge sees only the final answer text — citations are stripped.
         async def _judge_miner(miner_run: tuple[str, BenchmarkTaskRun]) -> dict[str, Any]:
             miner_hotkey, run = miner_run
             miner_citations = _extract_miner_citations(run)
+            miner_latency = float((run.metadata or {}).get("latency_seconds") or 0.0)
             if run.status != "completed":
                 return {
                     "miner_hotkey": miner_hotkey,
@@ -703,6 +755,7 @@ async def run_distributed_benchmarks(
                     "judge_output": None,
                     "agreement_score": 0.0,
                     "verdict": "error",
+                    "miner_latency_seconds": miner_latency,
                     "latency_seconds": 0.0,
                 }
             try:
@@ -720,13 +773,27 @@ async def run_distributed_benchmarks(
                     swap=swap,
                 )
                 judge_latency = max(0.0, time.perf_counter() - judge_started)
+                verdict = judge_result.verdict
+                agreement_score = float(judge_result.agreement_score or 0.0)
+                # Mode-specific completion-time SLA: completed responses
+                # over budget count as a loss regardless of content match.
+                if latency_budget is not None and miner_latency > latency_budget:
+                    logger.info(
+                        "latency_violation miner=%s task_eval=%s mode=%s "
+                        "completion=%.2fs budget=%.2fs prior_verdict=%s",
+                        miner_hotkey[:16], task_evaluation_id, task_mode,
+                        miner_latency, latency_budget, verdict,
+                    )
+                    verdict = "latency_violation"
+                    agreement_score = 0.0
                 return {
                     "miner_hotkey": miner_hotkey,
                     "miner_response": run.model_dump(mode="json"),
                     "miner_citations": miner_citations,
                     "judge_output": judge_result.model_dump(mode="json"),
-                    "agreement_score": float(judge_result.agreement_score or 0.0),
-                    "verdict": judge_result.verdict,
+                    "agreement_score": agreement_score,
+                    "verdict": verdict,
+                    "miner_latency_seconds": miner_latency,
                     "latency_seconds": judge_latency,
                 }
             except Exception as exc:
@@ -741,6 +808,7 @@ async def run_distributed_benchmarks(
                     "judge_output": None,
                     "agreement_score": 0.0,
                     "verdict": "error",
+                    "miner_latency_seconds": miner_latency,
                     "latency_seconds": 0.0,
                 }
 

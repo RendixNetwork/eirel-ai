@@ -99,6 +99,11 @@ class FamilyEvaluationTask(BaseModel):
     domain: str | None = None
     category: str = ""
     difficulty: Literal["standard", "hard", "expert"] = "standard"
+    # Whether the task's prompt is expected to need live web search. Mirrors
+    # the end-user toggle; the baseline reads this directly. Without the
+    # explicit field Pydantic would drop it on bundle validation, so the
+    # dashboard would always render "no web".
+    web_search: bool = False
     risk_tags: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     retrieval_constraints: dict[str, Any] = Field(default_factory=dict)
@@ -296,18 +301,24 @@ class MinerGeneralChatScore(BaseModel):
 # validator or control plane to mark a missing/failed judgment.
 AgreementVerdict = Literal[
     "matches", "partially_matches", "contradicts", "not_applicable", "error",
+    "latency_violation",
 ]
 
 
 # Scalar mapping used by the aggregation layer. Kept in sync with
 # eiretes.models.VERDICT_SCORES; "error" maps to 0 and does not contribute
 # to the denominator of the final aggregation (see aggregate_miner_score).
+# "latency_violation" is the SLA-failure verdict the validator stamps when a
+# miner's response exceeds the mode-specific latency budget — counts as a
+# loss (0.0) but unlike "error" it WILL contribute to the denominator so
+# slow miners actually drag their average down.
 VERDICT_SCORES: dict[str, float] = {
     "matches": 1.0,
     "partially_matches": 0.6,
     "not_applicable": 0.7,
     "contradicts": 0.0,
     "error": 0.0,
+    "latency_violation": 0.0,
 }
 
 

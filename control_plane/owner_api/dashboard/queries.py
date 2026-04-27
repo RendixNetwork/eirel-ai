@@ -661,6 +661,7 @@ def _task_evaluation_from_row(
     category = bundle_task.get("category") or meta.get("category")
     difficulty = bundle_task.get("difficulty") or meta.get("difficulty")
     mode = _as_mode(bundle_task.get("mode") or meta.get("mode"))
+    web_search = bool(bundle_task.get("web_search") or meta.get("web_search") or False)
 
     status = "completed" if row.agreement_verdict != "error" else "failed"
 
@@ -670,29 +671,39 @@ def _task_evaluation_from_row(
         if isinstance(c, dict) and c.get("url")
     ]
     baseline_citations: list[CitationRef] = []
+    baseline_text: str | None = None
     if isinstance(baseline_response_json, dict):
         for c in baseline_response_json.get("citations") or []:
             if isinstance(c, dict) and c.get("url"):
                 baseline_citations.append(
                     CitationRef(url=str(c.get("url") or ""), title=c.get("title"))
                 )
+        raw_text = baseline_response_json.get("response_text")
+        if isinstance(raw_text, str) and raw_text.strip():
+            baseline_text = raw_text
 
     return TaskEvaluation(
         task_id=row.task_id,
         mode=mode,
         category=category,
         difficulty=difficulty,
+        web_search=web_search,
         task_status=status,
         evaluated_at=row.created_at.isoformat() if row.created_at else None,
         prompt=prompt_val if isinstance(prompt_val, str) else None,
         miner_response=row.miner_response_json,
+        baseline_response_text=baseline_text,
         agreement_verdict=row.agreement_verdict,
         agreement_score=(
             float(row.agreement_score) if row.agreement_score is not None else None
         ),
         miner_citations=miner_citations,
         baseline_citations=baseline_citations,
-        latency_ms=int(row.latency_seconds * 1000) if row.latency_seconds else None,
+        latency_ms=(
+            int(row.miner_latency_seconds * 1000)
+            if row.miner_latency_seconds
+            else None
+        ),
         judge_rationale=jo.get("rationale"),
     )
 

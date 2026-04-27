@@ -698,10 +698,17 @@ class TaskMinerResult(Base):
     )
     judge_output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
-    # matches | partially_matches | contradicts | not_applicable | error
+    # matches | partially_matches | contradicts | not_applicable | error |
+    # latency_violation (mode-specific budget exceeded; counts as a loss).
     agreement_verdict: Mapped[str] = mapped_column(String(32), nullable=False)
     # Scalar derived from the verdict (VERDICT_SCORES) or 0 on error.
     agreement_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Wall-clock time the miner took to return its response (seconds). Used
+    # for leaderboard display and for the latency-violation scoring gate.
+    miner_latency_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Wall-clock time the agreement judge took (seconds). Diagnostic only —
+    # historically named `latency_seconds`; the attr name is preserved for
+    # back-compat with existing seed/migration code.
     latency_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)

@@ -602,7 +602,11 @@ def _collect_live_run_rows(session) -> dict[str, Any]:
                 "task_index": 0,
                 "status": status,
                 "score": float(task.agreement_score or 0.0),
-                "latency_ms": int(task.latency_seconds * 1000) if task.latency_seconds else 0,
+                "latency_ms": (
+                    int(task.miner_latency_seconds * 1000)
+                    if task.miner_latency_seconds
+                    else 0
+                ),
                 "web_search_enabled": bool(out_meta.get("web_search_enabled", False)),
                 "web_search_used": 1 if web_search_used else 0,
                 "tool_call_count": len(tool_calls),

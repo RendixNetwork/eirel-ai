@@ -346,7 +346,76 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         apply=lambda engine: _migration_refactor_to_task_level_evaluation(engine),
     ),
+    Migration(
+        version="add_miner_latency_to_task_miner_results",
+        description=(
+            "Add miner_latency_seconds column to task_miner_results so the "
+            "leaderboard can show miner response latency separately from "
+            "judge latency, and for the latency-violation scoring gate"
+        ),
+        apply=lambda engine: _migration_add_miner_latency_to_task_miner_results(engine),
+    ),
+    Migration(
+        version="add_miner_first_token_to_task_miner_results",
+        description=(
+            "Add miner_first_token_seconds column to task_miner_results to "
+            "store time-to-first-token from the streaming invocation path; "
+            "feeds the mode-agnostic 10s TTFB SLA gate"
+        ),
+        apply=lambda engine: _migration_add_miner_first_token_to_task_miner_results(engine),
+    ),
+    Migration(
+        version="drop_miner_first_token_seconds",
+        description=(
+            "Drop miner_first_token_seconds — TTFB metric removed; only "
+            "completion-time latency is recorded and gated. Most LLM "
+            "providers stream first token <20s anyway, so the gate added "
+            "noise without changing miner ranking."
+        ),
+        apply=lambda engine: _migration_drop_miner_first_token_seconds(engine),
+    ),
 )
+
+
+def _migration_add_miner_latency_to_task_miner_results(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    if "miner_latency_seconds" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE task_miner_results "
+            "ADD COLUMN miner_latency_seconds FLOAT NOT NULL DEFAULT 0.0"
+        ))
+
+
+def _migration_add_miner_first_token_to_task_miner_results(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    if "miner_first_token_seconds" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE task_miner_results "
+            "ADD COLUMN miner_first_token_seconds FLOAT NOT NULL DEFAULT 0.0"
+        ))
+
+
+def _migration_drop_miner_first_token_seconds(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    if "miner_first_token_seconds" not in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE task_miner_results DROP COLUMN miner_first_token_seconds"
+        ))
 
 
 def _drop_registered_neurons_is_active(engine: Engine) -> None:

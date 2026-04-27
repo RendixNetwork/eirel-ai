@@ -193,19 +193,25 @@ class RuntimeRemediationSuppressionRequest(BaseModel):
 
 class TaskClaimRequest(BaseModel):
     run_id: str | None = None
-    batch_size: int = Field(default=5, ge=1, le=40)
+    batch_size: int = Field(default=1, ge=1, le=40)
+
+
+class TaskClaimMiner(BaseModel):
+    """One miner target in the fan-out list the validator must call for a task."""
+
+    hotkey: str
+    endpoint: str
+    auth_headers: dict[str, str] = Field(default_factory=dict)
 
 
 class TaskClaimItem(BaseModel):
-    task_assignment_id: str
+    task_evaluation_id: str
     run_id: str
     family_id: str
-    miner_hotkey: str
     task_id: str
     task_index: int
     task_payload: dict[str, Any]
-    miner_endpoint: str
-    miner_auth_headers: dict[str, str] = Field(default_factory=dict)
+    miners: list[TaskClaimMiner] = Field(default_factory=list)
     claim_expires_at: str
     judge_config: dict[str, Any] | None = None
     rubric_version: str | None = None
@@ -218,27 +224,22 @@ class TaskClaimResponse(BaseModel):
 
 
 class TaskResultSubmission(BaseModel):
-    miner_response: dict[str, Any]
-    judge_output: dict[str, Any] | None = None
-    task_score: float | None = None
-    task_status: str = "completed"
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    baseline_response: dict[str, Any] | None = None
+    miner_results: list[dict[str, Any]] = Field(default_factory=list)
+    validator_hotkey: str | None = None
+    judge_model: str | None = None
 
 
 class TaskResultResponse(BaseModel):
-    task_assignment_id: str
+    task_evaluation_id: str
     status: str
-    miner_evaluation_complete: bool = False
     family_evaluation_complete: bool = False
     remaining_task_count: int = 0
 
 
 class MinerEvaluationProgress(BaseModel):
     miner_hotkey: str
-    total: int
-    evaluated: int
-    claimed: int
-    pending: int
+    judgments_received: int = 0
 
 
 class EvaluationStatusResponse(BaseModel):

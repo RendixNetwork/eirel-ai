@@ -186,13 +186,17 @@ class EvaluationTaskManager:
         run_id: str,
         family_id: str,
         validator_hotkey: str,
-        batch_size: int = 2,
+        batch_size: int = 1,
     ) -> list[TaskEvaluation]:
         """Claim up to *batch_size* pending TaskEvaluations.
 
         Each claim is a task — validator handles all miners for that task.
-        Default batch size is 2 because each claim is much heavier now
-        (fan-out to N miners + OpenAI baseline call).
+        Default batch size is 1: a task already fans out to N miners + OpenAI
+        baseline + N judges in parallel internally, so claim/submit overhead is
+        a tiny fraction of per-task work. Larger batches just lengthen lease
+        hold time, concentrate failure blast radius, and skew validator
+        consensus by letting one validator monopolize a chunk of the run.
+        Operators with high control-plane RTT can bump this via env.
         """
         now = utcnow()
         family_id = ensure_active_family_id(family_id)
@@ -264,7 +268,9 @@ class EvaluationTaskManager:
         `miner_results` is a list of dicts with keys:
           miner_hotkey, miner_response, miner_citations, judge_output,
           agreement_score, verdict ("matches"|"partially_matches"|
-          "contradicts"|"not_applicable"|"error"), latency_seconds
+          "contradicts"|"not_applicable"|"error"|"latency_violation"),
+          miner_latency_seconds (miner wall-clock), latency_seconds (judge
+          wall-clock — kept under the legacy key for back-compat).
 
         Citations are preserved on the row for dashboard display but do
         not participate in scoring. Returns status info (accepted/rejected
@@ -335,6 +341,7 @@ class EvaluationTaskManager:
                 judge_output_json=entry.get("judge_output"),
                 agreement_verdict=verdict,
                 agreement_score=float(score),
+                miner_latency_seconds=float(entry.get("miner_latency_seconds") or 0.0),
                 latency_seconds=float(entry.get("latency_seconds") or 0.0),
             ))
         session.flush()

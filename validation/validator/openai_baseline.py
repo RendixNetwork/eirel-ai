@@ -85,8 +85,17 @@ class OpenAIBaselineClient:
             await self._client.aclose()
             self._client = None
 
-    async def generate(self, *, prompt: str) -> BaselineResponse:
-        """Call the Responses API with the built-in web_search tool.
+    async def generate(
+        self,
+        *,
+        prompt: str,
+        use_web_search: bool = False,
+    ) -> BaselineResponse:
+        """Call the Responses API, optionally with the built-in web_search tool.
+
+        ``use_web_search`` is set from the task's own ``web_search`` flag by
+        the caller — this mirrors the end-user toggle, so the baseline has
+        the same information access as the miner would in real chat usage.
 
         Returns a normalized BaselineResponse; raises ``OpenAIBaselineError``
         on any failure (network, HTTP error, malformed output, budget
@@ -100,11 +109,12 @@ class OpenAIBaselineClient:
                 f"(spent={self._spent_usd:.4f} cap={self.max_cost_usd_per_run:.4f})"
             )
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
-            "tools": [{"type": "web_search"}],
             "input": prompt,
         }
+        if use_web_search:
+            payload["tools"] = [{"type": "web_search"}]
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
@@ -152,6 +162,7 @@ class OpenAIBaselineClient:
                 metadata={
                     "usage": body.get("usage") or {},
                     "response_id": body.get("id"),
+                    "web_search_enabled": use_web_search,
                 },
             )
         except ValidationError as exc:

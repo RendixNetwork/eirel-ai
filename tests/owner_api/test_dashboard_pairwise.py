@@ -118,6 +118,7 @@ def test_task_evaluation_from_row_emits_agreement_schema():
         agreement_verdict="matches",
         agreement_score=1.0,
         latency_seconds=1.2,
+        miner_latency_seconds=2.5,
         created_at=datetime.now(UTC).replace(tzinfo=None),
         miner_response_json={"ok": True},
         miner_citations_json=[
@@ -161,6 +162,7 @@ def test_task_evaluation_from_row_renders_error_as_failed():
         agreement_verdict="error",
         agreement_score=0.0,
         latency_seconds=0.0,
+        miner_latency_seconds=0.0,
         created_at=datetime.now(UTC).replace(tzinfo=None),
         miner_response_json={},
         miner_citations_json=[],
