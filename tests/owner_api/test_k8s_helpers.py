@@ -25,7 +25,7 @@ def _base_kwargs(**overrides):
         "deployment_name": "miner-test-123",
         "service_name": "miner-test-123",
         "submission_id": "test-123",
-        "artifact_url": "registry.local/miner-runtime:v1",
+        "artifact_url": "registry.local/eirel-miner-runtime:latest",
         "manifest": _stub_manifest(),
         "internal_service_token": "tok",
         "provider_proxy_url": "http://proxy:8092",

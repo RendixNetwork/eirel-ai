@@ -126,7 +126,7 @@ def _make_manager(
     mgr._netv1 = netv1 or _FakeNetworkingV1Api()
     mgr._namespace = namespace
     mgr._system_namespace = "eirel-system"
-    mgr._runtime_image = "registry.eirel.internal/miner-runtime:v1"
+    mgr._runtime_image = "registry.eirel.internal/eirel-miner-runtime:latest"
     mgr._shared_secret_name = "eirel-runtime-shared"
     mgr._service_domain = service_domain
     mgr._health_timeout_seconds = 30.0

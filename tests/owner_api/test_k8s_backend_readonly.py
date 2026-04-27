@@ -144,7 +144,7 @@ def _make_manager(
     mgr._netv1 = netv1 or _FakeNetworkingV1Api()
     mgr._namespace = namespace
     mgr._system_namespace = "eirel-system"
-    mgr._runtime_image = "registry.eirel.internal/miner-runtime:v1"
+    mgr._runtime_image = "registry.eirel.internal/eirel-miner-runtime:latest"
     mgr._shared_secret_name = "eirel-runtime-shared"
     mgr._service_domain = service_domain
     mgr._health_timeout_seconds = 30.0
@@ -291,7 +291,7 @@ async def test_recover_runtime_handle_returns_service_dns_for_ready():
     manifest = _ns(runtime=_ns(port=8080))
     handle = await mgr.recover_runtime_handle(submission_id="sub42", manifest=manifest)
     assert handle is not None
-    assert handle.endpoint_url == "http://miner-sub42.eirel-miners.svc.cluster.local"
+    assert handle.endpoint_url == "http://miner-sub42.eirel-miners.svc.cluster.local:8080"
     assert handle.state == "healthy"
     assert handle.container_name == "miner-sub42"
     assert mgr.runtime_handle("sub42") is handle
@@ -320,5 +320,5 @@ async def test_recover_runtime_handle_returns_unhealthy_for_crashloop():
     handle = await mgr.recover_runtime_handle(submission_id="crash1", manifest=manifest)
     assert handle is not None
     assert handle.state == "unhealthy"
-    assert handle.endpoint_url == "http://miner-crash1.eirel-miners.svc.cluster.local"
+    assert handle.endpoint_url == "http://miner-crash1.eirel-miners.svc.cluster.local:9000"
     assert mgr.runtime_handle("crash1") is None
