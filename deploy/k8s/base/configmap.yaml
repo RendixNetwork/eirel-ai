@@ -25,7 +25,6 @@ data:
   CONSUMER_API_PUBLIC_URL: http://consumer-chat-api.eirel.svc.cluster.local:8080
   VALIDATOR_ENGINE_PUBLIC_URL: http://validator-engine.eirel.svc.cluster.local:8010
   METAGRAPH_LISTENER_PUBLIC_URL: http://metagraph-listener.eirel.svc.cluster.local:8011
-  WEIGHT_SETTER_PUBLIC_URL: http://weight-setter.eirel.svc.cluster.local:8012
   PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel.svc.cluster.local:8092
   EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel.svc.cluster.local:8092
   EIREL_BENCHMARK_RETRIEVAL_SERVICE_URL: http://retrieval-service.eirel.svc.cluster.local:8081
@@ -38,7 +37,6 @@ data:
   EIREL_RESEARCH_TOOL_MAX_SELECTED_SOURCES: "5"
   EIREL_RESEARCH_TOOL_TIMEOUT_SECONDS: "15"
   # -- Rate limits / scheduling (stable defaults) ---
-  VALIDATOR_EPOCH_QUORUM: "1"
   GATEWAY_RATE_LIMIT_REQUESTS: "120"
   GATEWAY_RATE_LIMIT_WINDOW_SECONDS: "60"
   GATEWAY_SYNC_TIMEOUT_SECONDS: "8"

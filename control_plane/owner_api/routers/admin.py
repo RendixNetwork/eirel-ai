@@ -4,6 +4,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -175,6 +176,31 @@ async def admin_current_run(
         }
 
 
+async def _reset_tool_service_usage(services: ManagedOwnerServices) -> None:
+    """Best-effort POST to the web-search tool service's /v1/usage/reset.
+
+    Failure is logged, never raised — a reset miss is far less bad than
+    blocking the run advance.
+    """
+    base_url = (services.settings.web_search_tool_service_url or "").rstrip("/")
+    if not base_url:
+        return
+    token = services.settings.web_search_tool_service_token or ""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = f"{base_url}/v1/usage/reset"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(url, headers=headers)
+            resp.raise_for_status()
+            body = resp.json() if resp.content else {}
+            logger.info(
+                "admin: web-search tool usage reset (cleared_job_count=%s)",
+                body.get("cleared_job_count"),
+            )
+    except Exception as exc:
+        logger.warning("admin: web-search tool usage reset failed: %s", exc)
+
+
 @router.post("/v1/admin/runs/advance")
 async def admin_advance_run(
     request: Request,
@@ -205,6 +231,12 @@ async def admin_advance_run(
         "admin: advanced run %s (seq %s) → %s (seq %s)",
         previous_id, previous_sequence, new_run.id, new_run.sequence,
     )
+    # Reset the web-search tool service's per-job request budgets so each
+    # miner deployment starts the new run with a fresh quota. Miners use a
+    # sticky job_id (miner-<deployment_id>) for cost attribution, so
+    # without this periodic reset their counters grow monotonically and
+    # eventually 429 for the rest of the pod's lifetime.
+    await _reset_tool_service_usage(services)
     return {
         "result": "advanced",
         "previous_run_id": previous_id,

@@ -25,7 +25,7 @@ def _base_kwargs(**overrides):
         "deployment_name": "miner-test-123",
         "service_name": "miner-test-123",
         "submission_id": "test-123",
-        "artifact_url": "registry.local/miner-runtime:v1",
+        "artifact_url": "registry.local/eirel-miner-runtime:latest",
         "manifest": _stub_manifest(),
         "internal_service_token": "tok",
         "provider_proxy_url": "http://proxy:8092",
@@ -251,3 +251,25 @@ def test_build_network_policy_uses_custom_control_plane_namespace():
     ingress_from = np["spec"]["ingress"][0]["from"]
     assert ingress_from[0]["namespaceSelector"] == {"matchLabels": {"name": "custom-sys"}}
     assert ingress_from[1]["namespaceSelector"] == {"matchLabels": {"name": "custom-cp"}}
+
+
+def test_build_network_policy_blocks_direct_https_egress():
+    """Miners must not have a blanket 0.0.0.0/0:443 rule — otherwise they
+    could call api.openai.com directly and bypass the provider-proxy
+    allowlist. Egress must be scoped to provider-proxy + DNS (+ host tool
+    services when host_ip is provided).
+    """
+    np = _build_network_policy(
+        name="miner-abc",
+        submission_id="abc",
+        system_namespace="eirel-system",
+        control_plane_namespace="eirel-control-plane",
+        port=8080,
+    )
+    for rule in np["spec"]["egress"]:
+        for peer in rule.get("to", []) or []:
+            cidr = (peer.get("ipBlock") or {}).get("cidr")
+            assert cidr != "0.0.0.0/0", (
+                "egress rule allows unscoped outbound HTTPS — miners would "
+                "bypass provider-proxy and reach api.openai.com directly"
+            )

@@ -159,7 +159,8 @@ def _make_manager(cluster: _FakeK8sCluster) -> KubernetesMinerRuntimeManager:
     mgr._netv1 = _FakeNetworkingV1Api(cluster)
     mgr._namespace = "eirel-miners"
     mgr._system_namespace = "eirel-system"
-    mgr._runtime_image = "registry.eirel.internal/miner-runtime:v1"
+    mgr._control_plane_namespace = "eirel-control-plane"
+    mgr._runtime_image = "registry.eirel.internal/eirel-miner-runtime:latest"
     mgr._shared_secret_name = "eirel-runtime-shared"
     mgr._service_domain = "svc.cluster.local"
     mgr._health_timeout_seconds = 60.0

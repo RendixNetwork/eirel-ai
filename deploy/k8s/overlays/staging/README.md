@@ -8,7 +8,6 @@ This overlay is the production-like staging topology for the managed EIREL contr
 - `consumer-chat-api`
 - `validator-engine`
 - `metagraph-listener`
-- `weight-setter`
 - `provider-proxy`
 - in-cluster `postgres` and `redis`
 
@@ -79,7 +78,7 @@ The staging observability assets live in:
 
 The key staging alerts cover:
 
-- service availability for `owner-api`, `api-gateway`, `execution-worker`, `consumer-chat-api`, `metagraph-listener`, and `weight-setter`
+- service availability for `owner-api`, `api-gateway`, `execution-worker`, `consumer-chat-api`, and `metagraph-listener`
 - provider proxy availability and quota rejection pressure
 - queued task backlog and worker failure growth
 - unhealthy managed deployments

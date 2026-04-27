@@ -428,7 +428,6 @@ async def test_run_staging_validation_reports_passed_matrix(monkeypatch):
         consumer_api_url="http://consumer.local",
         validator_engine_url="http://validator.local",
         metagraph_listener_url="http://metagraph.local",
-        weight_setter_url="http://weight.local",
         provider_proxy_url="http://provider.local",
         gateway_api_key="gateway-key",
         consumer_api_key="consumer-key",

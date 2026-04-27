@@ -25,7 +25,6 @@ data:
   CONSUMER_API_PUBLIC_URL: http://consumer-chat-api.eirel-prod.svc.cluster.local:8080
   VALIDATOR_ENGINE_PUBLIC_URL: http://validator-engine.eirel-prod.svc.cluster.local:8010
   METAGRAPH_LISTENER_PUBLIC_URL: http://metagraph-listener.eirel-prod.svc.cluster.local:8011
-  WEIGHT_SETTER_PUBLIC_URL: http://weight-setter.eirel-prod.svc.cluster.local:8012
   PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
   EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
   RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel-prod.svc.cluster.local:8085

@@ -6,7 +6,7 @@ one; they're not meant to run simultaneously.
 ## Mode A — Hybrid (`owner-api-hybrid/`)
 
 **Topology**: owner-api runs in k3s; every other service (postgres, redis,
-tool services, orchestrator, validator-engine, weight-setter, provider-proxy,
+tool services, orchestrator, validator-engine, provider-proxy,
 consumer-chat-api) runs in docker-compose on the same host.
 
 **Use when**:

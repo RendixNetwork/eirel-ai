@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-"""Distributed evaluation task management.
+"""Task-level evaluation management.
 
-Manages the lifecycle of per-miner per-task evaluation assignments.
-Validators claim tasks, evaluate them (invoke miner + judge), and
-submit results.  Expired claims are automatically released for
-reassignment.
+After the pairwise redesign, each TaskEvaluation row represents a single task
+in a run. A validator claims the row, fans out to every registered miner for
+that task, calls the OpenAI baseline, and submits per-miner pairwise judgments
+in one batch. Aggregation rolls per-miner TaskMinerResult rows into
+MinerEvaluationSummary via pairwise win rate.
 """
 
 import logging
@@ -18,10 +19,9 @@ from sqlalchemy.orm import Session
 
 from shared.common.models import (
     EpochTargetSnapshot,
-    EvaluationRun,
-    ManagedDeployment,
     MinerEvaluationSummary,
-    MinerEvaluationTask,
+    TaskEvaluation,
+    TaskMinerResult,
     utcnow,
 )
 from eirel.groups import ensure_active_family_id
@@ -40,11 +40,7 @@ def _compress_scores(
     power: float = 0.65,
     outlier_z_threshold: float = 2.0,
 ) -> dict[str, float]:
-    """Fix 11: compress scores to reduce cartel advantage.
-
-    1. Power-law compression (score^0.65) reduces marginal benefit of inflation.
-    2. Outlier dampening caps scores that are >2 stddev above median.
-    """
+    """Power-law compression + outlier dampening to resist cartel gaming."""
     if not effective_scores:
         return effective_scores
     values = [v for v in effective_scores.values() if v > 0]
@@ -71,7 +67,7 @@ def _compress_scores(
 
 
 class EvaluationTaskManager:
-    """Handles claim/submit/status for distributed evaluation tasks."""
+    """Handles claim/submit/status for task-level distributed evaluation."""
 
     def __init__(self, owner: ManagedOwnerServices) -> None:
         self._owner = owner
@@ -80,153 +76,8 @@ class EvaluationTaskManager:
     def settings(self):
         return self._owner.settings
 
-    def _layered_general_chat_score(
-        self,
-        *,
-        session: Session,
-        task: MinerEvaluationTask,
-        task_def: dict[str, Any],
-        raw_miner_response: dict[str, Any],
-        quality_score: float,
-    ) -> tuple[float, dict[str, Any] | None]:
-        """Apply the full general_chat scoring pipeline on top of the judge.
-
-        Returns ``(final_score, conversation_score_payload)`` where
-        ``conversation_score_payload`` is the serialized ``ConversationScore``
-        when the layered pipeline ran, or ``None`` when the miner did not
-        supply the optional trace + response_text fields (legacy path).
-
-        Miners opt in by including in their ``response`` dict:
-          * ``response_text: str`` — the raw assistant reply
-          * ``trace: dict`` — a ``ConversationTrace`` payload
-          * optional ``conversation_id: str`` (echoed back in metadata)
-
-        When either field is missing, the function returns the judge
-        score unchanged so legacy miners keep working.
-        """
-        response_dict = raw_miner_response.get("response") or {}
-        if not isinstance(response_dict, dict):
-            return quality_score, None
-
-        response_text = response_dict.get("response_text")
-        trace_payload = response_dict.get("trace")
-        if not isinstance(response_text, str) or not isinstance(trace_payload, dict):
-            return quality_score, None
-
-        # Rehydrate the trace — tolerate malformed trace by falling back.
-        from shared.core.evaluation_models import ConversationTrace, ConversationTurn
-        from control_plane.owner_api.evaluation.general_chat_scoring import (
-            _PreComputedQualityJudge,
-            budget_for_mode,
-            score_general_chat_conversation,
-        )
-        try:
-            trace = ConversationTrace.model_validate(trace_payload)
-        except Exception as exc:
-            logger.warning(
-                "rehydrate trace failed for task=%s: %s", task.task_id, exc,
-            )
-            return quality_score, None
-
-        # Derive the mode budget from the task definition, fall back to
-        # instant if the task omits the mode field.
-        budget = budget_for_mode(task_def.get("mode"))
-
-        # Build conversation_history from the task prompt. General-chat
-        # rubrics are mostly single-turn in production, but we carry the
-        # shape so future multi-turn tasks drop in without refactoring.
-        conversation_history: list[ConversationTurn] = [
-            ConversationTurn(role="user", content=str(task_def.get("prompt") or "")),
-        ]
-
-        # Fetch active honeytokens and penalty settings for the run.
-        active_honeytokens = self._active_honeytokens_for_run(session, task.run_id)
-        penalty_usd = float(
-            getattr(self.settings, "trace_gate_penalty_usd", 0.0)
-        )
-
-        # The quality score came from the eiretes judge sidecar — we
-        # adapt it as a pre-computed score so score_general_chat_conversation
-        # doesn't make a second judge call.
-        adapter_judge = _PreComputedQualityJudge(quality_score)
-
-        import asyncio
-
-        try:
-            conversation_score = asyncio.run(
-                score_general_chat_conversation(
-                    conversation_history=conversation_history,
-                    response=response_text,
-                    trace=trace,
-                    budget=budget,
-                    judge_client=adapter_judge,
-                    trace_gate_penalty_usd=penalty_usd,
-                    active_honeytokens=active_honeytokens,
-                )
-            )
-        except RuntimeError as exc:
-            # We're already inside an event loop (FastAPI). Schedule on a
-            # fresh loop via asyncio.new_event_loop to avoid nesting.
-            if "asyncio.run() cannot be called" not in str(exc):
-                raise
-            loop = asyncio.new_event_loop()
-            try:
-                conversation_score = loop.run_until_complete(
-                    score_general_chat_conversation(
-                        conversation_history=conversation_history,
-                        response=response_text,
-                        trace=trace,
-                        budget=budget,
-                        judge_client=adapter_judge,
-                        trace_gate_penalty_usd=penalty_usd,
-                        active_honeytokens=active_honeytokens,
-                    )
-                )
-            finally:
-                loop.close()
-
-        # If the gate failed and a penalty is configured, debit the run
-        # budget against the miner's deployment. Swallow errors — a
-        # failed charge must not break the scoring pipeline.
-        if conversation_score.trace_gate_penalty_usd > 0.0:
-            deployment_id = self._deployment_id_for_miner(
-                session, task.miner_hotkey, task.family_id,
-            )
-            if deployment_id is not None:
-                self._owner.scoring.charge_trace_gate_penalty(
-                    deployment_id,
-                    amount_usd=conversation_score.trace_gate_penalty_usd,
-                    reason="trace_gate_fail",
-                )
-
-        return conversation_score.total, conversation_score.model_dump(mode="json")
-
-    def _active_honeytokens_for_run(
-        self, session: Session, run_id: str
-    ) -> list[str]:
-        run = session.get(EvaluationRun, run_id)
-        if run is None or not isinstance(run.metadata_json, dict):
-            return []
-        honeytokens = run.metadata_json.get("honeytokens")
-        if not isinstance(honeytokens, list):
-            return []
-        return [str(url) for url in honeytokens if isinstance(url, str)]
-
-    def _deployment_id_for_miner(
-        self, session: Session, miner_hotkey: str, family_id: str
-    ) -> str | None:
-        deployment = session.execute(
-            select(ManagedDeployment)
-            .where(ManagedDeployment.miner_hotkey == miner_hotkey)
-            .where(ManagedDeployment.family_id == family_id)
-            .where(ManagedDeployment.status != "retired")
-            .order_by(ManagedDeployment.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        return deployment.id if deployment is not None else None
-
     # ------------------------------------------------------------------
-    # Task initialization
+    # Task initialization (one row per task, no miner fan-out at seed time)
     # ------------------------------------------------------------------
 
     def initialize_evaluation_tasks(
@@ -237,9 +88,12 @@ class EvaluationTaskManager:
         family_id: str,
         snapshot: EpochTargetSnapshot,
     ) -> int:
-        """Create MinerEvaluationTask rows for every member × task combination.
+        """Create one TaskEvaluation row per task in the run bundle.
 
-        Called once when the EpochTargetSnapshot is first created.
+        Miner list is stored on the EpochTargetSnapshot (`members_json`) and
+        attached to the claim response at claim time, so the validator knows
+        which miners to fan out to without the task row carrying it.
+
         Returns the number of tasks created.
         """
         bundle = self._owner.run_evaluation_bundle(
@@ -253,8 +107,7 @@ class EvaluationTaskManager:
             logger.warning("empty task list in evaluation bundle for run=%s family=%s", run_id, family_id)
             return 0
 
-        # Optional E2E knob: cap the number of tasks created per miner so
-        # test runs don't take 20+ minutes. Unset in production.
+        # Optional E2E knob: cap tasks per run for smoke tests.
         import os
         task_limit_raw = os.getenv("EIREL_EVAL_TASK_LIMIT", "")
         if task_limit_raw.strip():
@@ -271,35 +124,30 @@ class EvaluationTaskManager:
 
         members = snapshot.members_json or []
         created = 0
-        for member in members:
-            miner_hotkey = member.get("hotkey", "")
-            if not miner_hotkey:
+        for task_index, task in enumerate(tasks):
+            task_id = task.get("task_id", "")
+            if not task_id:
                 continue
-            for task_index, task in enumerate(tasks):
-                task_id = task.get("task_id", "")
-                if not task_id:
-                    continue
-                existing = session.execute(
-                    select(MinerEvaluationTask).where(
-                        MinerEvaluationTask.run_id == run_id,
-                        MinerEvaluationTask.family_id == family_id,
-                        MinerEvaluationTask.miner_hotkey == miner_hotkey,
-                        MinerEvaluationTask.task_id == task_id,
-                    ).limit(1)
-                ).scalar_one_or_none()
-                if existing is not None:
-                    continue
-                session.add(MinerEvaluationTask(
-                    run_id=run_id,
-                    family_id=family_id,
-                    miner_hotkey=miner_hotkey,
-                    task_id=task_id,
-                    task_index=task_index,
-                    status="pending",
-                ))
-                created += 1
+            existing = session.execute(
+                select(TaskEvaluation).where(
+                    TaskEvaluation.run_id == run_id,
+                    TaskEvaluation.family_id == family_id,
+                    TaskEvaluation.task_id == task_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                continue
+            session.add(TaskEvaluation(
+                run_id=run_id,
+                family_id=family_id,
+                task_id=task_id,
+                task_index=task_index,
+                status="pending",
+            ))
+            created += 1
 
-        # Also create MinerEvaluationSummary rows (one per miner)
+        # Seed one MinerEvaluationSummary per miner so aggregation has a
+        # row to update as task results land.
         for member in members:
             miner_hotkey = member.get("hotkey", "")
             if not miner_hotkey:
@@ -322,13 +170,13 @@ class EvaluationTaskManager:
 
         session.flush()
         logger.info(
-            "initialized %d evaluation tasks for run=%s family=%s miners=%d",
+            "initialized %d task evaluations for run=%s family=%s miners=%d",
             created, run_id, family_id, len(members),
         )
         return created
 
     # ------------------------------------------------------------------
-    # Claim tasks
+    # Claim tasks (task-level)
     # ------------------------------------------------------------------
 
     def claim_tasks(
@@ -338,23 +186,21 @@ class EvaluationTaskManager:
         run_id: str,
         family_id: str,
         validator_hotkey: str,
-        batch_size: int = 5,
-    ) -> list[MinerEvaluationTask]:
-        """Claim up to *batch_size* pending tasks for the validator.
+        batch_size: int = 1,
+    ) -> list[TaskEvaluation]:
+        """Claim up to *batch_size* pending TaskEvaluations.
 
-        Tasks are distributed across validators as a simple work queue.
-        Multiple validators can work on different tasks for the same miner
-        simultaneously — there is no per-miner-per-validator limit.  The
-        ``FOR UPDATE SKIP LOCKED`` pattern ensures concurrent claim requests
-        from different validators get different tasks without blocking.
-
-        Expired claims (from crashed validators) are released first so
-        those tasks become available for reassignment.
+        Each claim is a task — validator handles all miners for that task.
+        Default batch size is 1: a task already fans out to N miners + OpenAI
+        baseline + N judges in parallel internally, so claim/submit overhead is
+        a tiny fraction of per-task work. Larger batches just lengthen lease
+        hold time, concentrate failure blast radius, and skew validator
+        consensus by letting one validator monopolize a chunk of the run.
+        Operators with high control-plane RTT can bump this via env.
         """
         now = utcnow()
         family_id = ensure_active_family_id(family_id)
 
-        # Gate: only release tasks when all deployments are ready
         snapshot = session.execute(
             select(EpochTargetSnapshot)
             .where(EpochTargetSnapshot.run_id == run_id)
@@ -363,13 +209,13 @@ class EvaluationTaskManager:
         if snapshot is None or snapshot.status != "open":
             return []
 
-        # Step 1: Release expired claims (crashed validators)
+        # Release expired claims (crashed validators)
         session.execute(
-            update(MinerEvaluationTask)
-            .where(MinerEvaluationTask.run_id == run_id)
-            .where(MinerEvaluationTask.family_id == family_id)
-            .where(MinerEvaluationTask.status == "claimed")
-            .where(MinerEvaluationTask.claim_expires_at <= now)
+            update(TaskEvaluation)
+            .where(TaskEvaluation.run_id == run_id)
+            .where(TaskEvaluation.family_id == family_id)
+            .where(TaskEvaluation.status == "claimed")
+            .where(TaskEvaluation.claim_expires_at <= now)
             .values(
                 status="pending",
                 claimed_by_validator=None,
@@ -380,17 +226,13 @@ class EvaluationTaskManager:
         )
         session.flush()
 
-        # Step 2: Grab next available pending tasks.
-        # ORDER BY task_index distributes tasks in evaluation-bundle order,
-        # which naturally interleaves miners when multiple are present.
-        # SKIP LOCKED ensures concurrent validators get different rows.
         candidates = list(
             session.execute(
-                select(MinerEvaluationTask)
-                .where(MinerEvaluationTask.run_id == run_id)
-                .where(MinerEvaluationTask.family_id == family_id)
-                .where(MinerEvaluationTask.status == "pending")
-                .order_by(MinerEvaluationTask.task_index, MinerEvaluationTask.miner_hotkey)
+                select(TaskEvaluation)
+                .where(TaskEvaluation.run_id == run_id)
+                .where(TaskEvaluation.family_id == family_id)
+                .where(TaskEvaluation.status == "pending")
+                .order_by(TaskEvaluation.task_index)
                 .limit(batch_size)
                 .with_for_update(skip_locked=True)
             ).scalars()
@@ -409,104 +251,103 @@ class EvaluationTaskManager:
         return candidates
 
     # ------------------------------------------------------------------
-    # Submit task result
+    # Submit task result (per-task batch of per-miner agreement judgments)
     # ------------------------------------------------------------------
 
     def submit_task_result(
         self,
         session: Session,
         *,
-        task_assignment_id: str,
+        task_evaluation_id: str,
         validator_hotkey: str,
-        miner_response: dict[str, Any],
-        judge_output: dict[str, Any] | None,
-        task_score: float | None,
-        task_status: str,
-        metadata: dict[str, Any],
+        baseline_response: dict[str, Any] | None,
+        miner_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Record the result of an evaluated task.
+        """Record all per-miner agreement results for a claimed task.
 
-        Returns a dict with status info (accepted/rejected, completion flags).
+        `miner_results` is a list of dicts with keys:
+          miner_hotkey, miner_response, miner_citations, judge_output,
+          agreement_score, verdict ("matches"|"partially_matches"|
+          "contradicts"|"not_applicable"|"error"|"latency_violation"),
+          miner_latency_seconds (miner wall-clock), latency_seconds (judge
+          wall-clock — kept under the legacy key for back-compat).
+
+        Citations are preserved on the row for dashboard display but do
+        not participate in scoring. Returns status info (accepted/rejected
+        + family completion flag).
         """
         now = utcnow()
-        task = session.get(MinerEvaluationTask, task_assignment_id)
+        task = session.get(TaskEvaluation, task_evaluation_id)
         if task is None:
-            return {"status": "rejected_not_found", "miner_evaluation_complete": False, "family_evaluation_complete": False, "remaining_task_count": -1}
+            return {
+                "status": "rejected_not_found",
+                "family_evaluation_complete": False,
+                "remaining_task_count": -1,
+            }
 
-        # Idempotent: already evaluated by this validator
         if task.status == "evaluated" and task.claimed_by_validator == validator_hotkey:
             remaining = self._remaining_tasks(session, task)
             return {
                 "status": "accepted",
-                "miner_evaluation_complete": remaining["miner_remaining"] == 0,
-                "family_evaluation_complete": remaining["family_remaining"] == 0,
-                "remaining_task_count": remaining["family_remaining"],
+                "family_evaluation_complete": remaining == 0,
+                "remaining_task_count": remaining,
             }
 
-        # Reject if not claimed by this validator
         if task.claimed_by_validator != validator_hotkey:
-            return {"status": "rejected_wrong_validator", "miner_evaluation_complete": False, "family_evaluation_complete": False, "remaining_task_count": -1}
+            return {
+                "status": "rejected_wrong_validator",
+                "family_evaluation_complete": False,
+                "remaining_task_count": -1,
+            }
 
-        # Reject if not in claimed state (expired or already evaluated by someone else)
         if task.status != "claimed":
-            return {"status": "rejected_not_claimed", "miner_evaluation_complete": False, "family_evaluation_complete": False, "remaining_task_count": -1}
+            return {
+                "status": "rejected_not_claimed",
+                "family_evaluation_complete": False,
+                "remaining_task_count": -1,
+            }
 
-        # The validator submits ``task_score`` = the raw LLM judge quality
-        # score. Apply the server-side anti-gaming pipeline (trace integrity
-        # gate, honeytoken detection, latency axis, economic penalty) to
-        # derive the final stored score. This keeps honeytoken URLs and
-        # gating heuristics hidden from validators while still letting
-        # validators carry the LLM judge cost.
-        quality_score = float(task_score or 0.0)
-        final_score = quality_score
-        conversation_score_payload: dict[str, Any] | None = None
-        if task.family_id == "general_chat":
-            bundle = self._owner.run_evaluation_bundle(
-                session, run_id=task.run_id, family_id=task.family_id,
-            )
-            task_def: dict[str, Any] | None = None
-            if isinstance(bundle, dict):
-                for candidate in bundle.get("tasks", []) or []:
-                    if isinstance(candidate, dict) and candidate.get("task_id") == task.task_id:
-                        task_def = candidate
-                        break
-            if task_def is not None:
-                final_score, conversation_score_payload = self._layered_general_chat_score(
-                    session=session,
-                    task=task,
-                    task_def=task_def,
-                    raw_miner_response=miner_response,
-                    quality_score=quality_score,
-                )
-
-        enriched_metadata = dict(metadata or {})
-        enriched_metadata["quality_score"] = quality_score
-        if conversation_score_payload is not None:
-            enriched_metadata["conversation_score"] = conversation_score_payload
-
-        # Accept the result
+        task.baseline_response_json = baseline_response
         task.status = "evaluated"
-        task.miner_response_json = miner_response
-        task.judge_output_json = judge_output
-        task.task_score = final_score
-        task.task_status = task_status
-        task.result_metadata_json = enriched_metadata
         task.evaluated_at = now
         task.updated_at = now
+
+        from shared.core.evaluation_models import VERDICT_SCORES
+
+        valid_verdicts = set(VERDICT_SCORES)  # matches, partially_matches, not_applicable, contradicts, error
+        for entry in miner_results:
+            miner_hotkey = str(entry.get("miner_hotkey") or "").strip()
+            if not miner_hotkey:
+                continue
+            verdict = str(entry.get("verdict") or "error")
+            if verdict not in valid_verdicts:
+                verdict = "error"
+            # Score the row from the verdict if the validator didn't pre-fill
+            # agreement_score, so the DB always has a consistent scalar.
+            score = entry.get("agreement_score")
+            if score is None:
+                score = VERDICT_SCORES.get(verdict, 0.0)
+            citations = entry.get("miner_citations") or []
+            if not isinstance(citations, list):
+                citations = []
+            session.add(TaskMinerResult(
+                task_evaluation_id=task.id,
+                run_id=task.run_id,
+                family_id=task.family_id,
+                task_id=task.task_id,
+                miner_hotkey=miner_hotkey,
+                miner_response_json=entry.get("miner_response") or {},
+                miner_citations_json=citations,
+                judge_output_json=entry.get("judge_output"),
+                agreement_verdict=verdict,
+                agreement_score=float(score),
+                miner_latency_seconds=float(entry.get("miner_latency_seconds") or 0.0),
+                latency_seconds=float(entry.get("latency_seconds") or 0.0),
+            ))
         session.flush()
 
         remaining = self._remaining_tasks(session, task)
-        miner_complete = remaining["miner_remaining"] == 0
-        family_complete = remaining["family_remaining"] == 0
-
-        if miner_complete:
-            self._on_miner_evaluation_complete(
-                session,
-                run_id=task.run_id,
-                family_id=task.family_id,
-                miner_hotkey=task.miner_hotkey,
-            )
-
+        family_complete = remaining == 0
         if family_complete:
             self._on_family_evaluation_complete(
                 session,
@@ -516,10 +357,41 @@ class EvaluationTaskManager:
 
         return {
             "status": "accepted",
-            "miner_evaluation_complete": miner_complete,
             "family_evaluation_complete": family_complete,
-            "remaining_task_count": remaining["family_remaining"],
+            "remaining_task_count": remaining,
         }
+
+    # ------------------------------------------------------------------
+    # Submit baseline failure (task returned to pending for retry)
+    # ------------------------------------------------------------------
+
+    def mark_baseline_failed(
+        self,
+        session: Session,
+        *,
+        task_evaluation_id: str,
+        validator_hotkey: str,
+    ) -> dict[str, Any]:
+        """Mark a claimed task as baseline_failed and return it to pending.
+
+        Called by the validator when the OpenAI baseline call fails — the
+        task should be available for another validator to try.
+        """
+        task = session.get(TaskEvaluation, task_evaluation_id)
+        if task is None:
+            return {"status": "rejected_not_found"}
+        if task.claimed_by_validator != validator_hotkey:
+            return {"status": "rejected_wrong_validator"}
+        if task.status != "claimed":
+            return {"status": "rejected_not_claimed"}
+        now = utcnow()
+        task.status = "pending"
+        task.claimed_by_validator = None
+        task.claimed_at = None
+        task.claim_expires_at = None
+        task.updated_at = now
+        session.flush()
+        return {"status": "released"}
 
     # ------------------------------------------------------------------
     # Status
@@ -532,44 +404,39 @@ class EvaluationTaskManager:
         run_id: str,
         family_id: str,
     ) -> dict[str, Any]:
-        """Return evaluation progress for a family in a run (single query)."""
+        """Return evaluation progress for a family in a run."""
         family_id = ensure_active_family_id(family_id)
 
-        # Single GROUP BY query for all counts
         rows = session.execute(
             select(
-                MinerEvaluationTask.miner_hotkey,
-                MinerEvaluationTask.status,
-                func.count(MinerEvaluationTask.id),
+                TaskEvaluation.status,
+                func.count(TaskEvaluation.id),
             )
-            .where(MinerEvaluationTask.run_id == run_id)
-            .where(MinerEvaluationTask.family_id == family_id)
-            .group_by(MinerEvaluationTask.miner_hotkey, MinerEvaluationTask.status)
+            .where(TaskEvaluation.run_id == run_id)
+            .where(TaskEvaluation.family_id == family_id)
+            .group_by(TaskEvaluation.status)
         ).fetchall()
 
-        # Aggregate family-level counts
         status_counts: dict[str, int] = {"pending": 0, "claimed": 0, "evaluated": 0}
-        # Per-miner breakdown: {hotkey: {status: count}}
-        miner_map: dict[str, dict[str, int]] = {}
-        for hotkey, status, count in rows:
+        for status, count in rows:
             status_counts[status] = status_counts.get(status, 0) + count
-            if hotkey not in miner_map:
-                miner_map[hotkey] = {"pending": 0, "claimed": 0, "evaluated": 0}
-            miner_map[hotkey][status] = count
+
+        # Per-miner count of judgments landed so far
+        miner_rows = session.execute(
+            select(
+                TaskMinerResult.miner_hotkey,
+                func.count(TaskMinerResult.id),
+            )
+            .where(TaskMinerResult.run_id == run_id)
+            .where(TaskMinerResult.family_id == family_id)
+            .group_by(TaskMinerResult.miner_hotkey)
+        ).fetchall()
+        miners = [
+            {"miner_hotkey": hk, "judgments_received": count}
+            for hk, count in sorted(miner_rows)
+        ]
 
         total = sum(status_counts.values())
-        miners = []
-        for hotkey in sorted(miner_map):
-            m = miner_map[hotkey]
-            miner_total = m["pending"] + m["claimed"] + m["evaluated"]
-            miners.append({
-                "miner_hotkey": hotkey,
-                "total": miner_total,
-                "evaluated": m["evaluated"],
-                "claimed": m["claimed"],
-                "pending": m["pending"],
-            })
-
         return {
             "run_id": run_id,
             "family_id": family_id,
@@ -584,27 +451,15 @@ class EvaluationTaskManager:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _remaining_tasks(
-        self,
-        session: Session,
-        task: MinerEvaluationTask,
-    ) -> dict[str, int]:
-        """Count unevaluated tasks for this miner and for the whole family in one query."""
-        rows = session.execute(
-            select(
-                MinerEvaluationTask.miner_hotkey,
-                func.count(MinerEvaluationTask.id),
-            )
-            .where(MinerEvaluationTask.run_id == task.run_id)
-            .where(MinerEvaluationTask.family_id == task.family_id)
-            .where(MinerEvaluationTask.status != "evaluated")
-            .group_by(MinerEvaluationTask.miner_hotkey)
-        ).fetchall()
-        family_remaining = sum(count for _, count in rows)
-        miner_remaining = next(
-            (count for hotkey, count in rows if hotkey == task.miner_hotkey), 0
-        )
-        return {"miner_remaining": miner_remaining, "family_remaining": family_remaining}
+    def _remaining_tasks(self, session: Session, task: TaskEvaluation) -> int:
+        """Count unevaluated TaskEvaluations in the same run/family."""
+        remaining = session.execute(
+            select(func.count(TaskEvaluation.id))
+            .where(TaskEvaluation.run_id == task.run_id)
+            .where(TaskEvaluation.family_id == task.family_id)
+            .where(TaskEvaluation.status != "evaluated")
+        ).scalar_one()
+        return int(remaining or 0)
 
     def finalize_run_family(
         self,
@@ -613,36 +468,15 @@ class EvaluationTaskManager:
         run_id: str,
         family_id: str,
     ) -> None:
-        miners = list(session.execute(
-            select(MinerEvaluationTask.miner_hotkey)
-            .where(MinerEvaluationTask.run_id == run_id)
-            .where(MinerEvaluationTask.family_id == family_id)
-            .where(MinerEvaluationTask.status == "evaluated")
-            .distinct()
-        ).scalars())
-        if not miners:
-            return
-        for miner_hotkey in miners:
-            summary = session.execute(
-                select(MinerEvaluationSummary).where(
-                    MinerEvaluationSummary.run_id == run_id,
-                    MinerEvaluationSummary.family_id == family_id,
-                    MinerEvaluationSummary.miner_hotkey == miner_hotkey,
-                ).limit(1)
-            ).scalar_one_or_none()
-            if summary is None or summary.status == "scored":
-                continue
-            self._on_miner_evaluation_complete(
-                session,
-                run_id=run_id,
-                family_id=family_id,
-                miner_hotkey=miner_hotkey,
-            )
         self._on_family_evaluation_complete(
             session, run_id=run_id, family_id=family_id,
         )
 
-    def _on_miner_evaluation_complete(
+    # ------------------------------------------------------------------
+    # Per-miner scoring + family aggregation
+    # ------------------------------------------------------------------
+
+    def _aggregate_miner_from_results(
         self,
         session: Session,
         *,
@@ -650,8 +484,15 @@ class EvaluationTaskManager:
         family_id: str,
         miner_hotkey: str,
     ) -> None:
-        """Called when all tasks for a miner are evaluated. Computes the full score."""
-        from shared.benchmark._orchestration import compute_miner_score_from_results
+        """Compute MinerEvaluationSummary from TaskMinerResult rows.
+
+        Primary score is the mean of per-task ``agreement_score`` values
+        across non-error rows. Miners with error_rate > 30% are capped
+        at 0.5 (see MinerRollup).
+        """
+        from control_plane.owner_api.evaluation.general_chat_scoring import (
+            aggregate_miner_score,
+        )
 
         summary = session.execute(
             select(MinerEvaluationSummary).where(
@@ -663,125 +504,29 @@ class EvaluationTaskManager:
         if summary is None:
             return
 
-        evaluated_tasks = list(session.execute(
-            select(MinerEvaluationTask)
-            .where(MinerEvaluationTask.run_id == run_id)
-            .where(MinerEvaluationTask.family_id == family_id)
-            .where(MinerEvaluationTask.miner_hotkey == miner_hotkey)
-            .where(MinerEvaluationTask.status == "evaluated")
-            .order_by(MinerEvaluationTask.task_index)
+        results = list(session.execute(
+            select(TaskMinerResult)
+            .where(TaskMinerResult.run_id == run_id)
+            .where(TaskMinerResult.family_id == family_id)
+            .where(TaskMinerResult.miner_hotkey == miner_hotkey)
         ).scalars())
 
-        completed = sum(1 for t in evaluated_tasks if t.task_status == "completed")
-        failed = sum(1 for t in evaluated_tasks if t.task_status != "completed")
-
-        summary.completed_tasks = completed
-        summary.failed_tasks = failed
-        summary.status = "scoring"
+        rollup = aggregate_miner_score(results)
+        summary.completed_tasks = rollup.completed
+        summary.failed_tasks = rollup.errored
+        # The mean agreement is the authoritative capability signal.
+        summary.family_capability_score = rollup.mean_agreement
+        # robustness_score / anti_gaming_score columns are legacy — retained
+        # on the summary row for backward compat but set to None since we
+        # no longer have dimension breakdowns or trace-gate metrics.
+        summary.robustness_score = None
+        summary.anti_gaming_score = None
+        summary.official_family_score = rollup.final_score
+        summary.protocol_gate_passed = rollup.reliable
+        summary.rollout_metadata_json = rollup.to_metadata()
+        summary.status = "scored"
         summary.updated_at = utcnow()
         session.flush()
-
-        # Collect judge outputs aligned by index; miner responses are
-        # consumed below to synthesize ConversationScore payloads.
-        judge_outputs = [t.judge_output_json or {} for t in evaluated_tasks]
-
-        # Get the snapshot's benchmark_version
-        snapshot = session.execute(
-            select(EpochTargetSnapshot).where(
-                EpochTargetSnapshot.run_id == run_id,
-                EpochTargetSnapshot.family_id == family_id,
-            ).limit(1)
-        ).scalar_one_or_none()
-        benchmark_version = snapshot.benchmark_version if snapshot else "family_benchmark_v2"
-
-        # Translate each task into a ConversationScore-shaped dict.  The
-        # family scorer requires fully-populated ConversationScore payloads;
-        # raw miner_response_json lacks the quality/latency/cost/trace_gate
-        # fields and fails Pydantic validation.  For miners that opt into
-        # the layered path, task.task_score already carries the layered
-        # conversation_score.total — the synthesized wrapper below reuses
-        # it as ``quality`` so the dimensions stay consistent.
-        #
-        # The task's ``mode`` ("instant" or "thinking") is read from the
-        # bundle per task; it drives the 60/40 instant/thinking blend in
-        # ``aggregate_miner_score``.  Hardcoding "instant" here sends every
-        # thinking task into the instant bucket and leaves ``thinking_mean``
-        # permanently at 0, which silently caps raw_score at 0.6x the real
-        # average.
-        from shared.scoring.families._judge_to_conversation_score import (
-            build_conversation_score_from_judge,
-        )
-        bundle = self._owner.run_evaluation_bundle(
-            session, run_id=run_id, family_id=family_id,
-        )
-        task_mode_by_id: dict[str, str] = {}
-        if isinstance(bundle, dict):
-            for task_def in bundle.get("tasks", []):
-                tid = task_def.get("task_id")
-                raw_mode = task_def.get("mode")
-                if isinstance(tid, str) and raw_mode in ("instant", "thinking"):
-                    task_mode_by_id[tid] = raw_mode
-        conversation_payloads = [
-            build_conversation_score_from_judge(
-                task_score=float(t.task_score or 0.0),
-                judge_output=t.judge_output_json or {},
-                miner_response=t.miner_response_json or {},
-                mode=task_mode_by_id.get(t.task_id, "instant"),
-            ).model_dump(mode="json")
-            for t in evaluated_tasks
-        ]
-
-        try:
-            rollout_metadata = compute_miner_score_from_results(
-                family_id=family_id,
-                benchmark_version=benchmark_version,
-                miner_hotkey=miner_hotkey,
-                task_results=conversation_payloads,
-                judge_outputs=judge_outputs,
-            )
-            evaluation_breakdown = rollout_metadata.get("evaluation_breakdown", {})
-            summary.family_capability_score = float(evaluation_breakdown.get("family_capability_score", 0.0) or 0.0)
-            summary.robustness_score = float(evaluation_breakdown.get("robustness_score", 0.0) or 0.0)
-            summary.anti_gaming_score = float(evaluation_breakdown.get("anti_gaming_score", 0.0) or 0.0)
-            summary.official_family_score = float(evaluation_breakdown.get("official_family_score", 0.0) or 0.0)
-            # ``compute_miner_score_from_results`` emits the nested form
-            # ``{"protocol_gate": {"passed": bool, "reason": str}}``; older
-            # callers wrote a flat ``protocol_gate_passed`` key.  Accept
-            # both so either shape produces a valid gate flag.
-            gate_flat = rollout_metadata.get("protocol_gate_passed")
-            gate_nested = (rollout_metadata.get("protocol_gate") or {}).get("passed")
-            summary.protocol_gate_passed = bool(
-                gate_flat if gate_flat is not None else gate_nested
-            )
-            summary.rollout_metadata_json = rollout_metadata
-            summary.status = "scored"
-        except Exception as exc:
-            logger.exception(
-                "failed to compute miner score: run=%s family=%s miner=%s",
-                run_id, family_id, miner_hotkey[:16],
-            )
-            # Fallback: simple average from task scores
-            scores = [t.task_score for t in evaluated_tasks if t.task_score is not None]
-            avg_score = sum(scores) / len(scores) if scores else 0.0
-            summary.family_capability_score = avg_score
-            summary.official_family_score = avg_score
-            summary.rollout_metadata_json = {"error": str(exc), "fallback": "average"}
-            summary.status = "scored"
-
-        summary.updated_at = utcnow()
-        session.flush()
-
-        logger.info(
-            "miner evaluation complete: run=%s family=%s miner=%s completed=%d failed=%d "
-            "capability=%.4f robustness=%.4f anti_gaming=%.4f official=%.4f gate=%s",
-            run_id, family_id, miner_hotkey[:16],
-            completed, failed,
-            summary.family_capability_score or 0.0,
-            summary.robustness_score or 0.0,
-            summary.anti_gaming_score or 0.0,
-            summary.official_family_score or 0.0,
-            summary.protocol_gate_passed,
-        )
 
     def _on_family_evaluation_complete(
         self,
@@ -790,21 +535,35 @@ class EvaluationTaskManager:
         run_id: str,
         family_id: str,
     ) -> None:
-        """Called when all tasks for all miners in a family are evaluated.
+        """Aggregate all per-miner results into summaries + snapshot.
 
-        Builds the AggregateFamilyScoreSnapshot and DeploymentScoreRecord
-        entries from the individual MinerEvaluationSummary scores.
+        Runs after the final task for a family has been evaluated. Iterates
+        every miner, rolls up their TaskMinerResult rows, and rebuilds the
+        AggregateFamilyScoreSnapshot + DeploymentScoreRecord entries.
         """
         from shared.common.models import (
             AggregateFamilyScoreSnapshot,
             DeploymentScoreRecord,
             EpochTargetSnapshot,
             ManagedDeployment,
-            ManagedMinerSubmission,
         )
         from sqlalchemy import delete
 
         now = utcnow()
+
+        # Recompute summary rows for every miner that produced results
+        miner_hotkeys = [
+            hk for (hk,) in session.execute(
+                select(TaskMinerResult.miner_hotkey.distinct())
+                .where(TaskMinerResult.run_id == run_id)
+                .where(TaskMinerResult.family_id == family_id)
+            ).fetchall()
+        ]
+        for miner_hotkey in miner_hotkeys:
+            self._aggregate_miner_from_results(
+                session, run_id=run_id, family_id=family_id, miner_hotkey=miner_hotkey,
+            )
+
         summaries = list(session.execute(
             select(MinerEvaluationSummary)
             .where(MinerEvaluationSummary.run_id == run_id)
@@ -816,62 +575,39 @@ class EvaluationTaskManager:
             logger.warning("no scored summaries for run=%s family=%s", run_id, family_id)
             return
 
-        # Build miner_scores and normalized_weights
-        miner_scores: dict[str, float] = {}
-        for s in summaries:
-            miner_scores[s.miner_hotkey] = s.official_family_score or 0.0
+        miner_scores: dict[str, float] = {
+            s.miner_hotkey: s.official_family_score or 0.0 for s in summaries
+        }
 
-        # Apply protocol gate: gate_passed → full score, else partial/zero
-        # Fix 12: raise partial credit threshold from 0.50 → 0.75 with quadratic discount
-        _PARTIAL_CREDIT_THRESHOLD = 0.75
-        effective_scores: dict[str, float] = {}
-        for s in summaries:
-            gate_passed = s.protocol_gate_passed
-            official = s.official_family_score or 0.0
-            rollout = s.rollout_metadata_json or {}
-            contract_pass_rate = float(rollout.get("protocol_contract_pass_rate", 0.0) or 0.0)
-            if gate_passed:
-                effective_scores[s.miner_hotkey] = official
-            elif contract_pass_rate >= _PARTIAL_CREDIT_THRESHOLD:
-                _discount = (
-                    (contract_pass_rate - _PARTIAL_CREDIT_THRESHOLD)
-                    / (1.0 - _PARTIAL_CREDIT_THRESHOLD)
-                ) ** 2
-                effective_scores[s.miner_hotkey] = official * _discount * 0.5
-            else:
-                effective_scores[s.miner_hotkey] = 0.0
-
-        # Fix 11: power-law score compression + outlier dampening to resist cartel gaming
-        effective_scores = _compress_scores(effective_scores)
+        effective_scores = _compress_scores(dict(miner_scores))
         total = sum(max(0.0, v) for v in effective_scores.values())
         if total > 0:
-            normalized_weights = {hk: max(0.0, v) / total for hk, v in sorted(effective_scores.items())}
+            normalized_weights = {
+                hk: max(0.0, v) / total for hk, v in sorted(effective_scores.items())
+            }
         else:
             normalized_weights = {hk: 0.0 for hk in sorted(effective_scores)}
 
-        # Collect validator hotkeys that contributed
-        contributing_validators = set()
-        for task in session.execute(
-            select(MinerEvaluationTask.claimed_by_validator)
-            .where(MinerEvaluationTask.run_id == run_id)
-            .where(MinerEvaluationTask.family_id == family_id)
-            .where(MinerEvaluationTask.status == "evaluated")
-            .where(MinerEvaluationTask.claimed_by_validator.isnot(None))
-            .distinct()
-        ).fetchall():
-            contributing_validators.add(task[0])
-
+        contributing_validators = {
+            v for (v,) in session.execute(
+                select(TaskEvaluation.claimed_by_validator.distinct())
+                .where(TaskEvaluation.run_id == run_id)
+                .where(TaskEvaluation.family_id == family_id)
+                .where(TaskEvaluation.status == "evaluated")
+                .where(TaskEvaluation.claimed_by_validator.isnot(None))
+            ).fetchall()
+        }
         validator_weights = {v_hotkey: 1 for v_hotkey in contributing_validators}
 
-        # Build score breakdowns
-        miner_score_breakdowns = {}
-        for s in summaries:
-            miner_score_breakdowns[s.miner_hotkey] = {
+        miner_score_breakdowns = {
+            s.miner_hotkey: {
                 "family_capability_score": s.family_capability_score or 0.0,
                 "robustness_score": s.robustness_score or 0.0,
                 "anti_gaming_score": s.anti_gaming_score or 0.0,
                 "official_family_score": s.official_family_score or 0.0,
             }
+            for s in summaries
+        }
 
         snapshot = session.execute(
             select(EpochTargetSnapshot).where(
@@ -883,21 +619,16 @@ class EvaluationTaskManager:
         snapshot_json = {
             "run_id": run_id,
             "family_id": family_id,
-            "evaluation_plane": "family_protocol",
+            "evaluation_plane": "agreement_against_openai_baseline",
             "miner_scores": miner_scores,
             "normalized_weights": normalized_weights,
-            "query_volume_share": 0.0,
-            "rubric_version": snapshot.rubric_version if snapshot else "family_rubric_v2",
-            "miner_query_volume_shares": {},
+            "rubric_version": snapshot.rubric_version if snapshot else "agreement_general_chat_v1",
             "miner_score_breakdowns": miner_score_breakdowns,
-            "miner_robustness_scores": {s.miner_hotkey: s.robustness_score or 0.0 for s in summaries},
-            "miner_anti_gaming_flags": {},
             "task_count": summaries[0].total_tasks if summaries else 0,
             "judge_model": snapshot.judge_model if snapshot else "local-rubric-judge",
             "evaluation_timestamp": now.isoformat() + "Z",
         }
 
-        # Delete existing aggregate for this run+family (idempotent)
         session.execute(
             delete(AggregateFamilyScoreSnapshot)
             .where(AggregateFamilyScoreSnapshot.run_id == run_id)
@@ -912,14 +643,13 @@ class EvaluationTaskManager:
             validator_count=len(contributing_validators),
             validator_hotkeys_json=sorted(contributing_validators),
             validator_weights_json=validator_weights,
-            consensus_method="distributed_task_evaluation",
+            consensus_method="agreement_against_openai_baseline",
             status="aggregated",
             activated_at=now,
         )
         session.add(aggregate)
         session.flush()
 
-        # Delete old DeploymentScoreRecords and create new ones
         session.execute(
             delete(DeploymentScoreRecord)
             .where(DeploymentScoreRecord.run_id == run_id)
@@ -928,7 +658,6 @@ class EvaluationTaskManager:
         session.flush()
 
         for s in summaries:
-            # Find the deployment for this miner
             deployment = session.execute(
                 select(ManagedDeployment)
                 .where(ManagedDeployment.miner_hotkey == s.miner_hotkey)
@@ -939,12 +668,6 @@ class EvaluationTaskManager:
             ).scalar_one_or_none()
             if deployment is None:
                 continue
-
-            submission = session.execute(
-                select(ManagedMinerSubmission)
-                .where(ManagedMinerSubmission.id == deployment.submission_id)
-                .limit(1)
-            ).scalar_one_or_none()
 
             score_record = DeploymentScoreRecord(
                 run_id=run_id,
@@ -957,15 +680,13 @@ class EvaluationTaskManager:
                 normalized_score=normalized_weights.get(s.miner_hotkey, 0.0),
                 is_eligible=deployment.health_status == "healthy",
                 metadata_json={
-                    "family_capability_score": s.family_capability_score,
-                    "robustness_score": s.robustness_score,
-                    "anti_gaming_score": s.anti_gaming_score,
-                    "official_family_score": s.official_family_score,
-                    "protocol_gate_passed": s.protocol_gate_passed,
+                    "mean_agreement": s.family_capability_score,
+                    "final_score": s.official_family_score,
+                    "reliable": s.protocol_gate_passed,
                     "completed_tasks": s.completed_tasks,
                     "failed_tasks": s.failed_tasks,
                     "total_tasks": s.total_tasks,
-                    "evaluation_method": "distributed_task_evaluation",
+                    "evaluation_method": "agreement_against_openai_baseline",
                 },
             )
             self._owner.scoring.populate_cost_columns(
@@ -975,18 +696,19 @@ class EvaluationTaskManager:
             )
             session.add(score_record)
 
-        # Mark snapshot as scored
         if snapshot:
             snapshot.status = "scored"
             snapshot.scored_at = now
 
         session.flush()
 
-        # Trigger rebalance
         try:
             self._owner.rebalance_family(session, family_id=family_id)
         except Exception:
-            logger.exception("rebalance_family failed after distributed evaluation: run=%s family=%s", run_id, family_id)
+            logger.exception(
+                "rebalance_family failed after pairwise evaluation: run=%s family=%s",
+                run_id, family_id,
+            )
 
         logger.info(
             "family evaluation finalized: run=%s family=%s miners=%d validators=%d",
@@ -994,18 +716,18 @@ class EvaluationTaskManager:
         )
 
     # ------------------------------------------------------------------
-    # Build claim response payloads
+    # Build claim response payloads (include miner list for fan-out)
     # ------------------------------------------------------------------
 
     def build_claim_items(
         self,
         session: Session,
         *,
-        claimed_tasks: list[MinerEvaluationTask],
+        claimed_tasks: list[TaskEvaluation],
         run_id: str,
         family_id: str,
     ) -> list[dict[str, Any]]:
-        """Build response payloads for claimed tasks with task definitions and miner endpoints."""
+        """Package claimed tasks with task payload + miner fan-out list."""
         snapshot = session.execute(
             select(EpochTargetSnapshot).where(
                 EpochTargetSnapshot.run_id == run_id,
@@ -1015,14 +737,18 @@ class EvaluationTaskManager:
         if snapshot is None:
             return []
 
-        # Build lookup: miner_hotkey -> member dict
-        member_by_hotkey: dict[str, dict[str, Any]] = {}
+        miners = []
         for member in (snapshot.members_json or []):
             hk = member.get("hotkey", "")
-            if hk:
-                member_by_hotkey[hk] = member
+            if not hk:
+                continue
+            metadata = member.get("metadata", {}) or {}
+            miners.append({
+                "hotkey": hk,
+                "endpoint": metadata.get("validator_endpoint") or member.get("endpoint", ""),
+                "auth_headers": metadata.get("auth_headers", {}),
+            })
 
-        # Load evaluation bundle for task definitions
         bundle = self._owner.run_evaluation_bundle(
             session, run_id=run_id, family_id=family_id,
         )
@@ -1039,24 +765,17 @@ class EvaluationTaskManager:
 
         items = []
         for task in claimed_tasks:
-            member = member_by_hotkey.get(task.miner_hotkey, {})
             task_payload = tasks_by_id.get(task.task_id, {})
-            # Anti-gaming (C2): strip hidden_fixture/visibility/seed_id/topic
-            # from the per-task metadata before it reaches the validator.
-            # C4 will additionally strip expected_output + judge_rubric.
             if isinstance(task_payload, dict):
                 task_payload = _strip_sensitive_task_metadata(task_payload)
-            metadata = member.get("metadata", {})
             items.append({
-                "task_assignment_id": task.id,
+                "task_evaluation_id": task.id,
                 "run_id": task.run_id,
                 "family_id": task.family_id,
-                "miner_hotkey": task.miner_hotkey,
                 "task_id": task.task_id,
                 "task_index": task.task_index,
                 "task_payload": task_payload,
-                "miner_endpoint": metadata.get("validator_endpoint", member.get("endpoint", "")),
-                "miner_auth_headers": metadata.get("auth_headers", {}),
+                "miners": miners,
                 "claim_expires_at": task.claim_expires_at.isoformat() if task.claim_expires_at else "",
                 "judge_config": judge_config,
                 "rubric_version": snapshot.rubric_version,

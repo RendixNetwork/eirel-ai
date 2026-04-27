@@ -141,8 +141,8 @@ def _deployment_manifest_common(
     container: dict[str, Any] = {
         "name": deployment_name,
         "image": artifact_url,
-        # ``miner-runtime:v1`` is a rolling tag — we push over it each
-        # time the SDK changes.  With the k8s default ``IfNotPresent``,
+        # ``eirel-miner-runtime:latest`` is a rolling tag — we push over
+        # it each time the SDK changes.  With the k8s default ``IfNotPresent``,
         # kubelet keeps the first-pulled digest indefinitely and new
         # pods silently run an old SDK while we think they're fresh.
         # ``Always`` costs one manifest round-trip per pod create (the
@@ -222,6 +222,31 @@ def _deployment_manifest_common(
     # explicitly from the values owner-api already has in settings.
     miner_env.append({"name": "EIREL_PROVIDER_PROXY_URL", "value": provider_proxy_url})
     miner_env.append({"name": "EIREL_PROVIDER_PROXY_TOKEN", "value": provider_proxy_token})
+    # Tool service URLs for the miner SDK (web_search / x_api / semantic
+    # scholar / sandbox). The shared Secret injected below provides the
+    # *_TOKEN counterparts but no URLs, so without these the miner
+    # instantiates tool clients with base_url="", fails silently on every
+    # call, and never records citations. Names match what the general_chat
+    # agent's _service_client() calls read via os.getenv.
+    miner_env.append({
+        "name": "EIREL_WEB_SEARCH_URL",
+        "value": os.getenv("EIREL_WEB_SEARCH_TOOL_URL", ""),
+    })
+    miner_env.append({
+        "name": "EIREL_X_API_URL",
+        "value": os.getenv("EIREL_X_TOOL_URL", os.getenv("EIREL_X_TOOL_SERVICE_URL", "")),
+    })
+    miner_env.append({
+        "name": "EIREL_SEMANTIC_SCHOLAR_URL",
+        "value": os.getenv(
+            "EIREL_SEMANTIC_SCHOLAR_TOOL_SERVICE_URL",
+            os.getenv("EIREL_SEMANTIC_SCHOLAR_URL", ""),
+        ),
+    })
+    miner_env.append({
+        "name": "EIREL_SANDBOX_URL",
+        "value": os.getenv("EIREL_SANDBOX_TOOL_URL", os.getenv("EIREL_SANDBOX_TOOL_SERVICE_URL", "")),
+    })
     if shared_secret_name is not None:
         container["envFrom"] = [{"secretRef": {"name": shared_secret_name}}]
         container["env"] = miner_env
@@ -239,8 +264,6 @@ def _deployment_manifest_common(
             {"name": "X_TOOL_TOKEN", "value": os.getenv("EIREL_X_TOOL_SERVICE_TOKEN", "")},
             {"name": "SEC_EDGAR_TOOL_URL", "value": os.getenv("EIREL_SEC_EDGAR_TOOL_SERVICE_URL", "http://sec-edgar-tool-service:8087")},
             {"name": "SEC_EDGAR_TOOL_TOKEN", "value": os.getenv("EIREL_SEC_EDGAR_TOOL_SERVICE_TOKEN", "")},
-            {"name": "SEMANTIC_SCHOLAR_TOOL_URL", "value": os.getenv("EIREL_SEMANTIC_SCHOLAR_TOOL_SERVICE_URL", "http://semantic-scholar-tool-service:8088")},
-            {"name": "SEMANTIC_SCHOLAR_TOOL_TOKEN", "value": os.getenv("EIREL_SEMANTIC_SCHOLAR_TOOL_SERVICE_TOKEN", "")},
             {"name": "SANDBOX_TOOL_URL", "value": os.getenv("EIREL_SANDBOX_TOOL_SERVICE_URL", "http://sandbox-tool-service:8091")},
             {"name": "SANDBOX_TOOL_TOKEN", "value": os.getenv("EIREL_SANDBOX_TOOL_SERVICE_TOKEN", "")},
         ]

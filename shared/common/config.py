@@ -81,24 +81,6 @@ def _validate_dataset_source_type(value: str) -> None:
         )
 
 
-def _validate_forge_cross_vendor(
-    *,
-    generator_provider: str,
-    generator_base_url: str,
-    judge_base_url: str,
-    must_differ: bool,
-) -> None:
-    if not must_differ:
-        return
-    if not generator_provider and not generator_base_url:
-        return  # Forge not configured yet; no collision to check.
-    if generator_base_url and judge_base_url and generator_base_url == judge_base_url:
-        raise ValueError(
-            "invalid EIREL_DATASET_FORGE_GENERATOR_BASE_URL: must differ from EIREL_JUDGE_BASE_URL "
-            "(set EIREL_DATASET_FORGE_JUDGE_PROVIDER_MUST_DIFFER=false to override)"
-        )
-
-
 def _resolve_baremetal_inventory_path() -> str:
     """Resolve the baremetal inventory path.
 
@@ -182,19 +164,6 @@ class Settings:
     epoch_seed_commitment: str = field(
         default_factory=lambda: os.getenv("EIREL_EPOCH_SEED_COMMITMENT", "")
     )
-    validator_poll_interval_seconds: float = field(
-        default_factory=lambda: float(
-            os.getenv("EIREL_VALIDATOR_POLL_INTERVAL_SECONDS")
-            or os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS")
-            or "1"
-        )
-    )
-    validator_max_concurrent_jobs: int = field(
-        default_factory=lambda: int(os.getenv("VALIDATOR_MAX_CONCURRENT_JOBS", "2"))
-    )
-    validator_max_concurrent_builds: int = field(
-        default_factory=lambda: int(os.getenv("VALIDATOR_MAX_CONCURRENT_BUILDS", "1"))
-    )
     owner_api_url: str = field(
         default_factory=lambda: os.getenv("OWNER_API_URL", "http://127.0.0.1:8000")
     )
@@ -274,18 +243,6 @@ class Settings:
     )
     x_tool_service_token: str = field(
         default_factory=lambda: os.getenv("EIREL_X_TOOL_TOKEN", "")
-    )
-    semantic_scholar_tool_service_url: str = field(
-        default_factory=lambda: os.getenv(
-            "EIREL_SEMANTIC_SCHOLAR_TOOL_URL",
-            "http://semantic-scholar-tool-service:8087",
-        )
-    )
-    semantic_scholar_tool_service_token: str = field(
-        default_factory=lambda: os.getenv("EIREL_SEMANTIC_SCHOLAR_TOOL_TOKEN", "")
-    )
-    semantic_scholar_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_SEMANTIC_SCHOLAR_API_KEY", "")
     )
     sandbox_tool_service_url: str = field(
         default_factory=lambda: os.getenv(
@@ -368,18 +325,6 @@ class Settings:
     )
     judge_timeout_seconds: float = field(
         default_factory=lambda: _float_env("EIREL_JUDGE_TIMEOUT_SECONDS", 30.0)
-    )
-    ensemble_judge_base_url: str = field(
-        default_factory=lambda: os.getenv("EIREL_ENSEMBLE_JUDGE_BASE_URL", "")
-    )
-    ensemble_judge_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_ENSEMBLE_JUDGE_API_KEY", "")
-    )
-    ensemble_judge_timeout_seconds: float = field(
-        default_factory=lambda: _float_env("EIREL_ENSEMBLE_JUDGE_TIMEOUT_SECONDS", 30.0)
-    )
-    ensemble_judge_disagreement_threshold: float = field(
-        default_factory=lambda: _float_env("EIREL_ENSEMBLE_JUDGE_DISAGREEMENT_THRESHOLD", 0.20)
     )
     bittensor_network: str = field(
         default_factory=lambda: os.getenv("BITTENSOR_NETWORK", "finney")
@@ -492,7 +437,7 @@ class Settings:
     )
     owner_runtime_image: str = field(
         default_factory=lambda: os.getenv(
-            "EIREL_OWNER_RUNTIME_IMAGE", "registry.eirel.internal/miner-runtime:v1")
+            "EIREL_OWNER_RUNTIME_IMAGE", "registry.eirel.internal/eirel-miner-runtime:latest")
     )
     owner_runtime_shared_secret_name: str = field(
         default_factory=lambda: os.getenv(
@@ -562,11 +507,6 @@ class Settings:
             "EXECUTION_WORKER_INTERNAL_URL", "http://execution-worker:8006"
         )
     )
-    weight_setter_internal_url: str = field(
-        default_factory=lambda: os.getenv(
-            "WEIGHT_SETTER_INTERNAL_URL", "http://weight-setter:8012"
-        )
-    )
     workflow_runtime_auto_remediation_enabled: bool = field(
         default_factory=lambda: _bool_env("WORKFLOW_RUNTIME_AUTO_REMEDIATION_ENABLED", False)
     )
@@ -630,9 +570,6 @@ class Settings:
     artifact_storage_bucket: str = field(
         default_factory=lambda: os.getenv("ARTIFACT_STORAGE_BUCKET", "eirel-managed")
     )
-    validator_epoch_quorum: int = field(
-        default_factory=lambda: int(os.getenv("VALIDATOR_EPOCH_QUORUM", "1"))
-    )
     run_duration_days: int = field(
         default_factory=lambda: int(os.getenv("EIREL_RUN_DURATION_DAYS", "3"))
     )
@@ -678,7 +615,7 @@ class Settings:
     )
     # Distributed evaluation settings
     task_claim_timeout_seconds: int = field(
-        default_factory=lambda: int(os.getenv("EIREL_TASK_CLAIM_TIMEOUT_SECONDS", "600"))
+        default_factory=lambda: int(os.getenv("EIREL_TASK_CLAIM_TIMEOUT_SECONDS", "900"))
     )
     first_run_start_time: str = field(
         default_factory=lambda: os.getenv("EIREL_FIRST_RUN_START_TIME", "")
@@ -749,32 +686,6 @@ class Settings:
         )
     )
 
-    # -- Dataset forge (generator LLM config) ---------------------------
-    dataset_forge_generator_provider: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_PROVIDER", "")
-    )
-    dataset_forge_generator_model: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_MODEL", "")
-    )
-    dataset_forge_generator_base_url: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_BASE_URL", "")
-    )
-    dataset_forge_generator_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_GENERATOR_API_KEY", "")
-    )
-    dataset_forge_generator_timeout_seconds: float = field(
-        default_factory=lambda: _float_env("EIREL_DATASET_FORGE_GENERATOR_TIMEOUT_SECONDS", 60.0)
-    )
-    dataset_forge_judge_provider_must_differ: bool = field(
-        default_factory=lambda: _bool_env("EIREL_DATASET_FORGE_JUDGE_PROVIDER_MUST_DIFFER", True)
-    )
-    dataset_forge_owner_secret: str = field(
-        default_factory=lambda: os.getenv("EIREL_DATASET_FORGE_OWNER_SECRET", "")
-    )
-    auto_trigger_dataset_forge: bool = field(
-        default_factory=lambda: _bool_env("EIREL_AUTO_TRIGGER_DATASET_FORGE", False)
-    )
-
     # -- Owner identity / signing ---------------------------------------
     # The owner SS58 is derived from the wallet + hotkey names at startup.
     # `owner_hotkey_ss58` is runtime-only (resolved from the wallet files).
@@ -789,25 +700,6 @@ class Settings:
     def __post_init__(self) -> None:
         self.owner_dataset_root_path = _validate_owner_dataset_root(self.owner_dataset_root_path)
         _validate_dataset_source_type(self.owner_dataset_source_type)
-        _validate_forge_cross_vendor(
-            generator_provider=self.dataset_forge_generator_provider,
-            generator_base_url=self.dataset_forge_generator_base_url,
-            judge_base_url=self.judge_base_url,
-            must_differ=self.dataset_forge_judge_provider_must_differ,
-        )
-        # H1: in S3 mode the forge must use a non-empty owner secret so the
-        # hidden allocation RNG and the task-ID hash (C1) depend on something
-        # only the owner knows. In filesystem/dev mode an empty secret is
-        # allowed for convenience but logged as a warning by the forge CLI.
-        if (
-            self.owner_dataset_source_type == "s3"
-            and not self.dataset_forge_owner_secret
-        ):
-            raise ValueError(
-                "EIREL_DATASET_FORGE_OWNER_SECRET must be set when "
-                "EIREL_OWNER_DATASET_SOURCE_TYPE=s3 — without it the hidden "
-                "allocation RNG and task-ID hash are predictable from run_id alone"
-            )
 
         # Interval and timeout validation
         for _field_name in (

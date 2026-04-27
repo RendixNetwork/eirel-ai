@@ -27,12 +27,14 @@ def _owner_api_url() -> str:
 def _hydrate_agent_inputs(task_payload: dict[str, Any]) -> dict[str, Any]:
     """Fold top-level task fields into the ``inputs`` dict sent to the miner.
 
-    The benchmark task JSON carries ``mode`` and ``allowed_tools`` at the
-    top level but the miner agent reads its knobs from ``inputs.mode`` and
+    The benchmark task JSON carries ``mode`` and ``web_search`` at the top
+    level, but the miner agent reads its knobs from ``inputs.mode`` and
     ``inputs.web_search``. Without this bridge, every task is invoked with
-    the defaults (``mode=instant``, ``web_search=false``) regardless of
-    the task spec, so the web-search code path never runs during
-    evaluation. An existing value in ``inputs`` always wins.
+    defaults (``mode=instant``, ``web_search=false``) regardless of the
+    task spec, so the miner's web-search code path never runs during
+    evaluation and citations stay empty. An existing value in ``inputs``
+    always wins; ``allowed_tools`` is kept as a legacy fallback for older
+    datasets that haven't been migrated to the explicit boolean.
     """
     base = dict(task_payload.get("inputs") or {})
     if "mode" not in base:
@@ -40,9 +42,13 @@ def _hydrate_agent_inputs(task_payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(mode, str) and mode:
             base["mode"] = mode
     if "web_search" not in base:
-        allowed = task_payload.get("allowed_tools") or []
-        if isinstance(allowed, list) and "web_search" in allowed:
-            base["web_search"] = True
+        raw = task_payload.get("web_search")
+        if isinstance(raw, bool):
+            base["web_search"] = raw
+        else:
+            allowed = task_payload.get("allowed_tools") or []
+            if isinstance(allowed, list) and "web_search" in allowed:
+                base["web_search"] = True
     return base
 
 
@@ -85,6 +91,72 @@ def _load_validator_signer():
 
 def _signed_headers(*, signer, method: str, path: str, body: bytes) -> dict[str, str]:
     return signer.signed_headers(method, path, sha256_hex(body))
+
+
+def _extract_answer_text(run) -> str:
+    """Pull the miner's final-answer text out of a BenchmarkTaskRun.
+
+    The agreement judge sees ONLY the final answer — no tool_calls, no
+    citations, no trace. Most miner SDKs put the answer at
+    ``response.output.content`` (dict) or ``response.output.text``.
+    Fall back to str(response) when structure is unknown.
+    """
+    resp = getattr(run, "response", None) or {}
+    if isinstance(resp, dict):
+        output = resp.get("output") or {}
+        if isinstance(output, dict):
+            content = output.get("content") or output.get("text")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                # some SDKs emit content as a list of text blocks
+                return "\n\n".join(
+                    (b.get("text") if isinstance(b, dict) else str(b))
+                    for b in content if b
+                )
+        # Fallback: flatten the whole response dict as text without URLs.
+        text = resp.get("text") or resp.get("content") or ""
+        if isinstance(text, str) and text:
+            return text
+    return str(resp) if resp else ""
+
+
+def _extract_miner_citations(run) -> list[dict[str, Any]]:
+    """Pull the miner's cited URLs out of a BenchmarkTaskRun for dashboard
+    display only. These do NOT participate in scoring.
+
+    Looks in two likely locations:
+      * ``response.output.citations`` — structured list of citation dicts
+      * ``response.output.tool_calls`` of type ``web_search`` — URL results
+    Returns an empty list when no citations are present.
+    """
+    resp = getattr(run, "response", None) or {}
+    if not isinstance(resp, dict):
+        return []
+    output = resp.get("output") or {}
+    if not isinstance(output, dict):
+        return []
+    citations: list[dict[str, Any]] = []
+    structured = output.get("citations")
+    if isinstance(structured, list):
+        for c in structured:
+            if isinstance(c, dict):
+                citations.append({
+                    "url": str(c.get("url") or ""),
+                    "title": str(c.get("title") or ""),
+                })
+    tool_calls = output.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tc in tool_calls:
+            if not isinstance(tc, dict) or tc.get("tool_name") != "web_search":
+                continue
+            for result in (tc.get("result") or {}).get("results", []) or []:
+                if isinstance(result, dict) and result.get("url"):
+                    citations.append({
+                        "url": str(result.get("url") or ""),
+                        "title": str(result.get("title") or ""),
+                    })
+    return citations
 
 
 async def _resolve_targets(
@@ -167,8 +239,24 @@ _POLL_INTERVAL_SECONDS = float(
     or os.getenv("VALIDATOR_POLL_INTERVAL_SECONDS")
     or "30"
 )
-_BATCH_SIZE = int(os.getenv("EIREL_VALIDATOR_BATCH_SIZE", "3"))
+_BATCH_SIZE = int(os.getenv("EIREL_VALIDATOR_BATCH_SIZE", "1"))
 _MAX_PARALLEL = int(os.getenv("EIREL_VALIDATOR_MAX_PARALLEL", "3"))
+
+# Miner latency SLA enforced at scoring time. A `completed` miner response
+# whose total wall-clock latency exceeds the mode's budget is stamped
+# `latency_violation` (counts as a loss in aggregation, regardless of
+# content). Tasks without a recognized mode skip the gate. Network-level
+# errors are not double-penalized.
+#
+# Mode-specific completion budgets:
+#   instant: 120s — miners should pick a cheap/non-thinking model.
+#   thinking: 600s — full reasoning + tool use allowed.
+_INSTANT_MINER_LATENCY_BUDGET_SECONDS = float(
+    os.getenv("EIREL_MINER_INSTANT_LATENCY_BUDGET_SECONDS", "120")
+)
+_THINKING_MINER_LATENCY_BUDGET_SECONDS = float(
+    os.getenv("EIREL_MINER_THINKING_LATENCY_BUDGET_SECONDS", "600")
+)
 _ACTIVE_FAMILIES = [
     f.strip()
     for f in os.getenv("EIREL_VALIDATOR_ACTIVE_FAMILIES", "analyst,builder,verifier").split(",")
@@ -236,17 +324,24 @@ _MIN_STAKE_TO_SET_WEIGHTS = int(os.getenv("EIREL_MIN_STAKE_TO_SET_WEIGHTS", "500
 
 
 async def run_weight_setting_loop() -> None:
-    """Background loop: poll owner-api for weights, set on-chain every ~180 blocks.
+    """Background loop: poll owner-api for weights, set on-chain every cycle.
 
-    The owner-api returns ``{hotkey: weight}`` for family winners.
-    This loop syncs the metagraph to resolve hotkey→UID, assigns
-    unallocated family weight to UID 0 (to burn alpha), and calls
-    ``set_weights()`` with retry, circuit breaker, and chain verification.
+    Cadence is configurable via ``EIREL_WEIGHT_SET_INTERVAL_BLOCKS``
+    (default 180 blocks ≈ 36 minutes). On each tick we re-publish the
+    current target-run winners even if the target run hasn't changed
+    since the last publication — Bittensor expects a ``set_weights``
+    every window to keep vtrust from decaying.
+
+    The owner-api's ``/v1/weights`` returns ``{hotkey: weight}`` for the
+    latest *completed* run (run-(N-1) while run N is in progress). This
+    loop syncs the metagraph to resolve hotkey→UID, assigns unallocated
+    family weight to UID 0 (to burn alpha), and calls ``set_weights()``
+    with retry, circuit breaker, and chain verification.
     """
     import asyncio
     import time as _time
     import bittensor as bt
-    from validation.weight_setter.chain_verifier import verify_weights_on_chain
+    from validation.validator.chain_verifier import verify_weights_on_chain
 
     signer = _load_validator_signer()
     owner_url = _owner_api_url()
@@ -261,7 +356,6 @@ async def run_weight_setting_loop() -> None:
     _cb_recovery_timeout = 120.0
     _consecutive_failures = 0
     _circuit_opened_at: float = 0.0
-    _last_published_run_id: str | None = None
 
     logger.info(
         "weight-setting loop starting: interval=%d blocks (~%ds) network=%s netuid=%d",
@@ -310,19 +404,20 @@ async def run_weight_setting_loop() -> None:
                 family_winners: list[dict[str, Any]] = []
             else:
                 if not data.get("ready"):
+                    # No completed run yet; nothing to publish. Skipping here
+                    # is fine because the chain hasn't started expecting
+                    # weights from us.
                     logger.info("weight-setting: no weights ready, sleeping")
                     await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
                     continue
 
                 current_run_id = data.get("run_id")
-                if current_run_id and current_run_id == _last_published_run_id:
-                    logger.info(
-                        "weight-setting: run %s already published, skipping",
-                        current_run_id,
-                    )
-                    await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
-                    continue
-
+                # Bittensor expects set_weights every ~180 blocks regardless
+                # of whether the target run id or winner set repeats — missing
+                # a window decays vtrust. The owner-api's /v1/weights already
+                # returns the latest completed run (run-(N-1) while run N is
+                # open), so we just re-publish the same weights each cycle
+                # until a newer run completes. Do NOT dedup on run_id here.
                 weights_by_hotkey = data.get("weights", {})
                 family_winners = data.get("family_winners", [])
 
@@ -456,7 +551,6 @@ async def run_weight_setting_loop() -> None:
 
             # Reset circuit breaker on success
             _consecutive_failures = 0
-            _last_published_run_id = current_run_id
             _metrics.validator_loop_last_success_timestamp_seconds.labels(
                 loop_name="weight_setter"
             ).set_to_current_time()
@@ -493,67 +587,95 @@ async def run_distributed_benchmarks(
     *,
     run_id: str | None = None,
     family_id: str,
-    batch_size: int = 5,
-    max_parallel: int = 5,
-    rubric_version: str = "family_rubric_v2",
+    batch_size: int = 1,
+    max_parallel: int = 2,
+    rubric_version: str = "pairwise_general_chat_v1",
     judge_model: str = "local-rubric-judge",
 ) -> dict[str, Any]:
-    """Claim tasks from the owner-api, evaluate them in parallel, submit results.
+    """Claim task-level evaluations, fan out to all miners + OpenAI baseline,
+    pairwise-judge, and submit the full batch of per-miner results.
 
-    If *run_id* is ``None`` the owner-api defaults to the current open run.
+    Redesigned flow (see plan `im-gonna-update-the-reflective-curry.md`):
+      1. Claim a batch of tasks (task-level lease, one row per task).
+      2. For each claimed task, in parallel under `max_parallel`:
+         a. Fan out to every miner listed on the claim + call OpenAI baseline.
+            Wall clock cap 3 minutes; per-miner failures don't kill the task.
+         b. Pairwise-judge each miner response vs the baseline, with A/B
+            position randomized per miner.
+         c. Submit one result payload carrying all per-miner verdicts.
+      3. Repeat until no pending tasks remain.
 
-    The validator acts as a generic worker:
-    1. Claim a batch of tasks (may span different miners)
-    2. Execute all claimed tasks in parallel (invoke miner + judge)
-    3. Submit results as they complete
-    4. Repeat until no pending tasks remain
-
-    Multiple validators run this loop concurrently.  The owner-api's
-    ``FOR UPDATE SKIP LOCKED`` guarantees each task is assigned to
-    exactly one validator at a time.  If a validator crashes, its
-    claimed tasks expire and become available to other validators.
+    If the OpenAI baseline call fails, the task is released back to pending
+    via ``mark_baseline_failed`` so another validator can try.
     """
     import asyncio
     import json as _json
+    import secrets
 
     from shared.benchmark._invocation import _invoke_task
     from shared.benchmark._judge import build_judge_excerpt
     from shared.core.evaluation_models import BenchmarkTaskRun
     from shared.core.judge_client import JudgeServiceClient
+    from validation.validator.openai_baseline import (
+        OpenAIBaselineClient,
+        OpenAIBaselineError,
+    )
 
     family_id = ensure_active_family_id(family_id)
     signer = _load_validator_signer()
     owner_url = _owner_api_url()
 
-    # Decentralized judge: each validator runs its own eiretes-judge
-    # sidecar at EIREL_JUDGE_SERVICE_URL (defaults to http://eiretes-judge:8095).
-    # The LLM judge call + its cost live on the validator side; anti-gaming
-    # scoring (trace integrity gate, honeytoken detection, latency penalty)
-    # still runs server-side inside submit_task_result so the gaming
-    # heuristics + honeytoken URLs don't leak to miners.
+    # Pairwise judge + OpenAI baseline clients are reused across tasks.
     judge_client = JudgeServiceClient()
+    baseline_client = OpenAIBaselineClient()
 
     total_claimed = 0
     total_submitted = 0
     total_failed = 0
+    total_baseline_failed = 0
     _benchmark_started_at = time.perf_counter()
     _metrics.benchmark_runs_started_total.labels(family=family_id).inc()
     _benchmark_outcome = "success"
 
-    async def _evaluate_and_submit(task_claim: dict[str, Any]) -> bool:
-        """Evaluate a single task and submit the result. Returns True on success."""
-        task_assignment_id = task_claim["task_assignment_id"]
+    # Outer wall-clock budget for the fan-out (miners + OpenAI baseline). Set
+    # generously above the largest configured downstream timeout so a slow
+    # baseline doesn't trip this wrapper before its own client timeout fires.
+    # Thinking-mode miners can run up to 600s (their completion SLA), so the
+    # wrapper has to clear that ceiling. The claim lease is 600s by default —
+    # bump EIREL_TASK_CLAIM_TIMEOUT_SECONDS if you raise this much further.
+    _FAN_OUT_TIMEOUT_SECONDS = 660.0
+
+    async def _invoke_one_miner(
+        miner: dict[str, Any], task_obj: Any, task_id: str,
+    ) -> tuple[str, BenchmarkTaskRun]:
+        miner_target = MinerBenchmarkTarget(
+            hotkey=miner["hotkey"],
+            endpoint=miner["endpoint"],
+            stake=0,
+            metadata={"auth_headers": miner.get("auth_headers", {})},
+        )
+        try:
+            run = await _invoke_task(
+                miner=miner_target, task=task_obj, timeout_seconds=_FAN_OUT_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            run = BenchmarkTaskRun(
+                task_id=task_id, family_id=family_id,
+                prompt=task_obj.prompt, expected_output=task_obj.expected_output,
+                response={}, status="failed", error=str(exc), metadata={},
+            )
+        return miner["hotkey"], run
+
+    async def _evaluate_task(task_claim: dict[str, Any]) -> str:
+        """Evaluate one task across all miners. Returns 'ok',
+        'baseline_failed', or 'submit_failed'."""
+        task_evaluation_id = task_claim["task_evaluation_id"]
         task_payload = task_claim["task_payload"]
         task_id = task_claim["task_id"]
+        miners = task_claim.get("miners") or []
+        if not miners:
+            return "ok"  # nothing to evaluate
 
-        miner_target = MinerBenchmarkTarget(
-            hotkey=task_claim["miner_hotkey"],
-            endpoint=task_claim["miner_endpoint"],
-            stake=0,
-            metadata={"auth_headers": task_claim.get("miner_auth_headers", {})},
-        )
-
-        # Build a task-like object for _invoke_task
         class _TaskProxy:
             pass
         task_obj = _TaskProxy()
@@ -564,72 +686,166 @@ async def run_distributed_benchmarks(
         task_obj.inputs = _hydrate_agent_inputs(task_payload)
         task_obj.metadata = task_payload.get("metadata", {})
         task_obj.execution_mode = task_payload.get("execution_mode")
+        task_mode = str(task_obj.inputs.get("mode") or "instant")
+        # Per-task web-search flag, mirroring the end-user toggle in the chat
+        # UI. Missing field defaults to False so a baseline never silently
+        # searches — task authors must opt in per task.
+        web_search_flag = bool(
+            task_payload.get("web_search")
+            or (task_obj.metadata or {}).get("web_search")
+            or False
+        )
 
-        # Invoke the miner
-        try:
-            task_run: BenchmarkTaskRun = await _invoke_task(
-                miner=miner_target, task=task_obj, timeout_seconds=180.0,
-            )
-        except Exception as exc:
-            task_run = BenchmarkTaskRun(
-                task_id=task_id, family_id=family_id,
-                prompt=task_obj.prompt, expected_output=task_obj.expected_output,
-                response={}, status="failed", error=str(exc), metadata={},
-            )
-
-        # Decentralized judge: call our local eiretes-judge sidecar. The
-        # LLM judge call + its cost live on the validator side. The
-        # resulting ``quality_score`` is sent in ``/tasks/<id>/result`` as
-        # ``task_score``; the owner-api then applies layered anti-gaming
-        # scoring (trace integrity gate, honeytoken detection, latency
-        # penalty) before storing the final score. That way miners never
-        # see the anti-gaming heuristics or the honeytoken URL list.
-        judge_output: dict[str, Any] | None = None
-        task_score = 0.0
-        _judge_started_at = time.perf_counter()
-        _judge_outcome = "success"
-        try:
-            excerpt = build_judge_excerpt(family_id=family_id, run=task_run)
-            mode = str(task_obj.inputs.get("mode") or "instant")
-            rubric_variant = task_payload.get("rubric_variant")
-            # JudgeServiceClient is synchronous; offload to a thread so the
-            # validator's max_parallel concurrency model keeps working.
-            judge_result = await asyncio.to_thread(
-                judge_client.judge,
-                family_id=family_id,
+        # Fan out: all miners + baseline concurrently, bounded by wall clock
+        baseline_task = asyncio.create_task(
+            baseline_client.generate(
                 prompt=task_obj.prompt,
-                response_excerpt=excerpt,
-                mode=mode,
-                rubric_variant=rubric_variant,
+                use_web_search=web_search_flag,
             )
-            task_score = float(judge_result.score or 0.0)
-            judge_output = judge_result.model_dump(mode="json")
-        except Exception as exc:
-            logger.warning(
-                "local judge call failed for task=%s: %s; submitting empty judge_output",
-                task_assignment_id, exc,
-            )
-            _judge_outcome = "failed"
-        finally:
-            _metrics.judge_duration_seconds.labels(family=family_id).observe(
-                time.perf_counter() - _judge_started_at
-            )
-            _metrics.judge_invocations_total.labels(
-                judge_model=judge_model, outcome=_judge_outcome
-            ).inc()
+        )
+        miner_tasks = [
+            asyncio.create_task(_invoke_one_miner(m, task_obj, task_id)) for m in miners
+        ]
 
-        # Submit result back to owner-api
-        result_path = f"/v1/families/{family_id}/tasks/{task_assignment_id}/result"
+        try:
+            async with asyncio.timeout(_FAN_OUT_TIMEOUT_SECONDS):
+                miner_runs = await asyncio.gather(*miner_tasks, return_exceptions=True)
+                baseline = await baseline_task
+        except OpenAIBaselineError as exc:
+            logger.warning(
+                "baseline failed for task_eval=%s: %s; releasing task",
+                task_evaluation_id, exc,
+            )
+            for t in miner_tasks:
+                t.cancel()
+            await _release_baseline_failed(
+                task_evaluation_id=task_evaluation_id, signer=signer, owner_url=owner_url,
+            )
+            return "baseline_failed"
+        except TimeoutError:
+            logger.warning(
+                "fan-out exceeded %.0fs for task_eval=%s",
+                _FAN_OUT_TIMEOUT_SECONDS, task_evaluation_id,
+            )
+            for t in (*miner_tasks, baseline_task):
+                if not t.done():
+                    t.cancel()
+            return "submit_failed"
+
+        baseline_text = baseline.response_text
+        task_category = (
+            task_payload.get("category")
+            or (task_obj.metadata or {}).get("category")
+        )
+
+        # Pick the latency budget for this task based on its declared mode.
+        # Tasks without a recognized mode skip the gate entirely (None budget).
+        if task_mode == "instant":
+            latency_budget: float | None = _INSTANT_MINER_LATENCY_BUDGET_SECONDS
+        elif task_mode == "thinking":
+            latency_budget = _THINKING_MINER_LATENCY_BUDGET_SECONDS
+        else:
+            latency_budget = None
+
+        # Agreement-judge each miner concurrently with position randomization.
+        # The judge sees only the final answer text — citations are stripped.
+        async def _judge_miner(miner_run: tuple[str, BenchmarkTaskRun]) -> dict[str, Any]:
+            miner_hotkey, run = miner_run
+            miner_citations = _extract_miner_citations(run)
+            miner_latency = float((run.metadata or {}).get("latency_seconds") or 0.0)
+            if run.status != "completed":
+                return {
+                    "miner_hotkey": miner_hotkey,
+                    "miner_response": run.model_dump(mode="json"),
+                    "miner_citations": miner_citations,
+                    "judge_output": None,
+                    "agreement_score": 0.0,
+                    "verdict": "error",
+                    "miner_latency_seconds": miner_latency,
+                    "latency_seconds": 0.0,
+                }
+            try:
+                miner_answer = _extract_answer_text(run)
+                swap = bool(secrets.randbits(1))
+                judge_started = time.perf_counter()
+                judge_result = await asyncio.to_thread(
+                    judge_client.judge_agreement,
+                    family_id=family_id,
+                    prompt=task_obj.prompt,
+                    response_a=miner_answer,
+                    response_b=baseline_text,
+                    task_mode=task_mode,
+                    task_category=task_category,
+                    swap=swap,
+                )
+                judge_latency = max(0.0, time.perf_counter() - judge_started)
+                verdict = judge_result.verdict
+                agreement_score = float(judge_result.agreement_score or 0.0)
+                # Mode-specific completion-time SLA: completed responses
+                # over budget count as a loss regardless of content match.
+                if latency_budget is not None and miner_latency > latency_budget:
+                    logger.info(
+                        "latency_violation miner=%s task_eval=%s mode=%s "
+                        "completion=%.2fs budget=%.2fs prior_verdict=%s",
+                        miner_hotkey[:16], task_evaluation_id, task_mode,
+                        miner_latency, latency_budget, verdict,
+                    )
+                    verdict = "latency_violation"
+                    agreement_score = 0.0
+                return {
+                    "miner_hotkey": miner_hotkey,
+                    "miner_response": run.model_dump(mode="json"),
+                    "miner_citations": miner_citations,
+                    "judge_output": judge_result.model_dump(mode="json"),
+                    "agreement_score": agreement_score,
+                    "verdict": verdict,
+                    "miner_latency_seconds": miner_latency,
+                    "latency_seconds": judge_latency,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "agreement judge failed for miner=%s task_eval=%s: %s",
+                    miner_hotkey[:16], task_evaluation_id, exc,
+                )
+                return {
+                    "miner_hotkey": miner_hotkey,
+                    "miner_response": run.model_dump(mode="json"),
+                    "miner_citations": miner_citations,
+                    "judge_output": None,
+                    "agreement_score": 0.0,
+                    "verdict": "error",
+                    "miner_latency_seconds": miner_latency,
+                    "latency_seconds": 0.0,
+                }
+
+        # Materialize the gather results (handle exceptions from miner fan-out)
+        resolved_runs: list[tuple[str, BenchmarkTaskRun]] = []
+        for miner, result in zip(miners, miner_runs):
+            if isinstance(result, BaseException):
+                resolved_runs.append((
+                    miner["hotkey"],
+                    BenchmarkTaskRun(
+                        task_id=task_id, family_id=family_id,
+                        prompt=task_obj.prompt, expected_output=task_obj.expected_output,
+                        response={}, status="failed", error=str(result), metadata={},
+                    ),
+                ))
+            else:
+                resolved_runs.append(result)
+
+        judge_results = await asyncio.gather(*[_judge_miner(r) for r in resolved_runs])
+
+        # Submit the batch
+        result_path = f"/v1/families/{family_id}/task-evaluations/{task_evaluation_id}/result"
         result_body = {
-            "miner_response": task_run.model_dump(mode="json"),
-            "judge_output": judge_output,
-            "task_score": task_score,
-            "task_status": task_run.status,
-            "metadata": {"validator_hotkey": signer.hotkey, "judge_model": judge_model},
+            "baseline_response": baseline.model_dump(mode="json"),
+            "miner_results": judge_results,
+            "validator_hotkey": signer.hotkey,
+            "judge_model": judge_model,
         }
         result_body_bytes = _json.dumps(result_body).encode()
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     f"{owner_url}{result_path}",
                     content=result_body_bytes,
@@ -639,59 +855,63 @@ async def run_distributed_benchmarks(
                     },
                 )
                 resp.raise_for_status()
-            return True
-        except Exception:
-            return False
+            return "ok"
+        except Exception as exc:
+            logger.warning("submit failed for task_eval=%s: %s", task_evaluation_id, exc)
+            return "submit_failed"
 
-    # Main loop: claim → parallel evaluate → submit → repeat
     sem = asyncio.Semaphore(max_parallel)
 
-    async def _bounded_evaluate(task_claim: dict[str, Any]) -> bool:
+    async def _bounded_evaluate(task_claim: dict[str, Any]) -> str:
         async with sem:
-            return await _evaluate_and_submit(task_claim)
+            return await _evaluate_task(task_claim)
 
-    while True:
-        # Claim a batch
-        claim_path = f"/v1/families/{family_id}/tasks/claim"
-        claim_body: dict[str, Any] = {"batch_size": batch_size}
-        if run_id:
-            claim_body["run_id"] = run_id
-        claim_body_bytes = _json.dumps(claim_body).encode()
+    try:
+        while True:
+            claim_path = f"/v1/families/{family_id}/tasks/claim"
+            claim_body: dict[str, Any] = {"batch_size": batch_size}
+            if run_id:
+                claim_body["run_id"] = run_id
+            claim_body_bytes = _json.dumps(claim_body).encode()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            claim_response = await client.post(
-                f"{owner_url}{claim_path}",
-                content=claim_body_bytes,
-                headers={
-                    **_signed_headers(signer=signer, method="POST", path=claim_path, body=claim_body_bytes),
-                    "Content-Type": "application/json",
-                },
-            )
-            if claim_response.status_code == 404:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                claim_response = await client.post(
+                    f"{owner_url}{claim_path}",
+                    content=claim_body_bytes,
+                    headers={
+                        **_signed_headers(signer=signer, method="POST", path=claim_path, body=claim_body_bytes),
+                        "Content-Type": "application/json",
+                    },
+                )
+                if claim_response.status_code == 404:
+                    break
+                claim_response.raise_for_status()
+                claim_data = claim_response.json()
+
+            tasks = claim_data.get("tasks", [])
+            if not tasks:
                 break
-            claim_response.raise_for_status()
-            claim_data = claim_response.json()
 
-        tasks = claim_data.get("tasks", [])
-        if not tasks:
-            break
+            total_claimed += len(tasks)
 
-        total_claimed += len(tasks)
+            results = await asyncio.gather(
+                *[_bounded_evaluate(t) for t in tasks],
+                return_exceptions=True,
+            )
+            for r in results:
+                if r == "ok":
+                    total_submitted += 1
+                elif r == "baseline_failed":
+                    total_baseline_failed += 1
+                else:
+                    total_failed += 1
+    finally:
+        judge_client.close()
+        await baseline_client.aclose()
 
-        # Evaluate all claimed tasks in parallel
-        results = await asyncio.gather(
-            *[_bounded_evaluate(t) for t in tasks],
-            return_exceptions=True,
-        )
-        for r in results:
-            if r is True:
-                total_submitted += 1
-            else:
-                total_failed += 1
-
-    if total_claimed > 0 and total_failed == total_claimed:
+    if total_claimed > 0 and (total_failed + total_baseline_failed) == total_claimed:
         _benchmark_outcome = "failed"
-    elif total_claimed > 0 and total_failed > 0:
+    elif total_claimed > 0 and (total_failed + total_baseline_failed) > 0:
         _benchmark_outcome = "partial"
     _metrics.benchmark_run_duration_seconds.labels(family=family_id).observe(
         time.perf_counter() - _benchmark_started_at
@@ -699,7 +919,6 @@ async def run_distributed_benchmarks(
     _metrics.benchmark_runs_completed_total.labels(
         family=family_id, outcome=_benchmark_outcome
     ).inc()
-    judge_client.close()
 
     return {
         "run_id": run_id,
@@ -707,4 +926,26 @@ async def run_distributed_benchmarks(
         "total_claimed": total_claimed,
         "total_submitted": total_submitted,
         "total_failed": total_failed,
+        "total_baseline_failed": total_baseline_failed,
     }
+
+
+async def _release_baseline_failed(
+    *, task_evaluation_id: str, signer, owner_url: str,
+) -> None:
+    """POST to owner-api to release a claim after baseline failure."""
+    import json as _json
+    path = f"/v1/families/general_chat/task-evaluations/{task_evaluation_id}/baseline-failed"
+    body = _json.dumps({}).encode()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await client.post(
+                f"{owner_url}{path}",
+                content=body,
+                headers={
+                    **_signed_headers(signer=signer, method="POST", path=path, body=body),
+                    "Content-Type": "application/json",
+                },
+            )
+    except Exception as exc:
+        logger.warning("failed to release baseline-failed task=%s: %s", task_evaluation_id, exc)

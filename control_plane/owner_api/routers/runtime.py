@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,13 @@ from control_plane.owner_api.dependencies import (
 from control_plane.owner_api.managed import ManagedOwnerServices
 
 router = APIRouter(tags=["runtime"])
+
+
+# Outer wall-clock budget for streaming proxy requests. Set above the
+# largest configured downstream timeout (validator's fan-out wrapper is
+# 660s) so a slow miner doesn't trip this before the upstream client's
+# own timeout fires.
+_STREAM_TIMEOUT_SECONDS = 660.0
 
 
 @router.get("/runtime/{deployment_id}/healthz")
@@ -392,4 +402,164 @@ async def internal_runtime_infer_epoch_alias(
         run_id=epoch_id,
         deployment_id=deployment_id,
         payload=payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming proxy routes
+# ---------------------------------------------------------------------------
+# Pipe NDJSON from the miner pod's /v1/agent/infer/stream straight through
+# to the caller (validator / consumer-chat-api). Each line is forwarded
+# byte-for-byte (with a re-attached newline) so FastAPI's StreamingResponse
+# controls every chunk boundary and never gets confused by partial reads.
+#
+# Note: this used to be broken because RawBodyCaptureMiddleware was lying
+# to FastAPI's StreamingResponse about client disconnects, killing any
+# streaming response that awaited between yields. The middleware was
+# fixed in app.py to forward real `receive()` after the body is replayed.
+
+async def _proxy_stream_lines_to_pod(
+    *,
+    pod_endpoint: str,
+    payload: dict[str, Any],
+) -> AsyncIterator[bytes]:
+    """Forward the pod's NDJSON line-by-line.
+
+    Each yielded chunk is one complete NDJSON frame ending with `\\n`.
+    Failures emerge as a synthetic `done` chunk so callers always see a
+    terminator they can act on.
+    """
+    url = f"{pod_endpoint.rstrip('/')}/v1/agent/infer/stream"
+    try:
+        async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT_SECONDS) as client:
+            async with client.stream("POST", url, json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    yield (stripped + "\n").encode("utf-8")
+    except httpx.HTTPStatusError as exc:
+        logger.warning("stream pod returned %d for %s", exc.response.status_code, url)
+        yield (
+            ('{"event":"done","status":"failed","error":"pod returned '
+             + str(exc.response.status_code) + '"}\n').encode("utf-8")
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stream pod connect failed for %s: %s", url, exc)
+        msg = str(exc).replace('"', '\\"')
+        yield ('{"event":"done","status":"failed","error":"' + msg + '"}\n').encode("utf-8")
+
+
+async def _eval_stream_impl(
+    request: Request,
+    *,
+    run_id: str | None,
+    deployment_id: str,
+    payload: dict[str, Any],
+) -> StreamingResponse:
+    services: ManagedOwnerServices = request.app.state.services
+    with services.db.sessionmaker() as session:
+        deployment = session.get(ManagedDeployment, deployment_id)
+        if deployment is None:
+            raise HTTPException(status_code=404, detail="deployment not found")
+        if deployment.status == "retired":
+            raise HTTPException(status_code=409, detail="deployment retired")
+        if run_id is not None:
+            snapshot, member = services.resolve_run_member(
+                session, run_id=run_id, deployment_id=deployment_id,
+            )
+            if snapshot is None or member is None:
+                raise HTTPException(status_code=404, detail="run deployment not found")
+            if snapshot.status != "open":
+                raise HTTPException(status_code=409, detail="run snapshot is closed")
+    await ensure_candidate_runtime_available(
+        services=services, deployment_id=deployment_id,
+    )
+    handle = services.runtime_manager.runtime_handle(deployment_id)
+    if handle is None:
+        raise HTTPException(status_code=503, detail="runtime not ready")
+    return StreamingResponse(
+        _proxy_stream_lines_to_pod(pod_endpoint=handle.endpoint_url, payload=payload),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/runtime/{deployment_id}/v1/agent/infer/stream")
+async def runtime_infer_stream(
+    request: Request,
+    deployment_id: str,
+    payload: dict[str, Any],
+    _token: None = Depends(require_internal_service_token),
+) -> StreamingResponse:
+    return await _eval_stream_impl(
+        request, run_id=None, deployment_id=deployment_id, payload=payload,
+    )
+
+
+@router.post("/v1/internal/runs/{run_id}/deployments/{deployment_id}/v1/agent/infer/stream")
+async def internal_runtime_infer_stream(
+    request: Request,
+    run_id: str,
+    deployment_id: str,
+    payload: dict[str, Any],
+) -> StreamingResponse:
+    require_internal_service_token(request)
+    return await _eval_stream_impl(
+        request, run_id=run_id, deployment_id=deployment_id, payload=payload,
+    )
+
+
+@router.post("/v1/internal/epochs/{epoch_id}/deployments/{deployment_id}/v1/agent/infer/stream")
+async def internal_runtime_infer_stream_epoch_alias(
+    request: Request,
+    epoch_id: str,
+    deployment_id: str,
+    payload: dict[str, Any],
+) -> StreamingResponse:
+    require_internal_service_token(request)
+    return await _eval_stream_impl(
+        request, run_id=epoch_id, deployment_id=deployment_id, payload=payload,
+    )
+
+
+@router.post("/v1/validator/runs/{run_id}/deployments/{deployment_id}/v1/agent/infer/stream")
+async def validator_runtime_infer_stream(
+    request: Request,
+    run_id: str,
+    deployment_id: str,
+    payload: dict[str, Any],
+    validator_hotkey: str = Depends(validator_dependency),
+) -> StreamingResponse:
+    del validator_hotkey
+    return await _eval_stream_impl(
+        request, run_id=run_id, deployment_id=deployment_id, payload=payload,
+    )
+
+
+@router.post("/runtime/serving/{serving_deployment_id}/v1/agent/infer/stream")
+async def serving_runtime_infer_stream(
+    request: Request,
+    serving_deployment_id: str,
+    payload: dict[str, Any],
+    _token: None = Depends(require_internal_service_token),
+) -> StreamingResponse:
+    services: ManagedOwnerServices = request.app.state.services
+    with services.db.sessionmaker() as session:
+        serving = session.get(ServingDeployment, serving_deployment_id)
+        if serving is None:
+            raise HTTPException(status_code=404, detail="serving deployment not found")
+        if serving.status != "healthy" or serving.health_status != "healthy":
+            raise HTTPException(status_code=409, detail="serving deployment is not healthy")
+    await ensure_serving_runtime_available(
+        services=services, serving_deployment_id=serving_deployment_id,
+    )
+    handle = services.runtime_manager.runtime_handle(serving_deployment_id)
+    if handle is None:
+        raise HTTPException(status_code=503, detail="serving runtime not ready")
+    return StreamingResponse(
+        _proxy_stream_lines_to_pod(pod_endpoint=handle.endpoint_url, payload=payload),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

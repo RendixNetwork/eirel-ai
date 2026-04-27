@@ -324,6 +324,20 @@ def create_app(
             "tool_counts": dict(usage.tool_counts),
         }
 
+    @app.post("/v1/usage/reset")
+    async def reset_usage(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Clear all per-job usage counters.
+
+        Called by owner-api on run advance so each deployment's request
+        budget refills for the new run. Miners deliberately use a sticky
+        job_id (miner-<deployment_id>) for cost attribution, so without
+        this periodic reset they'd accumulate requests monotonically and
+        eventually hit the per-job cap. Returns the number of jobs cleared.
+        """
+        cleared = len(app.state.job_usage)
+        app.state.job_usage.clear()
+        return {"cleared_job_count": cleared}
+
     @app.get("/v1/jobs/{job_id}/ledger", response_model=RetrievalLedgerResponse)
     async def job_ledger(job_id: str, _: None = Depends(require_auth)) -> RetrievalLedgerResponse:
         usage: JobUsageRecord | None = app.state.job_usage.get(job_id)

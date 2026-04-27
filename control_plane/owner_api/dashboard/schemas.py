@@ -10,23 +10,36 @@ ModeLiteral = Literal["instant", "thinking"]
 
 
 class MinerMetrics(BaseModel):
-    """Per-miner general_chat metrics. All values [0, 1] unless noted."""
-    quality_mean: float | None = None
-    latency_mean: float | None = None
-    trace_gate_pass_rate: float | None = None
-    honeytoken_count: int = 0
-    instant_mean: float | None = None
-    thinking_mean: float | None = None
-    blended: float | None = None
-    cost_efficiency: float | None = None
+    """Per-miner general_chat metrics.
+
+    Post-agreement redesign: the primary signal is ``mean_agreement`` — the
+    mean of per-task agreement scores against the OpenAI baseline reference.
+    Verdict counts are exposed for dashboard drill-down (how many tasks the
+    miner matched vs partially matched vs contradicted).
+    """
+
+    mean_agreement: float | None = None
+    # Per-verdict counts across the miner's judged tasks.
+    matches_count: int = 0
+    partially_matches_count: int = 0
+    not_applicable_count: int = 0
+    contradicts_count: int = 0
+    # Fraction of this miner's rows that ended in verdict=="error".
+    error_rate: float | None = None
+    # True iff ``error_rate`` is below the reliability threshold (0.30).
+    reliable: bool | None = None
 
 
-class JudgeDimensions(BaseModel):
-    """Eiretes judge's 4-dimension rubric scores for general_chat."""
-    goal_fulfillment: float | None = None
-    correctness: float | None = None
-    grounding: float | None = None
-    conversation_coherence: float | None = None
+class CitationRef(BaseModel):
+    """A single cited URL surfaced for dashboard display.
+
+    Citations do not participate in scoring. They are extracted from the
+    miner response (or the OpenAI baseline) and stored purely so operators
+    can see what each agent cited alongside its verdict.
+    """
+
+    url: str
+    title: str | None = None
 
 
 class OverviewResponse(BaseModel):
@@ -128,23 +141,33 @@ class MinerRunsResponse(BaseModel):
 
 
 class TaskEvaluation(BaseModel):
+    """One miner's agreement result for a single task."""
+
     task_id: str
-    task_index: int
     mode: ModeLiteral | None
     category: str | None
     difficulty: str | None
-    validator_hotkey: str | None
-    task_score: float | None
-    task_status: str | None
+    # Whether the task's prompt is expected to need live web search. Mirrors
+    # the end-user toggle; the baseline uses this flag directly.
+    web_search: bool = False
+    validator_hotkey: str | None = None
+    task_status: str | None  # "completed" | "failed"
     evaluated_at: str | None
     prompt: str | None
     miner_response: dict | None
-    quality_score: float | None
-    dimension_scores: JudgeDimensions
-    latency_score: float | None
+    # OpenAI baseline text, extracted from TaskEvaluation.baseline_response_json.
+    # Rendered side-by-side with the miner response on the dashboard so users
+    # can see what the judge compared against.
+    baseline_response_text: str | None = None
+    # Agreement verdict: "matches" | "partially_matches" | "not_applicable"
+    # | "contradicts" | "error".
+    agreement_verdict: str | None = None
+    # Scalar score derived from the verdict (0..1).
+    agreement_score: float | None = None
+    # Citations are informational only — not scored.
+    miner_citations: list[CitationRef] = Field(default_factory=list)
+    baseline_citations: list[CitationRef] = Field(default_factory=list)
     latency_ms: int | None
-    trace_gate_passed: bool | None
-    honeytoken_cited: bool | None
     judge_rationale: str | None
 
 

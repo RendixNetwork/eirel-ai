@@ -337,7 +337,85 @@ MIGRATIONS: tuple[Migration, ...] = (
         description="Drop is_active column from registered_neurons — presence = registered",
         apply=lambda engine: _drop_registered_neurons_is_active(engine),
     ),
+    Migration(
+        version="refactor_to_task_level_evaluation",
+        description=(
+            "Replace miner_evaluation_tasks with task_evaluations + "
+            "task_miner_results for task-level validator claims and pairwise "
+            "judging vs OpenAI baseline"
+        ),
+        apply=lambda engine: _migration_refactor_to_task_level_evaluation(engine),
+    ),
+    Migration(
+        version="add_miner_latency_to_task_miner_results",
+        description=(
+            "Add miner_latency_seconds column to task_miner_results so the "
+            "leaderboard can show miner response latency separately from "
+            "judge latency, and for the latency-violation scoring gate"
+        ),
+        apply=lambda engine: _migration_add_miner_latency_to_task_miner_results(engine),
+    ),
+    Migration(
+        version="add_miner_first_token_to_task_miner_results",
+        description=(
+            "Add miner_first_token_seconds column to task_miner_results to "
+            "store time-to-first-token from the streaming invocation path; "
+            "feeds the mode-agnostic 10s TTFB SLA gate"
+        ),
+        apply=lambda engine: _migration_add_miner_first_token_to_task_miner_results(engine),
+    ),
+    Migration(
+        version="drop_miner_first_token_seconds",
+        description=(
+            "Drop miner_first_token_seconds — TTFB metric removed; only "
+            "completion-time latency is recorded and gated. Most LLM "
+            "providers stream first token <20s anyway, so the gate added "
+            "noise without changing miner ranking."
+        ),
+        apply=lambda engine: _migration_drop_miner_first_token_seconds(engine),
+    ),
 )
+
+
+def _migration_add_miner_latency_to_task_miner_results(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    if "miner_latency_seconds" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE task_miner_results "
+            "ADD COLUMN miner_latency_seconds FLOAT NOT NULL DEFAULT 0.0"
+        ))
+
+
+def _migration_add_miner_first_token_to_task_miner_results(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    if "miner_first_token_seconds" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE task_miner_results "
+            "ADD COLUMN miner_first_token_seconds FLOAT NOT NULL DEFAULT 0.0"
+        ))
+
+
+def _migration_drop_miner_first_token_seconds(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    if "miner_first_token_seconds" not in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE task_miner_results DROP COLUMN miner_first_token_seconds"
+        ))
 
 
 def _drop_registered_neurons_is_active(engine: Engine) -> None:
@@ -348,3 +426,72 @@ def _drop_registered_neurons_is_active(engine: Engine) -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE registered_neurons DROP COLUMN is_active"))
+
+
+def _migration_refactor_to_task_level_evaluation(engine: Engine) -> None:
+    """Replace per-(miner, task) rows with task-level rows + per-miner results.
+
+    Drops `miner_evaluation_tasks` (per-pair claim rows) and creates
+    `task_evaluations` (one row per task, validator claims this) plus
+    `task_miner_results` (one row per miner per task, stores pairwise judge
+    output vs OpenAI baseline). Non-reversible: any in-flight pairs are lost.
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        if "miner_evaluation_tasks" in tables:
+            conn.execute(text("DROP TABLE miner_evaluation_tasks"))
+        if "task_evaluations" not in tables:
+            conn.execute(text("""
+                CREATE TABLE task_evaluations (
+                    id VARCHAR(36) PRIMARY KEY,
+                    epoch_id VARCHAR(128) NOT NULL,
+                    family_id VARCHAR(64) NOT NULL,
+                    task_id VARCHAR(128) NOT NULL,
+                    task_index INTEGER NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    claimed_by_validator VARCHAR(128),
+                    claimed_at TIMESTAMP,
+                    claim_expires_at TIMESTAMP,
+                    claim_attempt_count INTEGER NOT NULL DEFAULT 0,
+                    baseline_response_json JSON,
+                    evaluated_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(epoch_id, family_id, task_id)
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX idx_te_claimable ON task_evaluations (epoch_id, family_id, status, claim_expires_at)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX idx_te_epoch_id ON task_evaluations (epoch_id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX idx_te_status ON task_evaluations (status)"
+            ))
+        if "task_miner_results" not in tables:
+            conn.execute(text("""
+                CREATE TABLE task_miner_results (
+                    id VARCHAR(36) PRIMARY KEY,
+                    task_evaluation_id VARCHAR(36) NOT NULL REFERENCES task_evaluations(id) ON DELETE CASCADE,
+                    epoch_id VARCHAR(128) NOT NULL,
+                    family_id VARCHAR(64) NOT NULL,
+                    task_id VARCHAR(128) NOT NULL,
+                    miner_hotkey VARCHAR(128) NOT NULL,
+                    miner_response_json JSON NOT NULL,
+                    miner_citations_json JSON NOT NULL DEFAULT '[]',
+                    judge_output_json JSON,
+                    agreement_verdict VARCHAR(32) NOT NULL,
+                    agreement_score FLOAT NOT NULL DEFAULT 0.0,
+                    latency_seconds FLOAT NOT NULL DEFAULT 0.0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(task_evaluation_id, miner_hotkey)
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX idx_tmr_miner ON task_miner_results (epoch_id, family_id, miner_hotkey)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX idx_tmr_task_eval ON task_miner_results (task_evaluation_id)"
+            ))

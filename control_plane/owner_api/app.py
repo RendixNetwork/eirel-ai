@@ -74,11 +74,11 @@ class RawBodyCaptureMiddleware:
             await self.app(scope, receive, send)
             return
         body = b""
-        disconnected = False
+        early_disconnect_message: Message | None = None
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
-                disconnected = True
+                early_disconnect_message = message
                 break
             body += message.get("body", b"")
             if len(body) > _MAX_REQUEST_BODY:
@@ -98,14 +98,23 @@ class RawBodyCaptureMiddleware:
         delivered = False
 
         async def replay_receive() -> Message:
-            nonlocal delivered, disconnected
+            """Replay the captured body, then transparently forward.
+
+            After the body has been replayed, fall back to the real
+            ``receive`` so the inner app (typically FastAPI's
+            StreamingResponse) can poll for genuine ``http.disconnect``
+            events. The previous implementation synthesised a disconnect
+            on every post-body call, which FastAPI interpreted as the
+            client going away and used to abort the response — breaking
+            any streaming endpoint that awaited between yields.
+            """
+            nonlocal delivered
             if not delivered:
                 delivered = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            if disconnected:
-                return {"type": "http.disconnect"}
-            disconnected = True
-            return {"type": "http.disconnect"}
+            if early_disconnect_message is not None:
+                return early_disconnect_message
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 
@@ -212,7 +221,7 @@ async def _claim_expiry_sweeper_loop(app: FastAPI) -> None:
     the same run+family.
     """
     from sqlalchemy import update
-    from shared.common.models import MinerEvaluationTask
+    from shared.common.models import TaskEvaluation
     from control_plane.owner_api._helpers import utcnow
 
     services: ManagedOwnerServices = app.state.services
@@ -222,9 +231,9 @@ async def _claim_expiry_sweeper_loop(app: FastAPI) -> None:
             with services.db.sessionmaker() as session:
                 now = utcnow()
                 result = session.execute(
-                    update(MinerEvaluationTask)
-                    .where(MinerEvaluationTask.status == "claimed")
-                    .where(MinerEvaluationTask.claim_expires_at <= now)
+                    update(TaskEvaluation)
+                    .where(TaskEvaluation.status == "claimed")
+                    .where(TaskEvaluation.claim_expires_at <= now)
                     .values(
                         status="pending",
                         claimed_by_validator=None,
@@ -258,7 +267,7 @@ async def lifespan(app: FastAPI):
     logger.info(
         "owner-api startup: backend=%s, database_url=%s, redis_url=%s, "
         "provider_proxy_url=%s, web_search_tool_url=%s, x_tool_url=%s, "
-        "semantic_scholar_tool_url=%s, sandbox_tool_url=%s, "
+        "sandbox_tool_url=%s, "
         "namespace=%s, system_namespace=%s, control_plane_namespace=%s",
         settings.owner_runtime_backend,
         settings.database_url,
@@ -266,7 +275,6 @@ async def lifespan(app: FastAPI):
         settings.provider_proxy_url,
         settings.web_search_tool_service_url,
         settings.x_tool_service_url,
-        settings.semantic_scholar_tool_service_url,
         settings.sandbox_tool_service_url,
         settings.owner_runtime_namespace,
         settings.owner_runtime_system_namespace,
@@ -362,7 +370,6 @@ async def lifespan(app: FastAPI):
             fee_tao=settings.submission_fee_tao,
         )
     app.state.execution_worker_client_factory = None
-    app.state.weight_setter_client_factory = None
     app.state.runtime_remediation_policy_state = {
         "enabled": bool(settings.workflow_runtime_auto_remediation_enabled),
         "interval_seconds": float(settings.workflow_runtime_auto_remediation_interval_seconds),

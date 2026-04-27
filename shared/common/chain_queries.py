@@ -30,8 +30,7 @@ which yields ``(success, message)`` — the extrinsic either made it
 into a block or it didn't.  The validator's weight-setting loop in
 ``validation/validator/engine.py`` already uses this signal and logs
 ``weight-setting: set_weights succeeded on attempt N``.  That log line
-(or the persisted weight-setter submission history) is the B4
-verification path, not a metagraph read.
+is the B4 verification path, not a metagraph read.
 
 Everything here is synchronous — ``subtensor.metagraph`` is a blocking
 RPC.  Callers inside async code should wrap via ``asyncio.to_thread``.

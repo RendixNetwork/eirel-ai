@@ -92,7 +92,6 @@ def test_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("METAGRAPH_SYNC_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("RESULT_AGGREGATION_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("USE_REDIS_POOL", "0")
-    monkeypatch.setenv("VALIDATOR_EPOCH_QUORUM", "1")
     monkeypatch.setenv("METAGRAPH_SNAPSHOT_PATH", str(tmp_path / "metagraph.json"))
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_URL", "http://provider-proxy.test")
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_TOKEN", "provider-token")

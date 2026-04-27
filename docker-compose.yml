@@ -70,7 +70,6 @@ services:
       OWNER_API_INTERNAL_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
       EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
-      EIREL_SEMANTIC_SCHOLAR_TOOL_URL: ${EIREL_SEMANTIC_SCHOLAR_TOOL_URL:-http://semantic-scholar-tool-service:8087}
       EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
       EIREL_PROVIDER_PROXY_URL: http://provider-proxy:8092
       EIREL_PROVIDER_PROXY_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
@@ -82,8 +81,6 @@ services:
       web-search-tool-service:
         condition: service_healthy
       x-tool-service:
-        condition: service_healthy
-      semantic-scholar-tool-service:
         condition: service_healthy
       sandbox-tool-service:
         condition: service_healthy
@@ -101,7 +98,6 @@ services:
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
       EIREL_WEB_SEARCH_TOOL_BACKEND: ${EIREL_WEB_SEARCH_TOOL_BACKEND:-catalog}
       EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
-      EIREL_SEMANTIC_SCHOLAR_TOOL_URL: ${EIREL_SEMANTIC_SCHOLAR_TOOL_URL:-http://semantic-scholar-tool-service:8087}
       EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
     depends_on:
       postgres:
@@ -114,8 +110,6 @@ services:
         condition: service_healthy
       x-tool-service:
         condition: service_healthy
-      semantic-scholar-tool-service:
-        condition: service_healthy
       sandbox-tool-service:
         condition: service_healthy
     ports:
@@ -127,6 +121,7 @@ services:
     environment:
       CONSUMER_API_KEYS: ${CONSUMER_API_KEYS:-staging-consumer-key}
       ORCHESTRATOR_URL: http://orchestrator:8050
+      EIREL_CONSUMER_CHAT_MINER_OVERRIDE_ENDPOINT: ${EIREL_CONSUMER_CHAT_MINER_OVERRIDE_ENDPOINT:-}
     depends_on:
       - orchestrator
     ports:
@@ -156,8 +151,8 @@ services:
     ports:
       - "127.0.0.1:${METAGRAPH_LISTENER_HOST_PORT:-18011}:8011"
 
-  # validator-engine + weight-setter moved to docker-compose.validator.yml so
-  # third-party validators run a lean stack without the operator's services.
+  # validator-engine moved to docker-compose.validator.yml so third-party
+  # validators run a lean stack without the operator's services.
 
   provider-proxy:
     <<: *eirel-ai-run
@@ -186,6 +181,13 @@ services:
       EIREL_TAVILY_API_KEY: ${EIREL_TAVILY_API_KEY:-}
       EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS: ${EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS:-10.0}
       EIREL_WEB_SEARCH_MOCK: ${EIREL_WEB_SEARCH_MOCK:-false}
+      # Per-job request budget. The miner deliberately uses a sticky
+      # job_id (miner-<deployment_id>) for cost attribution on the
+      # provider-proxy, so a single deployment's ledger never resets over
+      # its lifetime. The previous default of 12 exhausted within the
+      # first run's worth of web-search calls and every subsequent
+      # request 429'd permanently until the container restarted.
+      EIREL_WEB_SEARCH_TOOL_DEFAULT_MAX_REQUESTS: ${EIREL_WEB_SEARCH_TOOL_DEFAULT_MAX_REQUESTS:-10000}
       REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:
@@ -221,27 +223,6 @@ services:
     restart: unless-stopped
     ports:
       - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${X_TOOL_SERVICE_HOST_PORT:-18086}:8086"
-
-  semantic-scholar-tool-service:
-    <<: *eirel-ai-run
-    command: ["semantic-scholar-tool-service"]
-    environment:
-      EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN: ${EIREL_SEMANTIC_SCHOLAR_TOOL_API_TOKEN:-}
-      EIREL_SEMANTIC_SCHOLAR_API_KEY: ${EIREL_SEMANTIC_SCHOLAR_API_KEY:-}
-      EIREL_SEMANTIC_SCHOLAR_TOOL_PORT: 8087
-      REDIS_URL: ${REDIS_URL}
-    depends_on:
-      redis:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8087/healthz')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    ports:
-      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${SEMANTIC_SCHOLAR_TOOL_SERVICE_HOST_PORT:-18087}:8087"
 
   sandbox-tool-service:
     <<: *eirel-ai-run

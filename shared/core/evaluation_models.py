@@ -99,6 +99,11 @@ class FamilyEvaluationTask(BaseModel):
     domain: str | None = None
     category: str = ""
     difficulty: Literal["standard", "hard", "expert"] = "standard"
+    # Whether the task's prompt is expected to need live web search. Mirrors
+    # the end-user toggle; the baseline reads this directly. Without the
+    # explicit field Pydantic would drop it on bundle validation, so the
+    # dashboard would always render "no web".
+    web_search: bool = False
     risk_tags: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     retrieval_constraints: dict[str, Any] = Field(default_factory=dict)
@@ -285,3 +290,85 @@ class MinerGeneralChatScore(BaseModel):
     honeytoken_cited: bool = False
     conversation_scores: list[ConversationScore] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# -- Outcome-only agreement evaluation primitives ------------------------
+
+
+# Ground-truth agreement verdicts produced by the eiretes agreement judge,
+# plus "error" for rows where the miner failed or the judge call itself
+# failed. "error" never comes from the judge — it's inserted by the
+# validator or control plane to mark a missing/failed judgment.
+AgreementVerdict = Literal[
+    "matches", "partially_matches", "contradicts", "not_applicable", "error",
+    "latency_violation",
+]
+
+
+# Scalar mapping used by the aggregation layer. Kept in sync with
+# eiretes.models.VERDICT_SCORES; "error" maps to 0 and does not contribute
+# to the denominator of the final aggregation (see aggregate_miner_score).
+# "latency_violation" is the SLA-failure verdict the validator stamps when a
+# miner's response exceeds the mode-specific latency budget — counts as a
+# loss (0.0) but unlike "error" it WILL contribute to the denominator so
+# slow miners actually drag their average down.
+VERDICT_SCORES: dict[str, float] = {
+    "matches": 1.0,
+    "partially_matches": 0.6,
+    "not_applicable": 0.7,
+    "contradicts": 0.0,
+    "error": 0.0,
+    "latency_violation": 0.0,
+}
+
+
+class BaselineResponse(BaseModel):
+    """Normalized OpenAI Responses API baseline for a task.
+
+    Filled by the validator's openai_baseline client and stored on the
+    TaskEvaluation row so reruns of the same task (e.g. after a validator
+    crash and re-claim) don't repeat the baseline call. Citations are
+    preserved for dashboard display only — they do not participate in
+    scoring.
+    """
+
+    response_text: str
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    raw_output: list[dict[str, Any]] = Field(default_factory=list)
+    latency_seconds: float = Field(ge=0.0, default=0.0)
+    cost_usd: float = Field(ge=0.0, default=0.0)
+    model: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgreementJudgeOutput(BaseModel):
+    """Caller-space agreement judge output (post-swap un-randomization).
+
+    Matches the shape returned by eiretes' ``/v1/judge/agreement`` endpoint
+    plus the "error" verdict which is synthesized by the validator when
+    the judge call itself fails. Citations are NOT present here — they
+    are stripped before the judge is called.
+    """
+
+    verdict: AgreementVerdict
+    agreement_score: float = Field(ge=0.0, le=1.0, default=0.0)
+    rationale: str = ""
+    swap_applied: bool = False
+    model: str = ""
+    rubric_name: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgreementMinerResult(BaseModel):
+    """One miner's agreement result for a task — payload shape the validator
+    sends to owner-api's submit-result endpoint."""
+
+    miner_hotkey: str
+    miner_response: dict[str, Any] = Field(default_factory=dict)
+    # Extracted from the miner_response for dashboard display; NOT used in
+    # scoring. Empty list if the miner didn't emit citations.
+    miner_citations: list[dict[str, Any]] = Field(default_factory=list)
+    judge_output: AgreementJudgeOutput | None = None
+    verdict: AgreementVerdict
+    agreement_score: float = Field(ge=0.0, le=1.0, default=0.0)
+    latency_seconds: float = Field(ge=0.0, default=0.0)

@@ -22,7 +22,7 @@ def _make_binding(
         run_id=run_id,
         bundle_uri=bundle_uri,
         bundle_sha256="a" * 64,
-        generator_version="owner_dataset_forge_v1",
+        generator_version="owner_dataset_v1",
         generated_by="5Fxxx",
         signature_hex="deadbeef",
         generator_provider="openai",

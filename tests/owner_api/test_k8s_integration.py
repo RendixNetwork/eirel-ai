@@ -38,7 +38,7 @@ _KUBECONFIG = os.environ.get(
     "EIREL_OWNER_KUBECONFIG_PATH",
     os.path.expanduser("~/.kube/config"),
 )
-_RUNTIME_IMAGE = os.environ.get("EIREL_OWNER_RUNTIME_IMAGE", "miner-runtime:v1")
+_RUNTIME_IMAGE = os.environ.get("EIREL_OWNER_RUNTIME_IMAGE", "eirel-miner-runtime:latest")
 
 
 # -- Helpers -------------------------------------------------------------------

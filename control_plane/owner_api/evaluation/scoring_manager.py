@@ -848,16 +848,16 @@ class ScoringManager:
         run_id: str,
         family_id: str,
     ) -> dict[str, Any]:
-        from shared.common.models import MinerEvaluationTask
+        from shared.common.models import TaskEvaluation
 
         family_id = ensure_family_id(family_id)
         contributing = list(
             session.execute(
-                select(MinerEvaluationTask.claimed_by_validator)
-                .where(MinerEvaluationTask.run_id == run_id)
-                .where(MinerEvaluationTask.family_id == family_id)
-                .where(MinerEvaluationTask.status == "evaluated")
-                .where(MinerEvaluationTask.claimed_by_validator.isnot(None))
+                select(TaskEvaluation.claimed_by_validator)
+                .where(TaskEvaluation.run_id == run_id)
+                .where(TaskEvaluation.family_id == family_id)
+                .where(TaskEvaluation.status == "evaluated")
+                .where(TaskEvaluation.claimed_by_validator.isnot(None))
                 .distinct()
             ).scalars()
         )
@@ -928,60 +928,6 @@ class ScoringManager:
             "ready": not blockers,
             "run_id": target_run.id,
             "blockers": blockers,
-        }
-
-    def build_chain_weight_inputs(
-        self,
-        session: Session,
-        *,
-        run_id: str | None = None,
-    ) -> dict[str, Any]:
-        readiness = self.chain_publication_readiness(session, run_id=run_id)
-        target_run_id = readiness.get("run_id")
-        if target_run_id is None:
-            raise ValueError("chain publication has no completed run")
-        families: list[dict[str, Any]] = []
-        for family_id in PRODUCTION_FAMILIES:
-            aggregate = self.aggregate_snapshot_for_family(
-                session,
-                run_id=target_run_id,
-                family_id=family_id,
-            )
-            if aggregate is None or not isinstance(aggregate.snapshot_json, dict):
-                raise ValueError(f"missing aggregate snapshot for {family_id}")
-            snapshot = FamilyScoreSnapshot.model_validate(aggregate.snapshot_json)
-            family_weight = fixed_family_weight(snapshot.family_id)
-            built = {
-                "run_id": snapshot.run_id,
-                "family_id": snapshot.family_id,
-                "evaluation_plane": snapshot.evaluation_plane,
-                "family_weight": family_weight,
-                "weights": snapshot.normalized_weights,
-                "scaled_weights": {
-                    hotkey: weight * family_weight
-                    for hotkey, weight in snapshot.normalized_weights.items()
-                },
-                "query_volume_share": float(snapshot.query_volume_share or 0.0),
-                "rubric_version": snapshot.rubric_version,
-                "allocation_mode": "fixed_family_weights_v1",
-            }
-            families.append(
-                {
-                    "family_id": family_id,
-                    "snapshot": snapshot.model_dump(mode="json"),
-                    "evaluation_plane": built["evaluation_plane"],
-                    "family_weight": built["family_weight"],
-                    "allocation_mode": built["allocation_mode"],
-                    "weights": built["weights"],
-                    "scaled_weights": built["scaled_weights"],
-                    "rubric_version": built["rubric_version"],
-                }
-            )
-        return {
-            "run_id": target_run_id,
-            "allocation_mode": "fixed_family_weights_v1",
-            "families": families,
-            "readiness": readiness,
         }
 
     # ------------------------------------------------------------------

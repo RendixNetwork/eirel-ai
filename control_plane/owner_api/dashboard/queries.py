@@ -13,17 +13,17 @@ from shared.common.models import (
     ManagedDeployment,
     ManagedMinerSubmission,
     MinerEvaluationSummary,
-    MinerEvaluationTask,
     RegisteredNeuron,
     RunFamilyResult,
+    TaskMinerResult,
     ValidatorRecord,
 )
 from control_plane.owner_api._helpers import _parse_family_weights, _strip_sensitive_task_metadata
 
 from .schemas import (
+    CitationRef,
     FamiliesResponse,
     FamilySummary,
-    JudgeDimensions,
     LeaderboardEntry,
     LeaderboardResponse,
     MinerMetrics,
@@ -90,7 +90,7 @@ def _as_mode(value: Any) -> ModeLiteral | None:
 
 
 # ---------------------------------------------------------------------------
-# Per-miner metric aggregation from MinerEvaluationTask
+# Per-miner metric aggregation from TaskMinerResult
 # ---------------------------------------------------------------------------
 
 
@@ -102,56 +102,47 @@ def _metrics_for_tasks(
     hotkey: str | None,
 ) -> dict[str, MinerMetrics]:
     """
-    Return per-miner metrics aggregated from MinerEvaluationTask rows.
+    Return per-miner metrics aggregated from TaskMinerResult rows.
     If ``hotkey`` is given, restrict to that miner (dict has 0 or 1 entries).
     """
     stmt = select(
-        MinerEvaluationTask.miner_hotkey,
-        MinerEvaluationTask.judge_output_json,
-        MinerEvaluationTask.result_metadata_json,
+        TaskMinerResult.miner_hotkey,
+        TaskMinerResult.agreement_verdict,
+        TaskMinerResult.agreement_score,
     ).where(
-        MinerEvaluationTask.run_id == run_id,
-        MinerEvaluationTask.family_id == family_id,
-        MinerEvaluationTask.status == "evaluated",
+        TaskMinerResult.run_id == run_id,
+        TaskMinerResult.family_id == family_id,
     )
     if hotkey is not None:
-        stmt = stmt.where(MinerEvaluationTask.miner_hotkey == hotkey)
+        stmt = stmt.where(TaskMinerResult.miner_hotkey == hotkey)
 
-    quality_sum: dict[str, float] = defaultdict(float)
-    latency_sum: dict[str, float] = defaultdict(float)
-    trace_pass_count: dict[str, int] = defaultdict(int)
-    honeytoken_count: dict[str, int] = defaultdict(int)
     task_count: dict[str, int] = defaultdict(int)
+    score_sum: dict[str, float] = defaultdict(float)  # sum over non-error rows
+    verdict_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
-    for hk, judge_output, result_metadata in session.execute(stmt).all():
+    for hk, verdict, score in session.execute(stmt).all():
         task_count[hk] += 1
-        jo = judge_output or {}
-        rm = result_metadata or {}
-        conversation = (rm or {}).get("conversation_score") or {}
-        conv_meta = conversation.get("metadata") or {}
-
-        quality = jo.get("score")
-        if isinstance(quality, (int, float)):
-            quality_sum[hk] += float(quality)
-
-        latency = conversation.get("latency")
-        if isinstance(latency, (int, float)):
-            latency_sum[hk] += float(latency)
-
-        if conv_meta.get("trace_gate_passed"):
-            trace_pass_count[hk] += 1
-        if conv_meta.get("honeytoken_cited"):
-            honeytoken_count[hk] += 1
+        v = verdict or "error"
+        verdict_counts[hk][v] += 1
+        if v != "error" and isinstance(score, (int, float)):
+            score_sum[hk] += float(score)
 
     out: dict[str, MinerMetrics] = {}
     for hk, n in task_count.items():
         if n == 0:
             continue
+        counts = verdict_counts[hk]
+        completed = sum(c for v, c in counts.items() if v != "error")
+        mean_agreement = score_sum[hk] / completed if completed else None
+        error_rate = counts.get("error", 0) / n
         out[hk] = MinerMetrics(
-            quality_mean=quality_sum[hk] / n if hk in quality_sum else None,
-            latency_mean=latency_sum[hk] / n if hk in latency_sum else None,
-            trace_gate_pass_rate=trace_pass_count[hk] / n,
-            honeytoken_count=honeytoken_count[hk],
+            mean_agreement=mean_agreement,
+            matches_count=counts.get("matches", 0),
+            partially_matches_count=counts.get("partially_matches", 0),
+            not_applicable_count=counts.get("not_applicable", 0),
+            contradicts_count=counts.get("contradicts", 0),
+            error_rate=error_rate,
+            reliable=error_rate <= 0.30,
         )
     return out
 
@@ -160,17 +151,33 @@ def _merge_summary_metrics(
     metrics: MinerMetrics,
     summary: MinerEvaluationSummary | None,
 ) -> MinerMetrics:
-    """Overlay post-close aggregates (instant_mean/thinking_mean/blended/cost_efficiency) from summary."""
+    """Overlay post-close aggregates from the MinerEvaluationSummary row.
+
+    ``rollout_metadata_json`` is the dict emitted by ``MinerRollup.to_metadata()``
+    so we prefer those values (they're authoritative once the run closes)
+    over the per-row averages computed above.
+    """
     if summary is None:
         return metrics
     rollout = dict(summary.rollout_metadata_json or {})
-    gc = rollout.get("general_chat") or {}
-    return metrics.model_copy(update={
-        "instant_mean": gc.get("instant_mean"),
-        "thinking_mean": gc.get("thinking_mean"),
-        "blended": gc.get("blended"),
-        "cost_efficiency": gc.get("cost_efficiency"),
-    })
+    updates: dict = {}
+    if "mean_agreement" in rollout:
+        updates["mean_agreement"] = rollout.get("mean_agreement")
+    if "error_rate" in rollout:
+        updates["error_rate"] = rollout.get("error_rate")
+    if "reliable" in rollout:
+        updates["reliable"] = rollout.get("reliable")
+    counts = rollout.get("verdict_counts") or {}
+    if isinstance(counts, dict):
+        if "matches" in counts:
+            updates["matches_count"] = int(counts.get("matches") or 0)
+        if "partially_matches" in counts:
+            updates["partially_matches_count"] = int(counts.get("partially_matches") or 0)
+        if "not_applicable" in counts:
+            updates["not_applicable_count"] = int(counts.get("not_applicable") or 0)
+        if "contradicts" in counts:
+            updates["contradicts_count"] = int(counts.get("contradicts") or 0)
+    return metrics.model_copy(update=updates) if updates else metrics
 
 
 # ---------------------------------------------------------------------------
@@ -272,16 +279,15 @@ def _collect_single_run_rows(
     if run.status == "open":
         rows = session.execute(
             select(
-                MinerEvaluationTask.miner_hotkey,
-                func.avg(MinerEvaluationTask.task_score).label("raw_score"),
-                func.count(MinerEvaluationTask.id).label("task_count"),
+                TaskMinerResult.miner_hotkey,
+                func.avg(TaskMinerResult.agreement_score).label("raw_score"),
+                func.count(TaskMinerResult.id).label("task_count"),
             )
             .where(
-                MinerEvaluationTask.run_id == run.id,
-                MinerEvaluationTask.family_id == family_id,
-                MinerEvaluationTask.status == "evaluated",
+                TaskMinerResult.run_id == run.id,
+                TaskMinerResult.family_id == family_id,
             )
-            .group_by(MinerEvaluationTask.miner_hotkey)
+            .group_by(TaskMinerResult.miner_hotkey)
         ).all()
         return [
             {
@@ -640,26 +646,14 @@ def fetch_miner_runs(
 
 
 def _task_evaluation_from_row(
-    row: MinerEvaluationTask,
+    row: TaskMinerResult,
     *,
     bundle_task: dict[str, Any],
+    baseline_response_json: dict[str, Any] | None = None,
 ) -> TaskEvaluation:
     jo = row.judge_output_json or {}
-    rm = row.result_metadata_json or {}
-    conversation = (rm or {}).get("conversation_score") or {}
-    conv_meta = conversation.get("metadata") or {}
-
-    dims_raw = jo.get("dimension_scores") or {}
-    dims = JudgeDimensions(
-        goal_fulfillment=dims_raw.get("goal_fulfillment"),
-        correctness=dims_raw.get("correctness"),
-        grounding=dims_raw.get("grounding"),
-        conversation_coherence=dims_raw.get("conversation_coherence"),
-    )
 
     prompt_val = bundle_task.get("prompt")
-    # Prompts can technically be dicts in some bundle versions; flatten to str
-    # so the frontend always gets a consistent type.
     if isinstance(prompt_val, dict):
         prompt_val = prompt_val.get("text") or prompt_val.get("prompt") or str(prompt_val)
 
@@ -667,27 +661,49 @@ def _task_evaluation_from_row(
     category = bundle_task.get("category") or meta.get("category")
     difficulty = bundle_task.get("difficulty") or meta.get("difficulty")
     mode = _as_mode(bundle_task.get("mode") or meta.get("mode"))
+    web_search = bool(bundle_task.get("web_search") or meta.get("web_search") or False)
 
-    latency_ms = conv_meta.get("latency_ms")
+    status = "completed" if row.agreement_verdict != "error" else "failed"
+
+    miner_citations = [
+        CitationRef(url=str(c.get("url") or ""), title=c.get("title"))
+        for c in (row.miner_citations_json or [])
+        if isinstance(c, dict) and c.get("url")
+    ]
+    baseline_citations: list[CitationRef] = []
+    baseline_text: str | None = None
+    if isinstance(baseline_response_json, dict):
+        for c in baseline_response_json.get("citations") or []:
+            if isinstance(c, dict) and c.get("url"):
+                baseline_citations.append(
+                    CitationRef(url=str(c.get("url") or ""), title=c.get("title"))
+                )
+        raw_text = baseline_response_json.get("response_text")
+        if isinstance(raw_text, str) and raw_text.strip():
+            baseline_text = raw_text
 
     return TaskEvaluation(
         task_id=row.task_id,
-        task_index=row.task_index,
         mode=mode,
         category=category,
         difficulty=difficulty,
-        validator_hotkey=row.claimed_by_validator,
-        task_score=row.task_score,
-        task_status=row.task_status,
-        evaluated_at=row.evaluated_at.isoformat() if row.evaluated_at else None,
+        web_search=web_search,
+        task_status=status,
+        evaluated_at=row.created_at.isoformat() if row.created_at else None,
         prompt=prompt_val if isinstance(prompt_val, str) else None,
         miner_response=row.miner_response_json,
-        quality_score=jo.get("score") if isinstance(jo.get("score"), (int, float)) else None,
-        dimension_scores=dims,
-        latency_score=conversation.get("latency") if isinstance(conversation.get("latency"), (int, float)) else None,
-        latency_ms=int(latency_ms) if isinstance(latency_ms, (int, float)) else None,
-        trace_gate_passed=conv_meta.get("trace_gate_passed"),
-        honeytoken_cited=conv_meta.get("honeytoken_cited"),
+        baseline_response_text=baseline_text,
+        agreement_verdict=row.agreement_verdict,
+        agreement_score=(
+            float(row.agreement_score) if row.agreement_score is not None else None
+        ),
+        miner_citations=miner_citations,
+        baseline_citations=baseline_citations,
+        latency_ms=(
+            int(row.miner_latency_seconds * 1000)
+            if row.miner_latency_seconds
+            else None
+        ),
         judge_rationale=jo.get("rationale"),
     )
 
@@ -716,13 +732,13 @@ def fetch_run_detail(
     ).scalar_one_or_none()
 
     task_rows = session.execute(
-        select(MinerEvaluationTask)
+        select(TaskMinerResult)
         .where(
-            MinerEvaluationTask.run_id == run_id,
-            MinerEvaluationTask.family_id == family_id,
-            MinerEvaluationTask.miner_hotkey == hotkey,
+            TaskMinerResult.run_id == run_id,
+            TaskMinerResult.family_id == family_id,
+            TaskMinerResult.miner_hotkey == hotkey,
         )
-        .order_by(MinerEvaluationTask.task_index.asc())
+        .order_by(TaskMinerResult.created_at.asc())
     ).scalars().all()
 
     bundle = services.runs.run_evaluation_bundle(session, run_id=run_id, family_id=family_id)
@@ -733,8 +749,26 @@ def fetch_run_detail(
             if tid:
                 tasks_by_id[tid] = _strip_sensitive_task_metadata(task_def)
 
+    # Fetch baseline responses alongside the task evals so we can surface
+    # OpenAI's citations next to the miner's on each task row.
+    from shared.common.models import TaskEvaluation as TaskEvaluationRow
+    baseline_rows = session.execute(
+        select(TaskEvaluationRow.task_id, TaskEvaluationRow.baseline_response_json)
+        .where(
+            TaskEvaluationRow.run_id == run_id,
+            TaskEvaluationRow.family_id == family_id,
+        )
+    ).all()
+    baseline_by_task: dict[str, dict[str, Any] | None] = {
+        task_id: baseline for (task_id, baseline) in baseline_rows
+    }
+
     tasks = [
-        _task_evaluation_from_row(row, bundle_task=tasks_by_id.get(row.task_id, {}))
+        _task_evaluation_from_row(
+            row,
+            bundle_task=tasks_by_id.get(row.task_id, {}),
+            baseline_response_json=baseline_by_task.get(row.task_id),
+        )
         for row in task_rows
     ]
 

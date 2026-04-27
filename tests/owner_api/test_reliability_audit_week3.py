@@ -126,7 +126,7 @@ def _make_manager(
     mgr._netv1 = netv1 or _FakeNetworkingV1Api()
     mgr._namespace = namespace
     mgr._system_namespace = "eirel-system"
-    mgr._runtime_image = "registry.eirel.internal/miner-runtime:v1"
+    mgr._runtime_image = "registry.eirel.internal/eirel-miner-runtime:latest"
     mgr._shared_secret_name = "eirel-runtime-shared"
     mgr._service_domain = service_domain
     mgr._health_timeout_seconds = 30.0
@@ -222,7 +222,6 @@ def snapshot_db(tmp_path, monkeypatch):
     monkeypatch.setenv("METAGRAPH_SYNC_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("RESULT_AGGREGATION_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("USE_REDIS_POOL", "0")
-    monkeypatch.setenv("VALIDATOR_EPOCH_QUORUM", "1")
     monkeypatch.setenv("METAGRAPH_SNAPSHOT_PATH", str(tmp_path / "metagraph.json"))
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_URL", "http://provider-proxy.test")
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_TOKEN", "provider-token")
@@ -418,7 +417,6 @@ def test_config_validates_positive_timeout(monkeypatch):
     monkeypatch.setenv("METAGRAPH_SYNC_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("RESULT_AGGREGATION_INTERVAL_SECONDS", "3600")
     monkeypatch.setenv("USE_REDIS_POOL", "0")
-    monkeypatch.setenv("VALIDATOR_EPOCH_QUORUM", "1")
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_URL", "http://provider-proxy.test")
     monkeypatch.setenv("EIREL_PROVIDER_PROXY_TOKEN", "provider-token")
     monkeypatch.setenv("EIREL_INTERNAL_SERVICE_TOKEN", "internal-token")

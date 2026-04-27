@@ -48,8 +48,6 @@ spec:
               value: "http://$(SERVER_A_HOST_IP):18085"
             - name: EIREL_X_TOOL_URL
               value: "http://$(SERVER_A_HOST_IP):18086"
-            - name: EIREL_SEMANTIC_SCHOLAR_TOOL_URL
-              value: "http://$(SERVER_A_HOST_IP):18087"
             - name: EIREL_SANDBOX_TOOL_URL
               value: "http://$(SERVER_A_HOST_IP):18091"
           ports:

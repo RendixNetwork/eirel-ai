@@ -41,7 +41,6 @@ WORKFLOW_EPISODE_RETRY_BASE_SECONDS = 30
 WORKFLOW_EPISODE_RETRY_MAX_SECONDS = 300
 WORKFLOW_RUNTIME_REMEDIATION_AUDIT_LIMIT = 20
 WORKFLOW_RUNTIME_POLICY_STATE_KEY = "runtime_remediation_policy"
-CHAIN_PUBLICATION_STATE_KEY = "chain_publication"
 WORKFLOW_RUNTIME_SUPPRESSION_TARGET_KINDS = {
     "episode_id",
     "workflow_spec_id",
@@ -1034,41 +1033,6 @@ class WorkflowManager:
         session.delete(row)
         session.flush()
         return True
-
-    def chain_publication_state_payload(self, session: Session) -> dict[str, Any]:
-        record = self._state_record(session, state_key=CHAIN_PUBLICATION_STATE_KEY)
-        payload = dict(record.value_json or {}) if record is not None else {}
-        return {
-            "latest_run_id": payload.get("latest_run_id"),
-            "latest_publication_batch_id": payload.get("latest_publication_batch_id"),
-            "latest_build_inputs": payload.get("latest_build_inputs"),
-            "latest_emitted_family_allocations": payload.get("latest_emitted_family_allocations"),
-            "latest_publication_status": payload.get("latest_publication_status"),
-            "latest_publication_error": payload.get("latest_publication_error"),
-            "latest_submission_mode": payload.get("latest_submission_mode"),
-            "latest_weight_setter_results": payload.get("latest_weight_setter_results"),
-            "latest_published_at": payload.get("latest_published_at"),
-            "publication_history": payload.get("publication_history") or [],
-            "updated_at": payload.get("updated_at"),
-        }
-
-    def update_chain_publication_state(
-        self,
-        session: Session,
-        *,
-        values: dict[str, Any],
-    ) -> dict[str, Any]:
-        record = self._state_record(session, state_key=CHAIN_PUBLICATION_STATE_KEY, create=True)
-        assert record is not None
-        payload = {
-            **dict(record.value_json or {}),
-            **values,
-            "updated_at": utcnow().isoformat(),
-        }
-        record.value_json = payload
-        record.updated_at = utcnow()
-        session.flush()
-        return self.chain_publication_state_payload(session)
 
     def _workflow_episode_recent_requeue_applied_count(
         self,

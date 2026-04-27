@@ -51,16 +51,6 @@ groups:
           summary: metagraph-listener is unavailable
           description: metagraph-listener metrics are missing or the service is down.
 
-      - alert: EirelWeightSetterDown
-        expr: eirel_weight_setter_up == 0 or absent(eirel_weight_setter_up)
-        for: 5m
-        labels:
-          severity: warning
-          service: weight-setter
-        annotations:
-          summary: weight-setter is unavailable
-          description: weight-setter metrics are missing or the service is down.
-
       - alert: EirelProviderProxyDown
         expr: absent(eirel_provider_proxy_requests_total)
         for: 5m
@@ -212,7 +202,7 @@ groups:
         for: 5m
         labels:
           severity: critical
-          service: weight-setter
+          service: validator-engine
         annotations:
           summary: weight submission is stale
           description: no successful weight submission observed for a family in over an hour.
@@ -222,17 +212,17 @@ groups:
         for: 15m
         labels:
           severity: warning
-          service: weight-setter
+          service: validator-engine
         annotations:
           summary: weight submissions are failing
-          description: weight-setter has recorded non-success submissions over the last 15 minutes.
+          description: validator-engine has recorded non-success weight submissions over the last 15 minutes.
 
       - alert: EirelChainErrorsHigh
         expr: sum(rate(eirel_weight_setter_chain_errors_total[15m])) > 0.1
         for: 10m
         labels:
           severity: warning
-          service: weight-setter
+          service: validator-engine
         annotations:
           summary: chain interaction errors are elevated
-          description: weight-setter is observing chain errors above 0.1/s over the last 15 minutes.
+          description: validator-engine is observing chain errors above 0.1/s over the last 15 minutes.

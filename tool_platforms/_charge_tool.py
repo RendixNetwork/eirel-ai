@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Shared best-effort helper for reporting per-request tool cost.
 
-Tool services (web_search, x, semantic_scholar, sandbox) call into this
+Tool services (web_search, x, sandbox) call into this
 after handling a successful miner request so the provider-proxy can
 attribute the USD cost to the job. The attribution is fire-and-forget:
 failure to reach the proxy must never break the tool handler — the

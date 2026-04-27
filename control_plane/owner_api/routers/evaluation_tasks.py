@@ -85,27 +85,25 @@ async def claim_tasks(
 
 
 @router.post(
-    "/v1/families/{family_id}/tasks/{task_assignment_id}/result",
+    "/v1/families/{family_id}/task-evaluations/{task_evaluation_id}/result",
     response_model=TaskResultResponse,
 )
 async def submit_task_result(
     request: Request,
     family_id: str,
-    task_assignment_id: str,
+    task_evaluation_id: str,
     payload: TaskResultSubmission,
     validator_hotkey: str = Depends(validator_dependency),
 ) -> TaskResultResponse:
+    del family_id
     services: ManagedOwnerServices = request.app.state.services
     with services.db.sessionmaker() as session:
         result = services.evaluation_tasks.submit_task_result(
             session,
-            task_assignment_id=task_assignment_id,
+            task_evaluation_id=task_evaluation_id,
             validator_hotkey=validator_hotkey,
-            miner_response=payload.miner_response,
-            judge_output=payload.judge_output,
-            task_score=payload.task_score,
-            task_status=payload.task_status,
-            metadata=payload.metadata,
+            baseline_response=payload.baseline_response,
+            miner_results=payload.miner_results,
         )
         session.commit()
 
@@ -116,9 +114,8 @@ async def submit_task_result(
             )
 
         return TaskResultResponse(
-            task_assignment_id=task_assignment_id,
+            task_evaluation_id=task_evaluation_id,
             status=result["status"],
-            miner_evaluation_complete=result["miner_evaluation_complete"],
             family_evaluation_complete=result["family_evaluation_complete"],
             remaining_task_count=result["remaining_task_count"],
         )

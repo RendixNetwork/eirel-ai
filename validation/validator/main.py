@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 class DistributedBenchmarkRequest(BaseModel):
     run_id: str | None = None
     family_id: str
-    batch_size: int = Field(default=5, ge=1, le=40)
-    max_parallel: int = Field(default=5, ge=1, le=20)
+    batch_size: int = Field(default=1, ge=1, le=40)
+    max_parallel: int = Field(default=2, ge=1, le=20)
     rubric_version: str = "family_rubric_v2"
     judge_model: str = Field(default_factory=lambda: os.getenv("EIREL_JUDGE_MODEL", "local-rubric-judge"))
 

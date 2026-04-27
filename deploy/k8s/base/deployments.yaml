@@ -352,55 +352,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: weight-setter
-  namespace: eirel
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: weight-setter
-  template:
-    metadata:
-      labels:
-        app: weight-setter
-    spec:
-      terminationGracePeriodSeconds: 30
-      containers:
-        - name: weight-setter
-          image: rendixnetwork/eirel-ai:latest
-          imagePullPolicy: Always
-          command: ["weight-setter"]
-          envFrom:
-            - configMapRef:
-                name: eirel-control-plane-config
-            - secretRef:
-                name: eirel-control-plane-secrets
-          ports:
-            - containerPort: 8012
-              name: http
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8012
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8012
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 300m
-              memory: 256Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: provider-proxy
   namespace: eirel
 spec:

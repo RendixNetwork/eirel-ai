@@ -225,7 +225,6 @@ class OperatorManager:
         current_serving_release = self._owner.latest_published_release(session)
         current_serving_fleet = self._owner.current_serving_fleet(session)
         workflow_composition_registry = self._owner.workflow_composition_registry(session)
-        chain_publication_state = self._owner.chain_publication_state_payload(session)
         chain_publication_readiness = self._owner.chain_publication_readiness(session)
         candidate_registry = self._owner.get_candidate_registry(session)
         runtime_capacity = self._owner.runtime_capacity_summary(session)
@@ -340,7 +339,6 @@ class OperatorManager:
             },
             "workflow_runtime_incidents_preview": incidents_preview,
             "chain_publication": {
-                **chain_publication_state,
                 "readiness": chain_publication_readiness,
                 "chain_publish_ready": bool(chain_publication_readiness.get("ready")),
                 "chain_publish_blockers": list(chain_publication_readiness.get("blockers") or []),
@@ -354,8 +352,6 @@ class OperatorManager:
                 "runtime_remediation_policy_url": "/v1/operators/runtime-remediation/policy",
                 "runtime_remediation_suppressions_url": "/v1/operators/runtime-remediation/suppressions",
                 "execution_worker_runtime_status_url": "/v1/operators/runtime-status",
-                "chain_weights_status_url": "/v1/operators/chain-weights/status",
-                "chain_weights_publish_url": "/v1/operators/chain-weights/publish",
                 "workflow_composition_registry_url": "/v1/workflow-composition/registry",
             },
             "abv_serving_mode": ABV_SERVING_SELECTION_REASON,

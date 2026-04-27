@@ -28,7 +28,7 @@ from shared.common.models import (
     ManagedArtifact,
     ManagedDeployment,
     ManagedMinerSubmission,
-    MinerEvaluationTask,
+    TaskEvaluation,
     RunFamilyResult,
 )
 from control_plane.owner_api.evaluation.calibration import (
@@ -256,8 +256,7 @@ class RunManager:
                 if source_type == "s3":
                     raise RuntimeError(
                         f"no active OwnerDatasetBinding for family={family_id!r} "
-                        f"run_id={run_id!r}; enable auto_trigger_dataset_forge "
-                        f"or generate the binding out-of-band"
+                        f"run_id={run_id!r}; register the binding out-of-band"
                     )
                 # Filesystem mode: fall back to disk loader.
             else:
@@ -629,9 +628,9 @@ class RunManager:
         # Expire any remaining pending/claimed evaluation tasks for this run
         now = _utcnow()
         session.execute(
-            update(MinerEvaluationTask)
-            .where(MinerEvaluationTask.run_id == run_id)
-            .where(MinerEvaluationTask.status.in_(("pending", "claimed")))
+            update(TaskEvaluation)
+            .where(TaskEvaluation.run_id == run_id)
+            .where(TaskEvaluation.status.in_(("pending", "claimed")))
             .values(status="expired", updated_at=now)
         )
         session.flush()

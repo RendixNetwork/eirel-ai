@@ -98,36 +98,6 @@ async def post_execution_worker_action(
         }
 
 
-async def post_weight_setter_action(
-    request: Request,
-    *,
-    path: str,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    services: ManagedOwnerServices = request.app.state.services
-    client_factory = getattr(request.app.state, "weight_setter_client_factory", None)
-    base_url = services.settings.weight_setter_internal_url.rstrip("/")
-    try:
-        if client_factory is not None:
-            async with client_factory() as client:
-                response = await client.post(path, json=payload)
-        else:
-            async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
-                response = await client.post(path, json=payload)
-        response.raise_for_status()
-        return {
-            "ok": True,
-            "url": f"{base_url}{path}",
-            "payload": response.json(),
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "url": f"{base_url}{path}",
-            "error": str(exc),
-        }
-
-
 def workflow_episode_http_error(exc: ValueError) -> HTTPException:
     if isinstance(exc, WorkflowEpisodeLeaseFencedError):
         return HTTPException(status_code=409, detail=str(exc))

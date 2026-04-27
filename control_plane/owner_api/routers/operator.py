@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,12 +10,10 @@ from shared.common.models import RuntimeNodeSnapshot
 from eirel.groups import ensure_active_family_id
 from control_plane.owner_api.dependencies import (
     post_execution_worker_action,
-    post_weight_setter_action,
     require_internal_service_token,
 )
 from control_plane.owner_api.managed import ManagedOwnerServices
 from control_plane.owner_api.schemas import (
-    ChainWeightsPublishRequest,
     RolloutFreezeRequest,
     RuntimeRemediationPolicyRequest,
     RuntimeRemediationRequest,
@@ -672,76 +669,6 @@ async def operator_retire_serving_deployment(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     await services.reconcile_runtime_pool(family_id=serving.family_id)
     return services.serving_deployment_payload(serving) or {}
-
-
-@router.post("/v1/operators/chain-weights/publish")
-async def operator_chain_weights_publish(
-    request: Request,
-    payload: ChainWeightsPublishRequest,
-) -> dict[str, Any]:
-    require_internal_service_token(request)
-    services: ManagedOwnerServices = request.app.state.services
-    with services.db.sessionmaker() as session:
-        try:
-            build_inputs = services.build_chain_weight_inputs(
-                session, run_id=payload.run_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    publication_batch_id = str(uuid.uuid4())
-    results: list[dict[str, Any]] = []
-    for family in build_inputs.get("families", []):
-        result = await post_weight_setter_action(
-            request,
-            path="/v1/weights/submit",
-            payload={
-                "submission_mode": payload.submission_mode,
-                "snapshot": family.get("snapshot"),
-                "family_id": family["family_id"],
-                "publication_batch_id": publication_batch_id,
-            },
-        )
-        results.append({
-            "family_id": family["family_id"],
-            **result,
-        })
-
-    all_ok = all(r.get("ok", False) for r in results)
-    status = "published" if all_ok else "partial_failure"
-
-    with services.db.sessionmaker() as session:
-        services.update_chain_publication_state(
-            session,
-            values={
-                "latest_run_id": build_inputs["run_id"],
-                "latest_publication_batch_id": publication_batch_id,
-                "latest_build_inputs": build_inputs,
-                "latest_publication_status": status,
-                "latest_submission_mode": payload.submission_mode,
-                "latest_weight_setter_results": results,
-                "latest_published_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
-            },
-        )
-        session.commit()
-
-    return {
-        "status": status,
-        "publication_batch_id": publication_batch_id,
-        "build_inputs": build_inputs,
-        "results": results,
-    }
-
-
-@router.get("/v1/operators/chain-weights/status")
-async def operator_chain_weights_status(
-    request: Request,
-    run_id: str | None = Query(default=None),
-) -> dict[str, Any]:
-    require_internal_service_token(request)
-    services: ManagedOwnerServices = request.app.state.services
-    with services.db.sessionmaker() as session:
-        return services.chain_publication_state_payload(session)
 
 
 @router.get("/v1/operators/runtime-status")
