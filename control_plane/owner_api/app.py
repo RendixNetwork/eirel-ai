@@ -74,11 +74,11 @@ class RawBodyCaptureMiddleware:
             await self.app(scope, receive, send)
             return
         body = b""
-        disconnected = False
+        early_disconnect_message: Message | None = None
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
-                disconnected = True
+                early_disconnect_message = message
                 break
             body += message.get("body", b"")
             if len(body) > _MAX_REQUEST_BODY:
@@ -98,14 +98,23 @@ class RawBodyCaptureMiddleware:
         delivered = False
 
         async def replay_receive() -> Message:
-            nonlocal delivered, disconnected
+            """Replay the captured body, then transparently forward.
+
+            After the body has been replayed, fall back to the real
+            ``receive`` so the inner app (typically FastAPI's
+            StreamingResponse) can poll for genuine ``http.disconnect``
+            events. The previous implementation synthesised a disconnect
+            on every post-body call, which FastAPI interpreted as the
+            client going away and used to abort the response — breaking
+            any streaming endpoint that awaited between yields.
+            """
+            nonlocal delivered
             if not delivered:
                 delivered = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            if disconnected:
-                return {"type": "http.disconnect"}
-            disconnected = True
-            return {"type": "http.disconnect"}
+            if early_disconnect_message is not None:
+                return early_disconnect_message
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 
