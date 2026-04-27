@@ -75,6 +75,15 @@ class LeaderboardEntry(BaseModel):
     rank: int
     hotkey: str
     hotkey_short: str
+    # Agent identity surfaced from the submission's manifest.yaml. Lets
+    # miners search by their own project name instead of memorising a
+    # hotkey, and lets observers tell agents apart at a glance.
+    agent_name: str | None = None
+    agent_version: str | None = None
+    # SHA-256 of the submission tarball as the subnet stored it. Miners
+    # can `sha256sum` their local archive and compare to confirm the
+    # subnet is running an unmodified copy of what they uploaded.
+    artifact_sha256: str | None = None
     raw_score: float
     normalized_score: float | None
     is_serving_winner: bool

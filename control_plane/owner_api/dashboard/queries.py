@@ -289,12 +289,29 @@ def _collect_single_run_rows(
             )
             .group_by(TaskMinerResult.miner_hotkey)
         ).all()
+        # Resolve each live miner's currently-active deployment so the
+        # leaderboard can surface the agent name + artifact sha for the
+        # submission that is actually being benchmarked right now.
+        live_hotkeys = [r.miner_hotkey for r in rows if (r.task_count or 0) > 0]
+        submission_by_hk: dict[str, str] = {}
+        if live_hotkeys:
+            for dep in session.execute(
+                select(ManagedDeployment)
+                .where(
+                    ManagedDeployment.family_id == family_id,
+                    ManagedDeployment.miner_hotkey.in_(live_hotkeys),
+                    ManagedDeployment.status != "retired",
+                )
+                .order_by(ManagedDeployment.created_at.desc())
+            ).scalars():
+                submission_by_hk.setdefault(dep.miner_hotkey, dep.submission_id)
         return [
             {
                 "miner_hotkey": r.miner_hotkey,
                 "raw_score": float(r.raw_score or 0.0),
                 "normalized_score": None,
                 "is_running": True,
+                "submission_id": submission_by_hk.get(r.miner_hotkey),
             }
             for r in rows
             if (r.task_count or 0) > 0
@@ -312,9 +329,37 @@ def _collect_single_run_rows(
             "raw_score": float(rec.raw_score),
             "normalized_score": float(rec.normalized_score),
             "is_running": False,
+            "submission_id": rec.submission_id,
         }
         for rec in records
     ]
+
+
+def _resolve_submission_metadata(
+    session: Session, submission_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Batch-load agent name/version + archive sha256 by submission id.
+
+    Surfaced on the leaderboard so miners can spot-check that the artifact
+    the subnet is running for them matches their local sha (reproducibility
+    + tamper detection).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not submission_ids:
+        return out
+    for sub in session.execute(
+        select(ManagedMinerSubmission).where(
+            ManagedMinerSubmission.id.in_(submission_ids)
+        )
+    ).scalars():
+        manifest = sub.manifest_json or {}
+        agent = manifest.get("agent") or {}
+        out[sub.id] = {
+            "agent_name": agent.get("name") if isinstance(agent, dict) else None,
+            "agent_version": agent.get("version") if isinstance(agent, dict) else None,
+            "artifact_sha256": sub.archive_sha256,
+        }
+    return out
 
 
 def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -432,15 +477,24 @@ def fetch_leaderboard(
         ).all()
     )
 
+    submission_ids = [
+        row["submission_id"] for row in ranked if row.get("submission_id")
+    ]
+    submission_meta = _resolve_submission_metadata(session, submission_ids)
+
     entries: list[LeaderboardEntry] = []
     for row in ranked:
         hk = row["miner_hotkey"]
         prev = prev_ranks.get(hk)
+        meta = submission_meta.get(row.get("submission_id") or "", {})
         entries.append(
             LeaderboardEntry(
                 rank=row["rank"],
                 hotkey=hk,
                 hotkey_short=shorten_hotkey(hk),
+                agent_name=meta.get("agent_name"),
+                agent_version=meta.get("agent_version"),
+                artifact_sha256=meta.get("artifact_sha256"),
                 raw_score=row["raw_score"],
                 normalized_score=row.get("normalized_score"),
                 is_serving_winner=(hk == winner_hk),
