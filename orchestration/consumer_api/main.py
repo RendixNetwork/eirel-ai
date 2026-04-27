@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 from pydantic import BaseModel, Field
 
@@ -20,7 +20,7 @@ from shared.common.http_control import (
 )
 from shared.common.models import ConsumerSessionState, TaskRequestRecord
 from shared.common.tracing import init_tracing, get_tracer
-from orchestration.consumer_api.chat import route_chat_request
+from orchestration.consumer_api.chat import route_chat_request, stream_chat_request
 
 init_tracing("consumer-chat-api")
 _tracer = get_tracer(__name__)
@@ -104,6 +104,43 @@ async def chat(payload: ChatRequest, caller_identity: str = Depends(_request_gua
             status_code, response_payload = 200, response
         span.set_attribute("chat.status_code", status_code)
         return JSONResponse(status_code=status_code, content=response_payload)
+
+
+@app.post("/v1/chat/stream")
+async def chat_stream(
+    payload: ChatRequest,
+    caller_identity: str = Depends(_request_guard),
+):
+    """Server-Sent Events streaming chat.
+
+    Resolves the current serving miner for the chat family and proxies
+    the miner's `/v1/agent/infer/stream` NDJSON back to the browser as
+    SSE. Falls back to the unary endpoint for older miners (eirel SDK
+    < 0.2.3) and emits the answer as a single delta+done so the client
+    UX is identical regardless of miner SDK version.
+
+    Event types (matches eirel.schemas.StreamChunk):
+      - started     : task_id + family_id (stream metadata)
+      - delta       : `{text: "next slice"}`
+      - tool_call   : `{tool_call: {...}}`
+      - citation    : `{citation: {url, title}}`
+      - done        : terminal; carries final output + citations + status
+      - error       : terminal failure with `{message}`
+    """
+    del caller_identity
+    return StreamingResponse(
+        stream_chat_request(
+            prompt=payload.prompt,
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            context_history=payload.context_history,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",  # disable nginx buffering for SSE
+        },
+    )
 
 
 @app.get("/v1/tasks/{task_id}")

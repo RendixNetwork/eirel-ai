@@ -121,6 +121,7 @@ services:
     environment:
       CONSUMER_API_KEYS: ${CONSUMER_API_KEYS:-staging-consumer-key}
       ORCHESTRATOR_URL: http://orchestrator:8050
+      EIREL_CONSUMER_CHAT_MINER_OVERRIDE_ENDPOINT: ${EIREL_CONSUMER_CHAT_MINER_OVERRIDE_ENDPOINT:-}
     depends_on:
       - orchestrator
     ports:
