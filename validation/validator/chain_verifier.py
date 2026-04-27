@@ -41,7 +41,12 @@ def verify_weights_on_chain(
 
     for attempt in range(1, max_poll_attempts + 1):
         try:
-            metagraph = subtensor.metagraph(netuid=netuid, lite=True)
+            # lite=False is required: the weight matrix ``W`` is not included
+            # in the lite metagraph snapshot, so indexing ``W[validator_uid]``
+            # would hit an empty array. Verification runs at most every
+            # EIREL_WEIGHT_SET_INTERVAL_BLOCKS (~36 min), so the extra
+            # bandwidth for the full metagraph is negligible.
+            metagraph = subtensor.metagraph(netuid=netuid, lite=False)
             # Find the uid of the validator hotkey.
             uid_by_hotkey = {str(hk): uid for uid, hk in enumerate(metagraph.hotkeys)}
             validator_uid = uid_by_hotkey.get(wallet_hotkey)

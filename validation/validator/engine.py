@@ -324,12 +324,19 @@ _MIN_STAKE_TO_SET_WEIGHTS = int(os.getenv("EIREL_MIN_STAKE_TO_SET_WEIGHTS", "500
 
 
 async def run_weight_setting_loop() -> None:
-    """Background loop: poll owner-api for weights, set on-chain every ~180 blocks.
+    """Background loop: poll owner-api for weights, set on-chain every cycle.
 
-    The owner-api returns ``{hotkey: weight}`` for family winners.
-    This loop syncs the metagraph to resolve hotkey→UID, assigns
-    unallocated family weight to UID 0 (to burn alpha), and calls
-    ``set_weights()`` with retry, circuit breaker, and chain verification.
+    Cadence is configurable via ``EIREL_WEIGHT_SET_INTERVAL_BLOCKS``
+    (default 180 blocks ≈ 36 minutes). On each tick we re-publish the
+    current target-run winners even if the target run hasn't changed
+    since the last publication — Bittensor expects a ``set_weights``
+    every window to keep vtrust from decaying.
+
+    The owner-api's ``/v1/weights`` returns ``{hotkey: weight}`` for the
+    latest *completed* run (run-(N-1) while run N is in progress). This
+    loop syncs the metagraph to resolve hotkey→UID, assigns unallocated
+    family weight to UID 0 (to burn alpha), and calls ``set_weights()``
+    with retry, circuit breaker, and chain verification.
     """
     import asyncio
     import time as _time
@@ -349,7 +356,6 @@ async def run_weight_setting_loop() -> None:
     _cb_recovery_timeout = 120.0
     _consecutive_failures = 0
     _circuit_opened_at: float = 0.0
-    _last_published_run_id: str | None = None
 
     logger.info(
         "weight-setting loop starting: interval=%d blocks (~%ds) network=%s netuid=%d",
@@ -398,19 +404,20 @@ async def run_weight_setting_loop() -> None:
                 family_winners: list[dict[str, Any]] = []
             else:
                 if not data.get("ready"):
+                    # No completed run yet; nothing to publish. Skipping here
+                    # is fine because the chain hasn't started expecting
+                    # weights from us.
                     logger.info("weight-setting: no weights ready, sleeping")
                     await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
                     continue
 
                 current_run_id = data.get("run_id")
-                if current_run_id and current_run_id == _last_published_run_id:
-                    logger.info(
-                        "weight-setting: run %s already published, skipping",
-                        current_run_id,
-                    )
-                    await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
-                    continue
-
+                # Bittensor expects set_weights every ~180 blocks regardless
+                # of whether the target run id or winner set repeats — missing
+                # a window decays vtrust. The owner-api's /v1/weights already
+                # returns the latest completed run (run-(N-1) while run N is
+                # open), so we just re-publish the same weights each cycle
+                # until a newer run completes. Do NOT dedup on run_id here.
                 weights_by_hotkey = data.get("weights", {})
                 family_winners = data.get("family_winners", [])
 
@@ -544,7 +551,6 @@ async def run_weight_setting_loop() -> None:
 
             # Reset circuit breaker on success
             _consecutive_failures = 0
-            _last_published_run_id = current_run_id
             _metrics.validator_loop_last_success_timestamp_seconds.labels(
                 loop_name="weight_setter"
             ).set_to_current_time()
