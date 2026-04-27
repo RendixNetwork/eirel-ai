@@ -181,6 +181,13 @@ services:
       EIREL_TAVILY_API_KEY: ${EIREL_TAVILY_API_KEY:-}
       EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS: ${EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS:-10.0}
       EIREL_WEB_SEARCH_MOCK: ${EIREL_WEB_SEARCH_MOCK:-false}
+      # Per-job request budget. The miner deliberately uses a sticky
+      # job_id (miner-<deployment_id>) for cost attribution on the
+      # provider-proxy, so a single deployment's ledger never resets over
+      # its lifetime. The previous default of 12 exhausted within the
+      # first run's worth of web-search calls and every subsequent
+      # request 429'd permanently until the container restarted.
+      EIREL_WEB_SEARCH_TOOL_DEFAULT_MAX_REQUESTS: ${EIREL_WEB_SEARCH_TOOL_DEFAULT_MAX_REQUESTS:-10000}
       REDIS_URL: ${REDIS_URL}
     depends_on:
       redis:
