@@ -286,3 +286,147 @@ async def test_fastapi_orchestrate_endpoint():
             data = resp.json()
             assert "request_id" in data
             assert data["status"] in ("completed", "partial")
+
+
+# ---------------------------------------------------------------------------
+# /v1/orchestrate/chat/stream
+# ---------------------------------------------------------------------------
+
+
+async def test_chat_stream_persists_session_toggles_and_proxies_ndjson(
+    monkeypatch, tmp_path,
+):
+    """End-to-end: orchestrator persists mode/web_search on the session
+    row and proxies the miner pod's NDJSON back to the caller."""
+    import json as _json
+    from orchestration.orchestrator import chat_stream as cs
+    from orchestration.orchestrator.main import app
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/cs.db")
+
+    # Stub the serving-deployment lookup so the test doesn't need a live
+    # owner-api. Force the new env override path so we don't need to
+    # mock owner-api at all.
+    monkeypatch.setenv(
+        "EIREL_ORCHESTRATOR_MINER_OVERRIDE_ENDPOINT",
+        "http://miner.local",
+    )
+
+    body = (
+        _json.dumps({"event": "delta", "text": "hello"}) + "\n"
+        + _json.dumps({
+            "event": "done",
+            "status": "completed",
+            "output": {"answer": "hello"},
+            "citations": [],
+        }) + "\n"
+    ).encode("utf-8")
+
+    class _Transport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.bodies: list[dict] = []
+
+        async def handle_async_request(self, request):
+            self.calls.append(request.url.path)
+            try:
+                self.bodies.append(_json.loads(request.content or b"{}"))
+            except Exception:
+                self.bodies.append({})
+            if request.url.path.endswith("/v1/agent/infer/stream"):
+                return httpx.Response(
+                    200, content=body,
+                    headers={"content-type": "application/x-ndjson"},
+                )
+            return httpx.Response(404)
+
+    transport = _Transport()
+    original = cs.httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cs.httpx, "AsyncClient", _patched)
+
+    async with app.router.lifespan_context(app):
+        asgi = ASGITransport(app=app)
+        async with AsyncClient(transport=asgi, base_url="http://test") as client:
+            # First turn: set mode=thinking + web_search=True; orchestrator
+            # should persist these on the session row.
+            resp = await client.post(
+                "/v1/orchestrate/chat/stream",
+                json={
+                    "prompt": "hi",
+                    "user_id": "u1",
+                    "session_id": "sess-A",
+                    "mode": "thinking",
+                    "web_search": True,
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("application/x-ndjson")
+            lines = [ln for ln in resp.content.decode("utf-8").split("\n") if ln.strip()]
+            chunks = [_json.loads(ln) for ln in lines]
+            assert chunks[0]["event"] == "started"
+            assert chunks[0]["metadata"]["session_id"] == "sess-A"
+            assert chunks[0]["metadata"]["mode"] == "thinking"
+            assert chunks[0]["metadata"]["web_search"] is True
+            assert chunks[-1]["event"] == "done"
+            assert chunks[-1]["status"] == "completed"
+
+            # The body sent to the miner carries the slim contract.
+            miner_body = transport.bodies[0]
+            assert miner_body["prompt"] == "hi"
+            assert miner_body["mode"] == "thinking"
+            assert miner_body["web_search"] is True
+
+            # Second turn for the same session without explicit toggles —
+            # orchestrator must reuse the persisted values.
+            resp2 = await client.post(
+                "/v1/orchestrate/chat/stream",
+                json={"prompt": "follow up", "user_id": "u1", "session_id": "sess-A"},
+            )
+            assert resp2.status_code == 200
+            chunks2 = [
+                _json.loads(ln)
+                for ln in resp2.content.decode("utf-8").split("\n")
+                if ln.strip()
+            ]
+            started2 = chunks2[0]
+            assert started2["metadata"]["mode"] == "thinking"
+            assert started2["metadata"]["web_search"] is True
+
+
+async def test_chat_stream_emits_done_failed_when_no_serving_deployment(
+    monkeypatch, tmp_path,
+):
+    """If owner-api has no serving deployment for the family and no
+    override is set, the orchestrator must still close the stream with
+    a terminal ``done/failed`` chunk so the consumer-api facade can
+    render an error UI."""
+    import json as _json
+    from orchestration.orchestrator import chat_stream as cs
+    from orchestration.orchestrator.main import app
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/cs.db")
+    monkeypatch.delenv("EIREL_ORCHESTRATOR_MINER_OVERRIDE_ENDPOINT", raising=False)
+
+    async def _no_serving(family_id):
+        return None
+
+    monkeypatch.setattr(cs, "_resolve_serving_endpoint", _no_serving)
+
+    async with app.router.lifespan_context(app):
+        asgi = ASGITransport(app=app)
+        async with AsyncClient(transport=asgi, base_url="http://test") as client:
+            resp = await client.post(
+                "/v1/orchestrate/chat/stream",
+                json={"prompt": "hi"},
+            )
+            assert resp.status_code == 200
+            lines = [ln for ln in resp.content.decode("utf-8").split("\n") if ln.strip()]
+            chunks = [_json.loads(ln) for ln in lines]
+            assert chunks[-1]["event"] == "done"
+            assert chunks[-1]["status"] == "failed"
+            assert "no serving deployment" in chunks[-1]["error"]

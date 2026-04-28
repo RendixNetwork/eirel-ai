@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import time
-import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -18,14 +17,9 @@ from shared.common.config import get_settings
 _logger = logging.getLogger(__name__)
 _orchestrator_circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
 
-OWNER_API_URL = os.getenv("OWNER_API_URL", "http://owner-api:8000")
-INTERNAL_SERVICE_TOKEN = os.getenv("EIREL_INTERNAL_SERVICE_TOKEN", "")
-# Default family for the consumer chat surface. The streaming endpoint
-# resolves a serving miner for this family from owner-api and proxies its
-# /v1/agent/infer/stream NDJSON back to the client as SSE.
-_CHAT_FAMILY_ID = os.getenv("EIREL_CONSUMER_CHAT_FAMILY", "general_chat")
-# Total wall-clock budget for a streaming chat. Should clear the slowest
-# acceptable miner completion (thinking mode = 600s today).
+# Total wall-clock budget for a streaming chat. The orchestrator's
+# upstream budget is the same; we set an envelope here so the consumer
+# connection times out around the same time the orchestrator gives up.
 _CHAT_STREAM_TIMEOUT_SECONDS = float(
     os.getenv("EIREL_CONSUMER_CHAT_STREAM_TIMEOUT_SECONDS", "660")
 )
@@ -127,46 +121,12 @@ async def route_chat_request(
     return response.status_code, response.json()
 
 
-async def _resolve_serving_miner(family_id: str) -> dict[str, Any] | None:
-    """Fetch the current winner miner for a family from owner-api.
-
-    Resolution order:
-      1. `EIREL_CONSUMER_CHAT_MINER_OVERRIDE_ENDPOINT` env (test/debug
-         override — bypasses owner-api entirely).
-      2. `/v1/internal/serving/{family_id}` (production: a published
-         serving release).
-      3. `/v1/internal/managed-deployments/active/{family_id}` (fallback:
-         any healthy active managed deployment, useful before the first
-         serving release of a run is published).
-    """
-    override = os.getenv("EIREL_CONSUMER_CHAT_MINER_OVERRIDE_ENDPOINT", "").strip()
-    if override:
-        return {"endpoint": override, "hotkey": "override", "family_id": family_id}
-
-    headers: dict[str, str] = {}
-    if INTERNAL_SERVICE_TOKEN:
-        headers["Authorization"] = f"Bearer {INTERNAL_SERVICE_TOKEN}"
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for path in (
-            f"/v1/internal/serving/{family_id}",
-            f"/v1/internal/managed-deployments/active/{family_id}",
-        ):
-            try:
-                resp = await client.get(f"{OWNER_API_URL}{path}", headers=headers)
-                if resp.status_code == 404:
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("endpoint"):
-                    return data
-            except Exception as exc:  # noqa: BLE001
-                _logger.error(
-                    "failed to resolve miner via %s for %s: %s",
-                    path, family_id, exc,
-                )
-                continue
-    return None
+# consumer-chat-api is now a thin SSE facade. Resolving the
+# serving deployment, building the slim invocation body, and proxying
+# NDJSON from the family pod all live in the orchestrator now. This
+# module only translates between consumer-chat-api's SSE surface and
+# the orchestrator's NDJSON streaming endpoint.
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://orchestrator:8050")
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> bytes:
@@ -188,100 +148,56 @@ async def stream_chat_request(
     user_id: str = "anonymous",
     session_id: str | None = None,
     context_history: list[dict[str, Any]] | None = None,
+    mode: str = "instant",
+    web_search: bool = False,
 ) -> AsyncIterator[bytes]:
-    """Stream a chat response as SSE.
+    """Stream a chat response as SSE — thin facade in front of the orchestrator.
 
-    1. Resolve the current serving miner for the chat family from owner-api.
-    2. POST to that miner's `/v1/agent/infer/stream` (NDJSON, eirel SDK ≥ 0.2.3).
-    3. Re-emit each NDJSON chunk as an SSE event with the chunk's `event`
-       name (`delta`/`citation`/`tool_call`/`done`). Falls back to the
-       unary endpoint on 404 and emits the whole answer as a single
-       `delta` followed by `done` so the client UX is identical.
+    Forwards to the orchestrator's ``/v1/orchestrate/chat/stream`` and
+    re-emits each NDJSON ``StreamChunk`` as an SSE event with the
+    chunk's ``event`` name (``started`` / ``delta`` / ``citation`` /
+    ``tool_call`` / ``done``). The orchestrator owns:
 
-    Errors emit a final `error` SSE event then close the stream.
+      * session state (mode + web_search persistence),
+      * routing to the right family (today: passthrough to
+        ``general_chat``; later: DAG composition across families),
+      * miner resolution + NDJSON proxy.
+
+    A network failure to the orchestrator emits a terminal ``error``
+    SSE event then closes the stream.
     """
-    task_id = session_id or f"chat-{uuid.uuid4().hex[:12]}"
-    yield _sse_event("started", {"task_id": task_id, "family_id": _CHAT_FAMILY_ID})
-
-    miner = await _resolve_serving_miner(_CHAT_FAMILY_ID)
-    if miner is None:
-        yield _sse_event("error", {
-            "message": f"no serving miner available for family {_CHAT_FAMILY_ID}",
-        })
-        return
-
     body = {
-        "task_id": task_id,
-        "family_id": _CHAT_FAMILY_ID,
-        "primary_goal": prompt,
-        "subtask": prompt,
-        "inputs": {},
+        "prompt": prompt,
+        "user_id": user_id,
+        "session_id": session_id,
         "context_history": context_history or [],
-        "metadata": {"user_id": user_id, "session_id": session_id},
+        "mode": mode,
+        "web_search": bool(web_search),
     }
-    headers = {"Content-Type": "application/json"}
-    endpoint = miner["endpoint"].rstrip("/")
-    stream_url = f"{endpoint}/v1/agent/infer/stream"
-    unary_url = f"{endpoint}/v1/agent/infer"
 
     start = time.monotonic()
-    used_stream = True
     final_status = "completed"
+    forward_url = f"{ORCHESTRATOR_URL.rstrip('/')}/v1/orchestrate/chat/stream"
 
     try:
         async with httpx.AsyncClient(timeout=_CHAT_STREAM_TIMEOUT_SECONDS) as client:
-            try:
-                async with client.stream(
-                    "POST", stream_url, json=body, headers=headers,
-                ) as resp:
-                    if resp.status_code == 404:
-                        used_stream = False
-                    else:
-                        resp.raise_for_status()
-                        async for line in resp.aiter_lines():
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                chunk = json.loads(line)
-                            except json.JSONDecodeError:
-                                _logger.warning(
-                                    "malformed NDJSON from miner: %r", line[:120],
-                                )
-                                continue
-                            event = chunk.get("event") or "delta"
-                            if event == "done":
-                                final_status = chunk.get("status") or "completed"
-                            yield _sse_event(event, chunk)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 404:
-                    raise
-                used_stream = False
-
-            if not used_stream:
-                # Older miners on eirel SDK < 0.2.3 — assemble a single
-                # delta + done from the unary response so the client sees
-                # the same SSE shape.
-                resp = await client.post(unary_url, json=body, headers=headers)
+            async with client.stream("POST", forward_url, json=body) as resp:
                 resp.raise_for_status()
-                payload = resp.json() if resp.content else {}
-                output = payload.get("output") or {}
-                text = ""
-                for key in ("answer", "response", "text", "content", "message"):
-                    value = output.get(key)
-                    if isinstance(value, str) and value:
-                        text = value
-                        break
-                if text:
-                    yield _sse_event("delta", {"event": "delta", "text": text})
-                yield _sse_event("done", {
-                    "event": "done",
-                    "output": output,
-                    "citations": payload.get("citations") or [],
-                    "tool_calls": payload.get("tool_calls") or [],
-                    "status": payload.get("status") or "completed",
-                })
-                final_status = payload.get("status") or "completed"
+                async for line in resp.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        _logger.warning(
+                            "malformed NDJSON from orchestrator: %r", line[:120],
+                        )
+                        continue
+                    event = chunk.get("event") or "delta"
+                    if event == "done":
+                        final_status = chunk.get("status") or "completed"
+                    yield _sse_event(event, chunk)
     except Exception as exc:  # noqa: BLE001
         _logger.exception("stream_chat_request failed: %s", exc)
         yield _sse_event("error", {"message": str(exc)})

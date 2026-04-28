@@ -182,24 +182,24 @@ def _parse_sse(body: bytes) -> list[tuple[str, dict]]:
 
 
 async def test_chat_stream_proxies_ndjson_as_sse(consumer_env, monkeypatch):
-    """Happy path: serving miner returns NDJSON stream → consumer-api re-emits as SSE."""
+    """consumer-chat-api forwards to the orchestrator and
+    re-emits NDJSON StreamChunks as SSE events. The orchestrator now owns
+    miner resolution and the family-agent body shape; this test only
+    exercises the SSE translation layer.
+    """
     import json as _json
 
-    async def _fake_resolve(family_id):
-        return {"endpoint": "http://miner.local", "hotkey": "hk"}
-
-    monkeypatch.setattr(
-        "orchestration.consumer_api.chat._resolve_serving_miner", _fake_resolve,
-    )
-
     ndjson_body = (
-        _json.dumps({"event": "delta", "text": "Hello "}) + "\n"
+        _json.dumps({
+            "event": "started",
+            "metadata": {"session_id": "s-1", "family_id": "general_chat"},
+        }) + "\n"
+        + _json.dumps({"event": "delta", "text": "Hello "}) + "\n"
         + _json.dumps({"event": "delta", "text": "world"}) + "\n"
         + _json.dumps({
             "event": "done",
             "output": {"answer": "Hello world"},
             "citations": [],
-            "tool_calls": [],
             "status": "completed",
         }) + "\n"
     ).encode("utf-8")
@@ -245,37 +245,70 @@ async def test_chat_stream_proxies_ndjson_as_sse(consumer_env, monkeypatch):
         deltas = [e[1].get("text", "") for e in events if e[0] == "delta"]
         assert "".join(deltas) == "Hello world"
 
-        # Stream URL was hit (not the unary fallback).
-        assert any(p.endswith("/v1/agent/infer/stream") for p in transport.calls)
+        # consumer-api hit the orchestrator's chat-stream route.
+        assert any(
+            p.endswith("/v1/orchestrate/chat/stream") for p in transport.calls
+        )
 
 
-async def test_chat_stream_falls_back_to_unary_on_404(consumer_env, monkeypatch):
-    """Older miners on eirel SDK <0.2.3 lack the stream route — consumer-api
-    falls back to the unary endpoint and emits the answer as one delta+done
-    so the client UX is unchanged."""
-
-    async def _fake_resolve(family_id):
-        return {"endpoint": "http://miner.local", "hotkey": "hk"}
-
-    monkeypatch.setattr(
-        "orchestration.consumer_api.chat._resolve_serving_miner", _fake_resolve,
-    )
+async def test_chat_stream_emits_error_when_orchestrator_unreachable(
+    consumer_env, monkeypatch,
+):
+    """If the orchestrator is down or returns 5xx, consumer-api emits a
+    terminal SSE ``error`` event so the browser closes cleanly instead
+    of hanging on a half-open response."""
 
     class _Transport(httpx.AsyncBaseTransport):
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
         async def handle_async_request(self, request):
-            self.calls.append(request.url.path)
-            if request.url.path.endswith("/stream"):
-                return httpx.Response(404, text="not found")
+            return httpx.Response(503, text="orchestrator unavailable")
+
+    transport = _Transport()
+
+    import orchestration.consumer_api.chat as chat_mod
+    original = chat_mod.httpx.AsyncClient
+
+    def _patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chat_mod.httpx, "AsyncClient", _patched)
+
+    async for client in _make_client():
+        resp = await client.post(
+            "/v1/chat/stream",
+            json={"prompt": "hi"},
+            headers={"X-API-Key": "test-key-1"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.content)
+        names = [e[0] for e in events]
+        assert names[-1] == "error"
+        err = next(e[1] for e in events if e[0] == "error")
+        assert "503" in err["message"] or "Server error" in err["message"]
+
+
+async def test_chat_stream_emits_error_when_orchestrator_returns_done_failed(
+    consumer_env, monkeypatch,
+):
+    """If the orchestrator emits a terminal ``done`` chunk with
+    ``status: failed`` (e.g. no serving family is available), the
+    consumer-api passes it through verbatim — clients can decide
+    whether to render it as an error UI or retry."""
+    import json as _json
+
+    body = (
+        _json.dumps({
+            "event": "done",
+            "status": "failed",
+            "error": "no serving deployment available for family general_chat",
+        }) + "\n"
+    ).encode("utf-8")
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
             return httpx.Response(
-                200, json={
-                    "status": "completed",
-                    "output": {"answer": "legacy reply"},
-                    "citations": [],
-                    "tool_calls": [],
-                },
+                200, content=body,
+                headers={"content-type": "application/x-ndjson"},
             )
 
     transport = _Transport()
@@ -298,36 +331,9 @@ async def test_chat_stream_falls_back_to_unary_on_404(consumer_env, monkeypatch)
         assert resp.status_code == 200
         events = _parse_sse(resp.content)
         names = [e[0] for e in events]
-        assert names == ["started", "delta", "done"]
-        delta_text = events[1][1].get("text")
-        assert delta_text == "legacy reply"
-        # Hit stream first (404), then unary.
-        assert transport.calls[0].endswith("/v1/agent/infer/stream")
-        assert transport.calls[1].endswith("/v1/agent/infer")
-
-
-async def test_chat_stream_emits_error_when_no_serving_miner(
-    consumer_env, monkeypatch,
-):
-    async def _fake_resolve(family_id):
-        return None
-
-    monkeypatch.setattr(
-        "orchestration.consumer_api.chat._resolve_serving_miner", _fake_resolve,
-    )
-
-    async for client in _make_client():
-        resp = await client.post(
-            "/v1/chat/stream",
-            json={"prompt": "hi"},
-            headers={"X-API-Key": "test-key-1"},
-        )
-        assert resp.status_code == 200
-        events = _parse_sse(resp.content)
-        names = [e[0] for e in events]
-        assert "error" in names
-        err = next(e[1] for e in events if e[0] == "error")
-        assert "no serving miner" in err["message"]
+        assert names[-1] == "done"
+        done_payload = events[-1][1]
+        assert done_payload.get("status") == "failed"
 
 
 async def test_chat_stream_requires_api_key(consumer_env):

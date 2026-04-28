@@ -31,6 +31,10 @@ class ChatRequest(BaseModel):
     user_id: str = Field(default="anonymous", max_length=64)
     session_id: str | None = Field(default=None, max_length=128)
     context_history: list[dict] = Field(default_factory=list, max_length=50)
+    # Per-session toggles. Persisted on the session row in the
+    # orchestrator (consumer-chat-api forwards them as-is).
+    mode: str = Field(default="instant", pattern="^(instant|thinking)$")
+    web_search: bool = Field(default=False)
 
 
 @asynccontextmanager
@@ -134,6 +138,8 @@ async def chat_stream(
             user_id=payload.user_id,
             session_id=payload.session_id,
             context_history=payload.context_history,
+            mode=payload.mode,
+            web_search=payload.web_search,
         ),
         media_type="text/event-stream",
         headers={

@@ -374,6 +374,23 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         apply=lambda engine: _migration_drop_miner_first_token_seconds(engine),
     ),
+    Migration(
+        version="add_session_mode_web_search",
+        description=(
+            "Persist per-session user toggles (mode, web_search) on "
+            "consumer_sessions so the orchestrator can apply them on every "
+            "turn without the client re-asserting them. Owned by the "
+            "orchestrator now that consumer-chat-api is a thin facade."
+        ),
+        apply=lambda engine: _migration_add_session_mode_web_search(engine),
+    ),
+    Migration(
+        version="add_proxy_and_judge_cost_to_task_miner_results",
+        description=(
+            "Add proxy_cost_usd + judge_cost_usd to task_miner_results"
+        ),
+        apply=lambda engine: _migration_add_proxy_and_judge_cost(engine),
+    ),
 )
 
 
@@ -416,6 +433,42 @@ def _migration_drop_miner_first_token_seconds(engine: Engine) -> None:
         conn.execute(text(
             "ALTER TABLE task_miner_results DROP COLUMN miner_first_token_seconds"
         ))
+
+
+def _migration_add_session_mode_web_search(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "consumer_sessions" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("consumer_sessions")}
+    with engine.begin() as conn:
+        if "mode" not in cols:
+            conn.execute(text(
+                "ALTER TABLE consumer_sessions "
+                "ADD COLUMN mode VARCHAR(16) NOT NULL DEFAULT 'instant'"
+            ))
+        if "web_search" not in cols:
+            conn.execute(text(
+                "ALTER TABLE consumer_sessions "
+                "ADD COLUMN web_search BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+
+
+def _migration_add_proxy_and_judge_cost(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "task_miner_results" not in set(inspector.get_table_names()):
+        return
+    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
+    with engine.begin() as conn:
+        if "proxy_cost_usd" not in cols:
+            conn.execute(text(
+                "ALTER TABLE task_miner_results "
+                "ADD COLUMN proxy_cost_usd FLOAT NOT NULL DEFAULT 0.0"
+            ))
+        if "judge_cost_usd" not in cols:
+            conn.execute(text(
+                "ALTER TABLE task_miner_results "
+                "ADD COLUMN judge_cost_usd FLOAT NOT NULL DEFAULT 0.0"
+            ))
 
 
 def _drop_registered_neurons_is_active(engine: Engine) -> None:

@@ -480,6 +480,13 @@ class ConsumerSessionState(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     latest_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     messages_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    # Per-session user toggles, owned by the orchestrator and applied to
+    # every turn dispatched to a family agent. Persisted so the
+    # frontend can render the current state on reconnect, and so the
+    # toggles survive page reloads. Defaults match the family-side
+    # defaults (instant + no search).
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="instant")
+    web_search: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=utcnow, nullable=False
     )
