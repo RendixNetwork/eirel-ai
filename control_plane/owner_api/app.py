@@ -369,6 +369,21 @@ async def lifespan(app: FastAPI):
             treasury_address=settings.submission_treasury_address,
             fee_tao=settings.submission_fee_tao,
         )
+        # One-shot audit log so operators have a record of which chain
+        # the fee verifier is bound to. A miner who pays on a different
+        # network will hit "extrinsic not found on chain" — knowing the
+        # operator's bound network from this line lets them debug
+        # without having to read source. Goes through ``print`` (and is
+        # also emitted via ``logger`` for environments that capture it)
+        # because uvicorn's lifespan-time logger reconfig sometimes
+        # eats lifespan-emitted log records before any handler attaches.
+        _audit_msg = (
+            f"fee_verifier: bound to network={settings.bittensor_network} "
+            f"treasury={settings.submission_treasury_address} "
+            f"fee_tao={settings.submission_fee_tao:.4f}"
+        )
+        print(_audit_msg, flush=True)
+        logger.warning(_audit_msg)
     app.state.execution_worker_client_factory = None
     app.state.runtime_remediation_policy_state = {
         "enabled": bool(settings.workflow_runtime_auto_remediation_enabled),
