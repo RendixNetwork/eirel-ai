@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json as _json
 import logging
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -29,6 +31,65 @@ router = APIRouter(tags=["runtime"])
 # 660s) so a slow miner doesn't trip this before the upstream client's
 # own timeout fires.
 _STREAM_TIMEOUT_SECONDS = 660.0
+
+# Provider-proxy URL used for cost reconciliation after a miner stream
+# completes. Owner-api stamps a per-task ``X-Eirel-Job-Id`` header on
+# the way to the miner; the miner SDK forwards that as the proxy
+# job_id; provider-proxy ledgers cost per job_id; owner-api queries
+# this URL after the stream closes and injects the result into the
+# final ``done`` chunk's metadata so the validator sees per-task
+# proxy_cost_usd directly.
+_PROVIDER_PROXY_URL = os.getenv(
+    "EIREL_PROVIDER_PROXY_URL", "http://provider-proxy:8092"
+).rstrip("/")
+_PROVIDER_PROXY_TOKEN = os.getenv("EIREL_PROVIDER_PROXY_TOKEN", "")
+
+
+def _build_cost_tag(*, deployment_id: str, payload: dict[str, Any]) -> str:
+    """Stable per-task tag used as the provider-proxy job_id.
+
+    Validator-issued requests carry ``turn_id`` (slim 0.3.0 contract);
+    consumer-chat-api requests do too. Falls back to ``task_id``
+    (legacy 0.2.x) for older callers, then to deployment_id for any
+    request that has neither (e.g. orchestrator-internal probes —
+    those keep the deployment-sticky semantics they had before).
+    """
+    turn_id = payload.get("turn_id") or payload.get("task_id") or ""
+    turn_id = str(turn_id).strip()
+    if turn_id:
+        return f"task-eval={turn_id};deployment={deployment_id}"
+    return f"miner-{deployment_id}"
+
+
+async def _fetch_proxy_cost(job_id: str) -> dict[str, Any] | None:
+    """Best-effort cost lookup against provider-proxy.
+
+    Returns None on any failure — cost reporting must never break the
+    eval pipeline. Caller renders a missing dict as "cost unknown".
+    """
+    if not job_id:
+        return None
+    url = f"{_PROVIDER_PROXY_URL}/v1/jobs/{job_id}/cost"
+    headers = (
+        {"Authorization": f"Bearer {_PROVIDER_PROXY_TOKEN}"}
+        if _PROVIDER_PROXY_TOKEN
+        else {}
+    )
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 404:
+                # No ledger entry — miner didn't make any LLM calls
+                # under that job_id (or didn't forward the header).
+                return {"llm_cost_usd": 0.0, "tool_cost_usd": 0.0, "absent": True}
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.warning(
+            "proxy_cost lookup failed for job=%s url=%s: %s",
+            job_id, url, exc,
+        )
+        return None
 
 
 @router.get("/runtime/{deployment_id}/healthz")
@@ -422,21 +483,43 @@ async def _proxy_stream_lines_to_pod(
     *,
     pod_endpoint: str,
     payload: dict[str, Any],
+    cost_tag: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Forward the pod's NDJSON line-by-line.
 
     Each yielded chunk is one complete NDJSON frame ending with `\\n`.
-    Failures emerge as a synthetic `done` chunk so callers always see a
-    terminator they can act on.
+    Failures emerge as a synthetic ``done`` chunk so callers always see
+    a terminator they can act on.
+
+    When ``cost_tag`` is non-empty, owner-api injects it as
+    ``X-Eirel-Job-Id`` so the miner SDK forwards it to the
+    provider-proxy as the LLM-call attribution key. After the miner's
+    terminal ``done`` arrives, we look up the cost ledger for that
+    tag and merge ``{proxy_cost_usd, proxy_request_count, ...}`` into
+    the chunk's ``metadata`` before re-emitting. Cost data is the
+    server-side ground truth; miner self-report is never trusted.
     """
     url = f"{pod_endpoint.rstrip('/')}/v1/agent/infer/stream"
+    headers = {"X-Eirel-Job-Id": cost_tag} if cost_tag else {}
+    pending_done: dict[str, Any] | None = None
     try:
         async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT_SECONDS) as client:
-            async with client.stream("POST", url, json=payload) as resp:
+            async with client.stream("POST", url, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     stripped = line.strip()
                     if not stripped:
+                        continue
+                    # Hold the terminal ``done`` chunk so we can
+                    # augment it with cost metadata before forwarding.
+                    # All non-done chunks pass through verbatim.
+                    try:
+                        parsed = _json.loads(stripped)
+                    except _json.JSONDecodeError:
+                        yield (stripped + "\n").encode("utf-8")
+                        continue
+                    if isinstance(parsed, dict) and parsed.get("event") == "done":
+                        pending_done = parsed
                         continue
                     yield (stripped + "\n").encode("utf-8")
     except httpx.HTTPStatusError as exc:
@@ -445,10 +528,33 @@ async def _proxy_stream_lines_to_pod(
             ('{"event":"done","status":"failed","error":"pod returned '
              + str(exc.response.status_code) + '"}\n').encode("utf-8")
         )
+        return
     except Exception as exc:  # noqa: BLE001
         logger.warning("stream pod connect failed for %s: %s", url, exc)
         msg = str(exc).replace('"', '\\"')
         yield ('{"event":"done","status":"failed","error":"' + msg + '"}\n').encode("utf-8")
+        return
+
+    # Stream closed cleanly. Reconcile cost from the ledger, augment
+    # ``done`` metadata, emit. If the miner never sent ``done`` (rare,
+    # malformed stream) synthesize one so the validator's wire contract
+    # is preserved.
+    if pending_done is None:
+        pending_done = {"event": "done", "status": "completed"}
+    if cost_tag:
+        cost = await _fetch_proxy_cost(cost_tag)
+        if cost is not None:
+            meta = pending_done.get("metadata")
+            if not isinstance(meta, dict):
+                meta = {}
+            meta["proxy_cost_tag"] = cost_tag
+            meta["proxy_cost_usd"] = round(float(cost.get("llm_cost_usd") or 0.0), 8)
+            meta["proxy_tool_cost_usd"] = round(
+                float(cost.get("tool_cost_usd") or 0.0), 8,
+            )
+            meta["proxy_cost_absent"] = bool(cost.get("absent", False))
+            pending_done["metadata"] = meta
+    yield (_json.dumps(pending_done, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 async def _eval_stream_impl(
@@ -479,8 +585,13 @@ async def _eval_stream_impl(
     handle = services.runtime_manager.runtime_handle(deployment_id)
     if handle is None:
         raise HTTPException(status_code=503, detail="runtime not ready")
+    cost_tag = _build_cost_tag(deployment_id=deployment_id, payload=payload)
     return StreamingResponse(
-        _proxy_stream_lines_to_pod(pod_endpoint=handle.endpoint_url, payload=payload),
+        _proxy_stream_lines_to_pod(
+            pod_endpoint=handle.endpoint_url,
+            payload=payload,
+            cost_tag=cost_tag,
+        ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
@@ -558,8 +669,15 @@ async def serving_runtime_infer_stream(
     handle = services.runtime_manager.runtime_handle(serving_deployment_id)
     if handle is None:
         raise HTTPException(status_code=503, detail="serving runtime not ready")
+    cost_tag = _build_cost_tag(
+        deployment_id=serving_deployment_id, payload=payload,
+    )
     return StreamingResponse(
-        _proxy_stream_lines_to_pod(pod_endpoint=handle.endpoint_url, payload=payload),
+        _proxy_stream_lines_to_pod(
+            pod_endpoint=handle.endpoint_url,
+            payload=payload,
+            cost_tag=cost_tag,
+        ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

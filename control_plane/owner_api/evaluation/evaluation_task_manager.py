@@ -343,6 +343,13 @@ class EvaluationTaskManager:
                 agreement_score=float(score),
                 miner_latency_seconds=float(entry.get("miner_latency_seconds") or 0.0),
                 latency_seconds=float(entry.get("latency_seconds") or 0.0),
+                # Costs are server-side ground truth: ``proxy_cost_usd``
+                # came from owner-api's provider-proxy ledger lookup and
+                # was injected into the miner's done-chunk metadata;
+                # ``judge_cost_usd`` came from eiretes-judge's response
+                # metadata. Validator passes both through verbatim.
+                proxy_cost_usd=float(entry.get("proxy_cost_usd") or 0.0),
+                judge_cost_usd=float(entry.get("judge_cost_usd") or 0.0),
             ))
         session.flush()
 

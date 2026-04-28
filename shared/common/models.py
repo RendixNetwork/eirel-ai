@@ -717,6 +717,16 @@ class TaskMinerResult(Base):
     # historically named `latency_seconds`; the attr name is preserved for
     # back-compat with existing seed/migration code.
     latency_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Per-task LLM cost the miner incurred against the subnet
+    # provider-proxy, in USD. Sourced server-side from the
+    # provider-proxy ledger via owner-api injection (Phase 2a) — never
+    # trusts miner self-report. Zero when the miner made no proxied
+    # LLM calls or when the cost lookup failed.
+    proxy_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Per-task judge LLM cost in USD (Phase 2c). Reported by
+    # eiretes-judge in its response metadata; the validator passes it
+    # through verbatim. Always >= 0.
+    judge_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
 
