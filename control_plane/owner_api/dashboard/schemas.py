@@ -104,6 +104,32 @@ class LeaderboardResponse(BaseModel):
     entries: list[LeaderboardEntry] = Field(default_factory=list)
 
 
+class QueuedSubmission(BaseModel):
+    """One submission that has not yet appeared on a leaderboard.
+
+    Covers anything pre-first-score: ``queued`` / ``building`` /
+    ``evaluating`` / ``build_failed``. Excludes ``retired`` and any
+    submission that already has a DeploymentScoreRecord (those belong on
+    the leaderboard, not the queue).
+    """
+
+    submission_id: str
+    hotkey: str
+    hotkey_short: str
+    family_id: str
+    agent_name: str | None = None
+    agent_version: str | None = None
+    artifact_sha256: str | None = None
+    status: str
+    submitted_at: str | None
+    submission_block: int | None = None
+
+
+class QueuedSubmissionsResponse(BaseModel):
+    total: int
+    submissions: list[QueuedSubmission] = Field(default_factory=list)
+
+
 class RunSummary(BaseModel):
     id: str
     sequence: int
@@ -163,6 +189,16 @@ class TaskEvaluation(BaseModel):
     task_status: str | None  # "completed" | "failed"
     evaluated_at: str | None
     prompt: str | None
+    # Number of user turns in the fixture. 1 for single-turn tasks; >1 for
+    # multi-turn replay fixtures. Multi-turn tasks judge the *final*
+    # assistant answer only — earlier turns build context but do not
+    # produce a scored response.
+    turn_count: int = 1
+    # User-prompt sequence for multi-turn fixtures. Empty for single-turn
+    # tasks (use ``prompt`` instead). Carries only user messages, not the
+    # scripted-assistant entries — those exist for both miner and
+    # baseline equally and are not interesting to display.
+    user_turns: list[str] = Field(default_factory=list)
     miner_response: dict | None
     # OpenAI baseline text, extracted from TaskEvaluation.baseline_response_json.
     # Rendered side-by-side with the miner response on the dashboard so users

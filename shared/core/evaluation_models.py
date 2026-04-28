@@ -89,6 +89,33 @@ class SpecialistBenchmarkTask(BaseModel):
         return ensure_family_id(str(value))
 
 
+class EvaluationConversationTurn(BaseModel):
+    """One turn in a multi-turn evaluation fixture.
+
+    ``user`` is always the user message for that turn. ``assistant`` is
+    optional:
+      * **None (default)** — *live* mode. The validator calls the miner
+        and the baseline for that turn; whatever each one replies is
+        appended to its own private history before the next user turn.
+      * **set** — *scripted* mode. Both miner and baseline see the
+        identical canned assistant message in their history; neither is
+        called for that turn. Used to set up specific multi-turn probes
+        (clarification, contradiction, reference-resolution, etc.).
+
+    The final turn is always live — it produces the assistant answer the
+    pairwise judge scores.
+
+    Distinct from the runtime ``ConversationTurn`` (defined later in
+    this module) which uses ``role`` / ``content`` for in-flight
+    history; this fixture model is the on-disk schema for a multi-turn
+    benchmark task and uses ``user`` / ``assistant`` to make scripted
+    vs live turns visually obvious.
+    """
+
+    user: str
+    assistant: str | None = None
+
+
 class FamilyEvaluationTask(BaseModel):
     task_id: str
     family_id: FamilyId
@@ -104,6 +131,11 @@ class FamilyEvaluationTask(BaseModel):
     # explicit field Pydantic would drop it on bundle validation, so the
     # dashboard would always render "no web".
     web_search: bool = False
+    # Multi-turn evaluation fixture. When set, the validator replays the
+    # ``turns`` script against the miner and the baseline (each building
+    # its own history) and judges the *final* assistant answer only.
+    # Single-turn tasks leave this None and use ``prompt``.
+    turns: list[EvaluationConversationTurn] | None = None
     risk_tags: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     retrieval_constraints: dict[str, Any] = Field(default_factory=dict)

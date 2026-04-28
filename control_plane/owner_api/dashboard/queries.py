@@ -32,6 +32,8 @@ from .schemas import (
     MinerRunsResponse,
     ModeLiteral,
     OverviewResponse,
+    QueuedSubmission,
+    QueuedSubmissionsResponse,
     RunDetailResponse,
     RunListResponse,
     RunSummary,
@@ -520,6 +522,67 @@ def fetch_leaderboard(
 
 
 # ---------------------------------------------------------------------------
+# /submissions/queued
+# ---------------------------------------------------------------------------
+
+
+def fetch_queued_submissions(
+    session: Session,
+    *,
+    services: Any,
+    limit: int = 200,
+) -> QueuedSubmissionsResponse:
+    """List submissions that have not yet produced a leaderboard score.
+
+    Includes pre-evaluation states (``queued``, ``building``,
+    ``evaluating``) plus ``build_failed`` so miners can see why their
+    submission stalled. Excludes ``retired`` and any submission whose
+    deployment has already produced a DeploymentScoreRecord — those are
+    on the leaderboard already.
+    """
+    del services
+    scored_ids = {
+        sid for sid, in session.execute(
+            select(DeploymentScoreRecord.submission_id).distinct()
+        ).all()
+    }
+
+    rows = session.execute(
+        select(ManagedMinerSubmission)
+        .where(ManagedMinerSubmission.status != "retired")
+        .order_by(
+            ManagedMinerSubmission.submission_block.desc(),
+            ManagedMinerSubmission.created_at.desc(),
+        )
+        .limit(limit * 4)  # over-fetch then drop scored ones; simpler than a NOT IN.
+    ).scalars().all()
+
+    out: list[QueuedSubmission] = []
+    for sub in rows:
+        if sub.id in scored_ids:
+            continue
+        manifest = sub.manifest_json or {}
+        agent = manifest.get("agent") or {}
+        out.append(
+            QueuedSubmission(
+                submission_id=sub.id,
+                hotkey=sub.miner_hotkey,
+                hotkey_short=shorten_hotkey(sub.miner_hotkey),
+                family_id=sub.family_id,
+                agent_name=agent.get("name") if isinstance(agent, dict) else None,
+                agent_version=agent.get("version") if isinstance(agent, dict) else None,
+                artifact_sha256=sub.archive_sha256,
+                status=sub.status,
+                submitted_at=sub.created_at.isoformat() if sub.created_at else None,
+                submission_block=int(sub.submission_block) if sub.submission_block else None,
+            )
+        )
+        if len(out) >= limit:
+            break
+    return QueuedSubmissionsResponse(total=len(out), submissions=out)
+
+
+# ---------------------------------------------------------------------------
 # /miners/{hotkey}
 # ---------------------------------------------------------------------------
 
@@ -717,6 +780,23 @@ def _task_evaluation_from_row(
     mode = _as_mode(bundle_task.get("mode") or meta.get("mode"))
     web_search = bool(bundle_task.get("web_search") or meta.get("web_search") or False)
 
+    # Multi-turn fixtures carry a ``turns`` array of {user, assistant?}.
+    # Surface the user-prompt sequence for the dashboard so the
+    # conversation context is visible alongside the final answer (which
+    # is what the judge actually scored). Single-turn tasks leave
+    # ``turns`` unset and the row falls back to ``prompt``.
+    raw_turns = bundle_task.get("turns") or []
+    user_turns: list[str] = []
+    if isinstance(raw_turns, list):
+        for turn in raw_turns:
+            if isinstance(turn, dict):
+                u = turn.get("user")
+            else:
+                u = getattr(turn, "user", None)
+            if isinstance(u, str) and u:
+                user_turns.append(u)
+    turn_count = len(user_turns) or 1
+
     status = "completed" if row.agreement_verdict != "error" else "failed"
 
     miner_citations = [
@@ -745,6 +825,8 @@ def _task_evaluation_from_row(
         task_status=status,
         evaluated_at=row.created_at.isoformat() if row.created_at else None,
         prompt=prompt_val if isinstance(prompt_val, str) else None,
+        turn_count=turn_count,
+        user_turns=user_turns,
         miner_response=row.miner_response_json,
         baseline_response_text=baseline_text,
         agreement_verdict=row.agreement_verdict,

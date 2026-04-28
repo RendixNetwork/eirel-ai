@@ -90,12 +90,21 @@ class OpenAIBaselineClient:
         *,
         prompt: str,
         use_web_search: bool = False,
+        history: list[dict[str, Any]] | None = None,
     ) -> BaselineResponse:
         """Call the Responses API, optionally with the built-in web_search tool.
 
         ``use_web_search`` is set from the task's own ``web_search`` flag by
         the caller — this mirrors the end-user toggle, so the baseline has
         the same information access as the miner would in real chat usage.
+
+        ``history`` is the list of prior conversation turns
+        (``[{role, content}, ...]``). For multi-turn fixtures the
+        validator passes history accumulated up to the final live turn;
+        for single-turn tasks it's empty. The Responses API accepts a
+        list ``input`` of role-tagged messages, so we send the full
+        conversation in chronological order with the latest user
+        prompt appended at the end.
 
         Returns a normalized BaselineResponse; raises ``OpenAIBaselineError``
         on any failure (network, HTTP error, malformed output, budget
@@ -109,9 +118,24 @@ class OpenAIBaselineClient:
                 f"(spent={self._spent_usd:.4f} cap={self.max_cost_usd_per_run:.4f})"
             )
 
+        # Single-turn → string input (cheaper to serialise + matches the
+        # prior shape). Multi-turn → role-tagged list with history + the
+        # current user prompt as the last message.
+        clean_history = [
+            {"role": h.get("role"), "content": h.get("content")}
+            for h in (history or [])
+            if isinstance(h, dict) and h.get("role") in ("user", "assistant")
+        ]
+        if clean_history:
+            input_payload: list[dict[str, Any]] | str = (
+                clean_history + [{"role": "user", "content": prompt}]
+            )
+        else:
+            input_payload = prompt
+
         payload: dict[str, Any] = {
             "model": self.model,
-            "input": prompt,
+            "input": input_payload,
         }
         if use_web_search:
             payload["tools"] = [{"type": "web_search"}]

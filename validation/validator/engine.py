@@ -285,6 +285,16 @@ async def run_validator_loop() -> None:
         _ACTIVE_FAMILIES, _POLL_INTERVAL_SECONDS, _BATCH_SIZE, _MAX_PARALLEL,
     )
 
+    # Periodic idle heartbeat. Empty claim cycles used to be silent —
+    # the operator couldn't tell the validator was alive without
+    # poking the DB. Log a one-line "idle" every Nth empty cycle
+    # (default 10 ≈ 5 minutes at 30s poll). Set
+    # ``EIREL_VALIDATOR_IDLE_HEARTBEAT_EVERY=0`` to disable.
+    _idle_heartbeat_every = int(
+        os.getenv("EIREL_VALIDATOR_IDLE_HEARTBEAT_EVERY", "10")
+    )
+    _idle_cycles = 0
+
     while True:
         found_work = False
         for family_id in _ACTIVE_FAMILIES:
@@ -299,9 +309,11 @@ async def run_validator_loop() -> None:
                 if result["total_claimed"] > 0:
                     found_work = True
                     logger.info(
-                        "validator loop: family=%s claimed=%d submitted=%d failed=%d",
+                        "validator loop: family=%s claimed=%d submitted=%d failed=%d "
+                        "baseline_failed=%d",
                         family_id, result["total_claimed"],
                         result["total_submitted"], result["total_failed"],
+                        result.get("total_baseline_failed", 0),
                     )
             except Exception:
                 logger.exception("validator loop error: family=%s", family_id)
@@ -310,7 +322,19 @@ async def run_validator_loop() -> None:
             loop_name="validator"
         ).set_to_current_time()
         if not found_work:
+            _idle_cycles += 1
+            if (
+                _idle_heartbeat_every > 0
+                and _idle_cycles % _idle_heartbeat_every == 0
+            ):
+                logger.info(
+                    "validator loop: idle (no claimable tasks) families=%s "
+                    "idle_cycles=%d",
+                    _ACTIVE_FAMILIES, _idle_cycles,
+                )
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        else:
+            _idle_cycles = 0
 
 
 # ---------------------------------------------------------------------------
@@ -450,28 +474,64 @@ async def run_weight_setting_loop() -> None:
                         hotkey[:16],
                     )
 
-            # 4. Unassigned family weight goes to UID 0 (burns alpha)
+            # 4. Burn the remainder of the weight vector to UID 0.
+            #
+            # The on-chain ``set_weights`` call normalises whatever vector
+            # we publish so its components sum to 1.0 — i.e. emission is
+            # distributed in proportion to the published weights, no matter
+            # what their absolute magnitude. So if owner-api says
+            # ``general_chat:0.5`` and we publish only ``[0.5]`` against
+            # the winner, Bittensor renormalises that to ``[1.0]`` and the
+            # winner ends up with 100% of subnet emission — defeating the
+            # operator's intent to burn 50%.
+            #
+            # The fix: always publish a vector that sums to 1.0. Any
+            # fraction not assigned to a winner — for any reason —
+            # becomes burn:
+            #
+            #   * The operator-configured "non-family" share — when
+            #     ``EIREL_FAMILY_WEIGHTS`` sums to less than 1.0 (e.g.
+            #     ``general_chat:0.5`` → 50% intentional burn).
+            #   * Allocated-to-family-but-no-winner — when a family was
+            #     assigned weight but produced no qualifying winner this
+            #     run (gate didn't pass).
+            #   * Winner-not-in-metagraph — already excluded from
+            #     ``total_assigned`` above; gets folded into burn here.
+            #
+            # All three collapse into ``burn = 1.0 - total_assigned``.
             total_family_weight = sum(
                 float(fw.get("family_weight", 0.0))
                 for fw in family_winners
             )
-            unassigned = max(0.0, total_family_weight - total_assigned)
-            if unassigned > 0:
-                uid_weights[0] = uid_weights.get(0, 0.0) + unassigned
+            burn = max(0.0, 1.0 - total_assigned)
+            if burn > 0:
+                uid_weights[0] = uid_weights.get(0, 0.0) + burn
 
             if not uid_weights:
-                uid_weights[0] = total_family_weight or 1.0
+                # Total fallback — owner-api returned nothing actionable.
+                # Burn-everything keeps us alive on chain (vtrust intact).
+                uid_weights[0] = 1.0
+            elif total_assigned > 1.0:
+                logger.warning(
+                    "weight-setting: total_assigned=%.4f exceeds 1.0; "
+                    "EIREL_FAMILY_WEIGHTS likely misconfigured (sum > 1.0)",
+                    total_assigned,
+                )
 
             uids = sorted(uid_weights.keys())
             weight_vals = [uid_weights[uid] for uid in uids]
 
             logger.info(
-                "weight-setting: setting weights for %d UIDs run=%s mode=%s uids=%s weights=%s",
+                "weight-setting: setting weights for %d UIDs run=%s mode=%s "
+                "uids=%s weights=%s assigned=%.4f burn=%.4f family_total=%.4f",
                 len(uids),
                 current_run_id,
                 "owner_api_down_burn" if owner_api_down else "normal",
                 uids,
                 [round(w, 4) for w in weight_vals],
+                total_assigned,
+                uid_weights.get(0, 0.0) if 0 in uid_weights else 0.0,
+                total_family_weight,
             )
 
             # 5. Set weights on-chain with retry + exponential backoff
@@ -637,13 +697,88 @@ async def run_distributed_benchmarks(
     _metrics.benchmark_runs_started_total.labels(family=family_id).inc()
     _benchmark_outcome = "success"
 
-    # Outer wall-clock budget for the fan-out (miners + OpenAI baseline). Set
-    # generously above the largest configured downstream timeout so a slow
-    # baseline doesn't trip this wrapper before its own client timeout fires.
-    # Thinking-mode miners can run up to 600s (their completion SLA), so the
-    # wrapper has to clear that ceiling. The claim lease is 600s by default —
-    # bump EIREL_TASK_CLAIM_TIMEOUT_SECONDS if you raise this much further.
-    _FAN_OUT_TIMEOUT_SECONDS = 660.0
+    # Outer wall-clock budget for the fan-out (miners + OpenAI baseline).
+    # Single-turn ceiling is one mode-budget (thinking=600s) plus headroom
+    # for the baseline call. Multi-turn fixtures replay N user turns, so
+    # the budget scales with N; default 1500s comfortably fits a 3-turn
+    # thinking-mode fixture (3 × ~500s wall clock). Override with
+    # ``EIREL_FAN_OUT_TIMEOUT_SECONDS`` if you ship longer multi-turn
+    # scripts. Per-turn budget enforcement still happens in ``_judge_miner``.
+    _FAN_OUT_TIMEOUT_SECONDS = float(
+        os.getenv("EIREL_FAN_OUT_TIMEOUT_SECONDS", "1500")
+    )
+
+    async def _baseline_replay(
+        *,
+        client: OpenAIBaselineClient,
+        task: Any,
+        use_web_search: bool,
+    ) -> Any:
+        """Replay a multi-turn fixture against the OpenAI baseline.
+
+        Single-turn fixtures (``turns`` empty or None) → one call, history
+        empty. Multi-turn → call once per *live* user turn, accumulating
+        the baseline's own assistant replies as history between turns.
+        Scripted-assistant turns are inserted into history without a
+        baseline call so both miner and baseline see the identical canned
+        exchange when probe scenarios require it.
+
+        Returns the BaselineResponse from the **last live turn** — that's
+        the answer the pairwise judge scores.
+        """
+        raw_turns = list(getattr(task, "turns", None) or [])
+        if not raw_turns:
+            raw_turns = [{"user": task.prompt, "assistant": None}]
+
+        history: list[dict[str, Any]] = []
+        last_response = None
+        for idx, raw in enumerate(raw_turns):
+            is_last = (idx == len(raw_turns) - 1)
+            if hasattr(raw, "user"):
+                user_text = raw.user
+                scripted = raw.assistant
+            elif isinstance(raw, dict):
+                user_text = str(raw.get("user") or "")
+                scripted = raw.get("assistant")
+            else:
+                continue
+            if not isinstance(user_text, str) or not user_text:
+                continue
+
+            if scripted is not None and not is_last:
+                history.append({"role": "user", "content": user_text})
+                history.append({"role": "assistant", "content": str(scripted)})
+                continue
+
+            last_response = await client.generate(
+                prompt=user_text,
+                use_web_search=use_web_search,
+                history=history,
+            )
+            # Per-turn cost log helps explain a high run-total cost on
+            # multi-turn fixtures (3 turns × $0.05 each ≠ a $0.05 task).
+            if len(raw_turns) > 1:
+                logger.info(
+                    "baseline turn=%d/%d latency=%.2fs cost=$%.4f run_total=$%.4f",
+                    idx + 1, len(raw_turns),
+                    float(getattr(last_response, "latency_seconds", 0.0) or 0.0),
+                    float(getattr(last_response, "cost_usd", 0.0) or 0.0),
+                    float(getattr(client, "spent_usd", 0.0) or 0.0),
+                )
+            history.append({"role": "user", "content": user_text})
+            history.append({
+                "role": "assistant",
+                "content": last_response.response_text or "",
+            })
+
+        if last_response is None:
+            # Defensive fallback — degenerate fixture (no live turns).
+            last_response = await client.generate(
+                prompt=task.prompt,
+                use_web_search=use_web_search,
+                history=[],
+            )
+        return last_response
 
     async def _invoke_one_miner(
         miner: dict[str, Any], task_obj: Any, task_id: str,
@@ -675,6 +810,7 @@ async def run_distributed_benchmarks(
         miners = task_claim.get("miners") or []
         if not miners:
             return "ok"  # nothing to evaluate
+        task_started_at = time.perf_counter()
 
         class _TaskProxy:
             pass
@@ -686,6 +822,11 @@ async def run_distributed_benchmarks(
         task_obj.inputs = _hydrate_agent_inputs(task_payload)
         task_obj.metadata = task_payload.get("metadata", {})
         task_obj.execution_mode = task_payload.get("execution_mode")
+        # Multi-turn fixtures carry a ``turns`` array of {user, assistant?}.
+        # Pass through to the invocation helper unchanged (it handles
+        # both single-turn and multi-turn cases). Single-turn tasks have
+        # turns=None and use ``prompt``.
+        task_obj.turns = task_payload.get("turns")
         task_mode = str(task_obj.inputs.get("mode") or "instant")
         # Per-task web-search flag, mirroring the end-user toggle in the chat
         # UI. Missing field defaults to False so a baseline never silently
@@ -696,10 +837,28 @@ async def run_distributed_benchmarks(
             or False
         )
 
-        # Fan out: all miners + baseline concurrently, bounded by wall clock
+        # Per-task lifecycle: emit a CLAIMED log so the operator can see
+        # exactly what's about to be invoked (mode, multi-turn vs
+        # single-turn, miner count) without correlating DB rows manually.
+        turn_count = len(task_obj.turns) if task_obj.turns else 1
+        logger.info(
+            "task_eval=%s task=%s mode=%s web_search=%s turns=%d miners=%d CLAIMED",
+            task_evaluation_id[:8], task_id, task_mode, web_search_flag,
+            turn_count, len(miners),
+        )
+
+        # Build the baseline's user-only conversation script. The
+        # baseline replays the same user prompts as the miner so the
+        # judge compares two answers conditioned on the same user
+        # intent. For scripted-assistant turns we feed the same canned
+        # exchange into the baseline's history (parity with the miner).
+        # We then replay against the baseline turn-by-turn and let it
+        # build its own assistant history, which is what gets compared
+        # at the final live turn.
         baseline_task = asyncio.create_task(
-            baseline_client.generate(
-                prompt=task_obj.prompt,
+            _baseline_replay(
+                client=baseline_client,
+                task=task_obj,
                 use_web_search=web_search_flag,
             )
         )
@@ -733,10 +892,73 @@ async def run_distributed_benchmarks(
             return "submit_failed"
 
         baseline_text = baseline.response_text
+        # Surface OpenAI baseline cost — per-call (this task) and the
+        # cumulative spend across the validator's lifetime so operators
+        # can see the budget burn without scraping metrics.
+        logger.info(
+            "task_eval=%s baseline=ok latency=%.2fs cost=$%.4f run_total=$%.4f",
+            task_evaluation_id[:8],
+            float(getattr(baseline, "latency_seconds", 0.0) or 0.0),
+            float(getattr(baseline, "cost_usd", 0.0) or 0.0),
+            float(getattr(baseline_client, "spent_usd", 0.0) or 0.0),
+        )
+
+        # Per-miner fan-out outcome. miner_runs is a list of either
+        # ``(hotkey, BenchmarkTaskRun)`` tuples or raised exceptions
+        # (return_exceptions=True on the gather). Cost is server-side
+        # ground truth: owner-api stamped X-Eirel-Job-Id per task,
+        # provider-proxy ledgered LLM spend under that tag, and
+        # owner-api injected the lookup result into the miner's
+        # done-chunk metadata before forwarding back here.
+        for entry in miner_runs:
+            if isinstance(entry, BaseException):
+                logger.warning(
+                    "task_eval=%s miner=? fan_out_exception=%s",
+                    task_evaluation_id[:8], entry,
+                )
+                continue
+            try:
+                hk, run = entry  # type: ignore[misc]
+            except Exception:
+                continue
+            run_meta = (run.metadata or {}) if hasattr(run, "metadata") else {}
+            response_meta = (
+                (run.response or {}).get("metadata") or {}
+                if hasattr(run, "response") else {}
+            )
+            llm_cost = float(response_meta.get("proxy_cost_usd") or 0.0)
+            cost_str = (
+                f" llm_cost=$?  (no ledger entry)"
+                if response_meta.get("proxy_cost_absent")
+                else f" llm_cost=${llm_cost:.4f}"
+            )
+            logger.info(
+                "task_eval=%s miner=%s status=%s latency=%.2fs streamed=%s%s%s",
+                task_evaluation_id[:8],
+                str(hk)[:12] if hk else "?",
+                getattr(run, "status", "?"),
+                float(run_meta.get("latency_seconds") or 0.0),
+                run_meta.get("streamed"),
+                cost_str,
+                f" error=\"{run.error[:80]}\"" if getattr(run, "error", None) else "",
+            )
+
         task_category = (
             task_payload.get("category")
             or (task_obj.metadata or {}).get("category")
         )
+
+        # For multi-turn fixtures the judge sees the **final user turn**
+        # as the prompt. Earlier turns provide context but are not what
+        # the agent is being graded on. For single-turn tasks this is
+        # just task_obj.prompt.
+        judge_prompt = task_obj.prompt
+        if task_obj.turns:
+            for raw in reversed(task_obj.turns):
+                user_text = raw.get("user") if isinstance(raw, dict) else getattr(raw, "user", None)
+                if isinstance(user_text, str) and user_text:
+                    judge_prompt = user_text
+                    break
 
         # Pick the latency budget for this task based on its declared mode.
         # Tasks without a recognized mode skip the gate entirely (None budget).
@@ -752,7 +974,25 @@ async def run_distributed_benchmarks(
         async def _judge_miner(miner_run: tuple[str, BenchmarkTaskRun]) -> dict[str, Any]:
             miner_hotkey, run = miner_run
             miner_citations = _extract_miner_citations(run)
-            miner_latency = float((run.metadata or {}).get("latency_seconds") or 0.0)
+            # ``latency_seconds`` is the sum across turns (the wall clock
+            # the user actually waited). For multi-turn fixtures the
+            # mode-budget SLA is enforced **per turn** (each turn must
+            # finish within the budget), so we read the per-turn max
+            # from the invocation helper. Single-turn runs report the
+            # same value under both keys.
+            run_meta = run.metadata or {}
+            miner_latency = float(run_meta.get("latency_seconds") or 0.0)
+            max_turn_latency = float(
+                run_meta.get("max_turn_latency_seconds") or miner_latency
+            )
+            # Per-task LLM cost the miner incurred against the subnet
+            # provider-proxy. Owner-api injects this into the miner's
+            # done-chunk metadata after looking it up server-side from
+            # the proxy ledger — never from miner self-report. We pull
+            # it out of the response payload here and pass it along to
+            # the submit endpoint for storage.
+            response_meta = (run.response or {}).get("metadata") or {}
+            proxy_cost_usd = float(response_meta.get("proxy_cost_usd") or 0.0)
             if run.status != "completed":
                 return {
                     "miner_hotkey": miner_hotkey,
@@ -763,6 +1003,8 @@ async def run_distributed_benchmarks(
                     "verdict": "error",
                     "miner_latency_seconds": miner_latency,
                     "latency_seconds": 0.0,
+                    "proxy_cost_usd": proxy_cost_usd,
+                    "judge_cost_usd": 0.0,
                 }
             try:
                 miner_answer = _extract_answer_text(run)
@@ -771,7 +1013,7 @@ async def run_distributed_benchmarks(
                 judge_result = await asyncio.to_thread(
                     judge_client.judge_agreement,
                     family_id=family_id,
-                    prompt=task_obj.prompt,
+                    prompt=judge_prompt,
                     response_a=miner_answer,
                     response_b=baseline_text,
                     task_mode=task_mode,
@@ -781,14 +1023,32 @@ async def run_distributed_benchmarks(
                 judge_latency = max(0.0, time.perf_counter() - judge_started)
                 verdict = judge_result.verdict
                 agreement_score = float(judge_result.agreement_score or 0.0)
-                # Mode-specific completion-time SLA: completed responses
-                # over budget count as a loss regardless of content match.
-                if latency_budget is not None and miner_latency > latency_budget:
+                # Phase 2c: eiretes-judge surfaces ``cost_usd`` per
+                # judgment in its response metadata. Pull it through
+                # so ``TaskMinerResult.judge_cost_usd`` reflects what
+                # this validator paid Chutes for this single
+                # judgment. Falls back to 0.0 on older judge versions
+                # that don't include the field.
+                judge_meta = (
+                    getattr(judge_result, "metadata", None) or {}
+                ) if hasattr(judge_result, "metadata") else {}
+                if not isinstance(judge_meta, dict):
+                    judge_meta = {}
+                judge_cost_usd = float(
+                    judge_meta.get("cost_usd")
+                    or judge_meta.get("usd_cost")
+                    or 0.0
+                )
+                # Mode-specific completion-time SLA: any *single turn*
+                # exceeding the budget counts as a violation. We gate on
+                # the per-turn max so a fixture that has 3 well-behaved
+                # turns + 1 over-budget turn is still flagged.
+                if latency_budget is not None and max_turn_latency > latency_budget:
                     logger.info(
                         "latency_violation miner=%s task_eval=%s mode=%s "
-                        "completion=%.2fs budget=%.2fs prior_verdict=%s",
+                        "max_turn=%.2fs total=%.2fs budget=%.2fs prior_verdict=%s",
                         miner_hotkey[:16], task_evaluation_id, task_mode,
-                        miner_latency, latency_budget, verdict,
+                        max_turn_latency, miner_latency, latency_budget, verdict,
                     )
                     verdict = "latency_violation"
                     agreement_score = 0.0
@@ -801,6 +1061,8 @@ async def run_distributed_benchmarks(
                     "verdict": verdict,
                     "miner_latency_seconds": miner_latency,
                     "latency_seconds": judge_latency,
+                    "proxy_cost_usd": proxy_cost_usd,
+                    "judge_cost_usd": judge_cost_usd,
                 }
             except Exception as exc:
                 logger.warning(
@@ -816,6 +1078,8 @@ async def run_distributed_benchmarks(
                     "verdict": "error",
                     "miner_latency_seconds": miner_latency,
                     "latency_seconds": 0.0,
+                    "proxy_cost_usd": proxy_cost_usd,
+                    "judge_cost_usd": 0.0,
                 }
 
         # Materialize the gather results (handle exceptions from miner fan-out)
@@ -834,6 +1098,41 @@ async def run_distributed_benchmarks(
                 resolved_runs.append(result)
 
         judge_results = await asyncio.gather(*[_judge_miner(r) for r in resolved_runs])
+
+        # Verdict tally — one-line summary so an operator scrolling the
+        # validator log can see "task X scored 2/3 matches" at a glance,
+        # without having to query the DB.
+        verdict_counts: dict[str, int] = {}
+        for r in judge_results:
+            v = str(r.get("verdict") or "error")
+            verdict_counts[v] = verdict_counts.get(v, 0) + 1
+        verdict_summary = " ".join(
+            f"{k}={v}" for k, v in sorted(verdict_counts.items())
+        )
+        logger.info(
+            "task_eval=%s verdicts: %s",
+            task_evaluation_id[:8], verdict_summary or "(none)",
+        )
+
+        # Per-task cost roll-up. Three components, all server-side
+        # sourced: (1) baseline = OpenAI Responses API spend for this
+        # task (sums all turns); (2) miners = sum of provider-proxy
+        # ledger lookups for each miner under this task's job_id;
+        # (3) judge = sum of eiretes-judge-reported per-judgment
+        # ``cost_usd`` across the miners we judged for this task.
+        baseline_cost = float(getattr(baseline, "cost_usd", 0.0) or 0.0)
+        miners_cost = sum(
+            float(r.get("proxy_cost_usd") or 0.0) for r in judge_results
+        )
+        judge_cost = sum(
+            float(r.get("judge_cost_usd") or 0.0) for r in judge_results
+        )
+        logger.info(
+            "task_eval=%s cost: baseline=$%.4f miners=$%.4f judge=$%.4f total=$%.4f",
+            task_evaluation_id[:8],
+            baseline_cost, miners_cost, judge_cost,
+            baseline_cost + miners_cost + judge_cost,
+        )
 
         # Submit the batch
         result_path = f"/v1/families/{family_id}/task-evaluations/{task_evaluation_id}/result"
@@ -855,6 +1154,11 @@ async def run_distributed_benchmarks(
                     },
                 )
                 resp.raise_for_status()
+            elapsed = time.perf_counter() - task_started_at
+            logger.info(
+                "task_eval=%s SUBMITTED total=%.2fs",
+                task_evaluation_id[:8], elapsed,
+            )
             return "ok"
         except Exception as exc:
             logger.warning("submit failed for task_eval=%s: %s", task_evaluation_id, exc)
