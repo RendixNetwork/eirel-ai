@@ -11,6 +11,7 @@ from control_plane.owner_api.dashboard.schemas import (
     MinerProfileResponse,
     MinerRunsResponse,
     OverviewResponse,
+    QueuedSubmissionsResponse,
     RunDetailResponse,
     RunListResponse,
 )
@@ -115,6 +116,26 @@ async def get_leaderboard(
             offset=offset,
         )
     _CACHE.set(key, result, ttl=_ttl_for(result))
+    return result
+
+
+@router.get("/submissions/queued", response_model=QueuedSubmissionsResponse)
+async def get_queued_submissions(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+) -> QueuedSubmissionsResponse:
+    services: ManagedOwnerServices = request.app.state.services
+    key = ("queued_submissions", limit)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+    with services.db.sessionmaker() as session:
+        result = queries.fetch_queued_submissions(
+            session, services=services, limit=limit,
+        )
+    # Submissions move through states quickly enough that a 5s TTL keeps
+    # the queue page feeling live without hammering the DB.
+    _CACHE.set(key, result, ttl=_OPEN_RUN_TTL)
     return result
 
 
