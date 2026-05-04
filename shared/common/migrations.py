@@ -391,6 +391,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         apply=lambda engine: _migration_add_proxy_and_judge_cost(engine),
     ),
+    Migration(
+        version="drop_anti_gaming_artifacts",
+        description=(
+            "Strip honeytokens / trace_gate artifacts from JSON metadata "
+            "after the anti-gaming subsystem was removed"
+        ),
+        apply=lambda engine: _migration_drop_anti_gaming_artifacts(engine),
+    ),
 )
 
 
@@ -469,6 +477,61 @@ def _migration_add_proxy_and_judge_cost(engine: Engine) -> None:
                 "ALTER TABLE task_miner_results "
                 "ADD COLUMN judge_cost_usd FLOAT NOT NULL DEFAULT 0.0"
             ))
+
+
+def _migration_drop_anti_gaming_artifacts(engine: Engine) -> None:
+    """Strip anti-gaming residue from existing rows.
+
+    The honeytoken / trace-gate code path was removed.  No SQL columns
+    were ever added for it, but ``evaluation_runs.metadata_json`` carried
+    a ``"honeytokens"`` key with the per-run canary URL list, and
+    ``deployment_score_records`` (via Pydantic JSON serialization) may
+    have ``trace_gate``, ``trace_gate_penalty_usd``, or ``honeytoken_cited``
+    keys embedded in stored conversation-score blobs.  Strip both for
+    cleanliness so reads don't surface stale fields.
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "evaluation_runs" not in tables:
+        return
+    cols = {col["name"] for col in inspector.get_columns("evaluation_runs")}
+    if "metadata_json" not in cols:
+        return
+    dialect = engine.dialect.name
+    with engine.begin() as conn:
+        if dialect == "postgresql":
+            # JSONB-aware: strip the "honeytokens" key in place.
+            conn.execute(text(
+                "UPDATE evaluation_runs "
+                "SET metadata_json = metadata_json::jsonb - 'honeytokens' "
+                "WHERE metadata_json::jsonb ? 'honeytokens'"
+            ))
+        else:
+            # SQLite / others: rebuild the JSON without the key.  Cheap
+            # and correct because run counts are small.
+            rows = conn.execute(text(
+                "SELECT id, metadata_json FROM evaluation_runs "
+                "WHERE metadata_json IS NOT NULL"
+            )).fetchall()
+            import json as _json
+            for row in rows:
+                raw = row[1]
+                if not raw:
+                    continue
+                try:
+                    parsed = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(parsed, dict) or "honeytokens" not in parsed:
+                    continue
+                parsed.pop("honeytokens", None)
+                conn.execute(
+                    text(
+                        "UPDATE evaluation_runs SET metadata_json = :m "
+                        "WHERE id = :id"
+                    ),
+                    {"m": _json.dumps(parsed), "id": row[0]},
+                )
 
 
 def _drop_registered_neurons_is_active(engine: Engine) -> None:

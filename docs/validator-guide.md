@@ -161,11 +161,9 @@ and directly reduces your TAO earnings. The field is unchanged from
 `EIREL_JUDGE_MODEL` in `.env.validator`, so it's just a matter of not
 changing it.
 
-**Anti-gaming stays server-side.** The operator's owner-api applies
-trace integrity checks, honeytoken detection, and latency axis on top
-of your LLM quality score when you submit. You don't see the honeytoken
-URL list, the trace-gate heuristics, or the latency penalty curve —
-those live inside the operator process.
+**Latency stays server-side.** The operator's owner-api applies the
+latency axis on top of your LLM quality score when you submit. The
+latency penalty curve lives inside the operator process.
 
 ## Costs
 

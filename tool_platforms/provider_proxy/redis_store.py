@@ -20,8 +20,8 @@ Data layout, per job_id:
     provider_proxy:provider_counts:<job_id>  (hash: provider → int)
     provider_proxy:model_counts:<job_id>     (hash: provider:model → int)
     provider_proxy:cost_by_provider:<job_id> (hash: key → float)
-        keys are either a bare provider name (LLM), ``tool:<name>``,
-        or ``penalty:<reason>`` — the split ScoringManager consumes.
+        keys are either a bare provider name (LLM) or ``tool:<name>`` —
+        the split ScoringManager consumes.
 
 Concurrent request safety:
     ``reserve_estimate`` and ``charge_tool`` execute a Lua script so
@@ -353,25 +353,6 @@ class ProviderJobStore:
                 pipe.expire(cost_key, self._ttl)
                 await pipe.execute()
             return (True, cost + amount_usd)
-
-    async def charge_penalty(
-        self,
-        *,
-        job_id: str,
-        reason: str,
-        amount_usd: float,
-    ) -> float:
-        """Charge an unconditional penalty (always lands, no 429)."""
-        usage_key = _USAGE_PREFIX + job_id
-        cost_key = _COST_BY_PROVIDER_PREFIX + job_id
-        async with self._client.pipeline(transaction=True) as pipe:
-            pipe.hincrbyfloat(usage_key, "cost_usd_used", float(amount_usd))
-            pipe.hincrbyfloat(cost_key, f"penalty:{reason}", float(amount_usd))
-            pipe.expire(usage_key, self._ttl)
-            pipe.expire(cost_key, self._ttl)
-            pipe.hget(usage_key, "cost_usd_used")
-            values = await pipe.execute()
-        return float(values[-1] or 0.0)
 
     # ------------------------------------------------------------------
     # Reads

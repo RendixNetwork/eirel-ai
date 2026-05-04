@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-"""Translate judge output into a ConversationScore without requiring a trace.
+"""Translate judge output into a ConversationScore.
 
-The layered general_chat scoring path requires the miner to emit both a
-``trace`` and ``response_text`` in its response dict so the trace-integrity
-gate can run.  Miners that don't opt in (including the example agent)
-produce a raw ``AgentInvocationResponse`` with no trace.
-
-``build_conversation_score_from_judge`` fills that gap: it synthesizes a
-valid ``ConversationScore`` from the judge sidecar's output plus whatever
-latency signal is available in the miner response.  It keeps the same
-``total = trace_gate * (QUALITY_WEIGHT * quality + LATENCY_WEIGHT * latency)``
-shape as the layered path, so scores stay comparable across miners.
+``build_conversation_score_from_judge`` synthesizes a valid
+``ConversationScore`` from the judge sidecar's output plus whatever
+latency signal is available in the miner response.  Final score:
+``total = QUALITY_WEIGHT * quality + LATENCY_WEIGHT * latency``.
 
 Callers:
     * ``_on_miner_evaluation_complete`` in the evaluation task manager —
@@ -73,20 +67,15 @@ def build_conversation_score_from_judge(
     miner_response: dict[str, Any],
     mode: Literal["instant", "thinking"] = "instant",
 ) -> ConversationScore:
-    """Build a ConversationScore from judge output when no trace is available.
-
-    The returned score is shaped identically to one produced by the layered
-    path, so the family aggregator (``aggregate_miner_score``) can consume
-    it without special-casing.
+    """Build a ConversationScore from judge output.
 
     ``quality`` prefers ``judge_output["score"]`` (the judge's own 0-1
     overall score) and falls back to ``task_score`` — the latter is the
     value the validator already computed and submitted, which matches the
     judge's output when the layered path didn't run.
 
-    ``trace_gate`` defaults to 1.0 (pass) because there's no trace to gate.
-    Constraint flags from the judge are recorded in metadata for audit but
-    do NOT zero the gate — they're quality signals, not integrity signals.
+    Constraint flags from the judge are recorded in metadata for audit;
+    they are quality signals only.
 
     ``cost`` defaults to 0.0.  Per-conversation cost attribution is not
     tracked here; run-level cost lives in ``DeploymentScoreRecord`` via
@@ -106,11 +95,9 @@ def build_conversation_score_from_judge(
     latency_ms = _extract_latency_ms(miner_response, judge_output if isinstance(judge_output, dict) else {})
     latency = _latency_score(latency_ms, mode=mode)
 
-    trace_gate = 1.0  # No trace to gate; constraint_flags are quality signals.
     cost = 0.0
 
-    weighted = _QUALITY_WEIGHT * quality + _LATENCY_WEIGHT * latency
-    total = round(trace_gate * weighted, 6)
+    total = round(_QUALITY_WEIGHT * quality + _LATENCY_WEIGHT * latency, 6)
 
     constraint_flags = (
         judge_output.get("constraint_flags")
@@ -121,7 +108,6 @@ def build_conversation_score_from_judge(
         quality=round(quality, 6),
         latency=round(latency, 6),
         cost=cost,
-        trace_gate=trace_gate,
         total=total,
         per_dimension={
             str(k): round(float(v), 6)

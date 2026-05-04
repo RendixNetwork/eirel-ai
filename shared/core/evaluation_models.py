@@ -293,15 +293,10 @@ class ConversationScore(BaseModel):
     quality: float = Field(ge=0.0, le=1.0)
     latency: float = Field(ge=0.0, le=1.0)
     cost: float = Field(ge=0.0, le=1.0)
-    trace_gate: float = Field(ge=0.0, le=1.0)
     total: float = Field(ge=0.0, le=1.0)
     per_dimension: dict[str, float] = Field(default_factory=dict)
     mode: Literal["instant", "thinking"] = "instant"
     web_search: bool = False
-    # USD penalty the scoring manager should charge against the run budget
-    # when this conversation's trace integrity gate failed. 0.0 when the
-    # gate passed or when no penalty was configured.
-    trace_gate_penalty_usd: float = Field(ge=0.0, default=0.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -316,10 +311,6 @@ class MinerGeneralChatScore(BaseModel):
     llm_cost_usd: float = Field(ge=0.0, default=0.0)
     tool_cost_usd: float = Field(ge=0.0, default=0.0)
     cost_rejection_count: int = Field(ge=0, default=0)
-    # Bad-actor flag: True iff any conversation in this run cited an
-    # active honeytoken URL. When True, ``blended`` is forced to 0.0
-    # regardless of quality — fabricated citations zero the miner.
-    honeytoken_cited: bool = False
     conversation_scores: list[ConversationScore] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

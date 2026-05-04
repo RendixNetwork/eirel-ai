@@ -43,11 +43,6 @@ class ChargeToolRequest(_BaseModel):
     amount_usd: float = _Field(ge=0.0)
 
 
-class ChargePenaltyRequest(_BaseModel):
-    reason: str
-    amount_usd: float = _Field(ge=0.0)
-
-
 @dataclass(slots=True)
 class AppState:
     auth_token: str
@@ -173,29 +168,24 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="job not found",
             )
-        # ``cost_by_provider`` keys come in three shapes:
+        # ``cost_by_provider`` keys come in two shapes:
         #   * bare LLM provider names ("chutes", "openai", ...) —
         #     written by /chat/completions reconciliation
         #   * ``tool:<name>`` — written by ``charge_tool``
-        #   * ``penalty:<reason>`` — written by ``charge_penalty``
         # Split on those prefixes so ScoringManager.populate_cost_columns
         # gets truthful ``DeploymentScoreRecord.{llm_cost_usd,tool_cost_usd}``
         # instead of lumping everything together.
         llm_cost_usd = 0.0
         tool_cost_usd = 0.0
-        penalty_cost_usd = 0.0
         for key, value in usage.cost_by_provider.items():
             if key.startswith("tool:"):
                 tool_cost_usd += float(value)
-            elif key.startswith("penalty:"):
-                penalty_cost_usd += float(value)
             else:
                 llm_cost_usd += float(value)
         return {
             "cost_usd_used": usage.cost_usd_used,
             "llm_cost_usd": round(llm_cost_usd, 8),
             "tool_cost_usd": round(tool_cost_usd, 8),
-            "penalty_cost_usd": round(penalty_cost_usd, 8),
             "max_usd_budget": usage.max_usd_budget,
             "cost_rejections": usage.cost_rejections,
             "per_provider": dict(usage.cost_by_provider),
@@ -222,35 +212,6 @@ def create_app() -> FastAPI:
                 detail="run budget exhausted",
             )
         return {"cost_usd_used": cost_used}
-
-    @app.post("/v1/jobs/{job_id}/charge_penalty")
-    async def charge_penalty(
-        job_id: str,
-        body: ChargePenaltyRequest,
-        _: str = Depends(require_auth),
-    ) -> dict[str, Any]:
-        """Charge an unconditional USD penalty against the run budget.
-
-        Unlike ``charge_tool``, this endpoint never 429-rejects — the
-        penalty always lands even if it overshoots ``max_usd_budget``.
-        Used by the scoring pipeline when a trace integrity gate fires,
-        so bad-actor miners pay real cost for each failed conversation.
-        """
-        store = app.state.services.store
-        if not await store.exists(job_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="job not found",
-            )
-        cost_used = await store.charge_penalty(
-            job_id=job_id, reason=body.reason, amount_usd=body.amount_usd,
-        )
-        usage = await store.get(job_id)
-        return {
-            "cost_usd_used": cost_used,
-            "max_usd_budget": usage.max_usd_budget if usage else 0.0,
-            "reason": body.reason,
-        }
 
     @app.post("/v1/chat/completions", response_model=ProviderProxyResponse)
     async def chat_completions(

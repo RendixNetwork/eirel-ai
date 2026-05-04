@@ -579,15 +579,6 @@ class Settings:
     run_budget_usd: float = field(
         default_factory=lambda: float(os.getenv("EIREL_RUN_BUDGET_USD", "30.0"))
     )
-    trace_gate_penalty_usd: float = field(
-        default_factory=lambda: float(os.getenv("EIREL_TRACE_GATE_PENALTY_USD", "0.50"))
-    )
-    honeytoken_count_per_run: int = field(
-        default_factory=lambda: int(os.getenv("EIREL_HONEYTOKEN_COUNT_PER_RUN", "8"))
-    )
-    honeytoken_injection_rate: float = field(
-        default_factory=lambda: float(os.getenv("EIREL_HONEYTOKEN_INJECTION_RATE", "0.02"))
-    )
     trace_store_backend: str = field(
         default_factory=lambda: os.getenv("EIREL_TRACE_STORE_BACKEND", "memory")
     )
@@ -619,9 +610,6 @@ class Settings:
     )
     first_run_start_time: str = field(
         default_factory=lambda: os.getenv("EIREL_FIRST_RUN_START_TIME", "")
-    )
-    spot_check_duplicate_rate: float = field(
-        default_factory=lambda: _float_env("EIREL_SPOT_CHECK_DUPLICATE_RATE", 0.05)
     )
     active_families: str = field(
         default_factory=lambda: os.getenv("EIREL_ACTIVE_FAMILIES", "general_chat")

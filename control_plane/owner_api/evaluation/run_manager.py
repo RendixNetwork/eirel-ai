@@ -42,7 +42,6 @@ from control_plane.owner_api.evaluation.dataset_generator import build_generated
 from shared.contracts.models import BenchmarkRunRecord
 from shared.contracts.specialist_contracts import contract_for_family
 from shared.core.evaluation_models import FamilyEvaluationBundle
-from shared.core.honeytokens import generate_honeytoken_set
 from eirel.groups import ensure_family_id
 
 if TYPE_CHECKING:
@@ -138,7 +137,6 @@ class RunManager:
         status: str = "open",
     ) -> EvaluationRun:
         started = started_at or _utcnow()
-        honeytoken_count = int(getattr(self.settings, "honeytoken_count_per_run", 8))
         run = EvaluationRun(
             id=f"run-{sequence}",
             sequence=sequence,
@@ -149,11 +147,7 @@ class RunManager:
             min_scores_json=self._owner.run_min_scores(),
             started_at=started,
             ends_at=started + timedelta(days=self._owner.run_duration_days),
-            metadata_json={
-                "honeytokens": generate_honeytoken_set(
-                    f"run-{sequence}", count=honeytoken_count,
-                ),
-            },
+            metadata_json={},
         )
         session.add(run)
         session.flush()

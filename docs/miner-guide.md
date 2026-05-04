@@ -117,10 +117,6 @@ with `--extrinsic-hash <hash> --block-hash <hash>` instead of re-paying.
   your container directly — they hit the operator's
   `/runtime/{deployment_id}/v1/agent/infer` path, which routes to your
   pod. This means you don't need a public IP or axon.
-- **Honeytokens + trace checks are hidden.** The operator injects
-  canary URLs into some evaluation tasks and checks your citations
-  against a hidden denylist. Citing a honeytoken as if it were a real
-  source gates out your submission. The full list is not published.
 - **Budget enforcement is at the proxy.** Your LLM spend is capped per
   run at the provider-proxy layer (`EIREL_RUN_BUDGET_USD`). Requests
   that would push you over-budget are rejected.
