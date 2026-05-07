@@ -138,3 +138,27 @@ async def test_s3_fetch_missing_raises(s3_bucket):
 async def test_s3_exists_false_for_missing(s3_bucket):
     store = ObjectStore(s3_client=s3_bucket)
     assert await store.exists("s3://test-bucket/never-written.json") is False
+
+
+async def test_default_s3_client_uses_r2_when_env_set(monkeypatch):
+    """R2 env vars override the default AWS session and configure a
+    sig-v4 boto3 client pointed at the R2 endpoint."""
+    monkeypatch.setenv("EIREL_R2_ACCOUNT_ID", "acct-123")
+    monkeypatch.setenv("EIREL_R2_ACCESS_KEY_ID", "AKIA-r2")
+    monkeypatch.setenv("EIREL_R2_SECRET_ACCESS_KEY", "secret-r2")
+    from shared.common.object_store import _build_default_s3_client
+    client = _build_default_s3_client()
+    # boto3 client carries the configured endpoint on .meta.endpoint_url
+    assert client.meta.endpoint_url == "https://acct-123.r2.cloudflarestorage.com"
+
+
+async def test_default_s3_client_falls_back_to_aws_when_no_r2(monkeypatch):
+    for v in ("EIREL_R2_ACCOUNT_ID", "EIREL_R2_ACCESS_KEY_ID", "EIREL_R2_SECRET_ACCESS_KEY"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "y")
+    from shared.common.object_store import _build_default_s3_client
+    client = _build_default_s3_client()
+    # Default AWS endpoint (no custom override).
+    assert "r2.cloudflarestorage.com" not in (client.meta.endpoint_url or "")
+

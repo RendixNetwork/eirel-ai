@@ -11,7 +11,6 @@ import httpx
 
 from shared.common.tool_pricing import cost_for_call
 from shared.core.evaluation_models import ConversationTrace, TraceEntry
-from shared.core.honeytokens import inject_honeytokens_into_search_payload
 
 
 _logger = logging.getLogger(__name__)
@@ -86,9 +85,8 @@ def _digest_result(payload: Any) -> str:
 def _body_excerpt(payload: Any) -> str:
     """Return a lowercased, length-capped excerpt of a tool response body.
 
-    Used by ``verify_trace_integrity`` to do substring / token-overlap
-    checks against cited content. Structure-preserving JSON serialization
-    keeps field names available for matching.
+    Stored on each :class:`TraceEntry` for audit / debugging purposes.
+    Structure-preserving JSON serialization keeps field names readable.
     """
     if payload is None:
         return ""
@@ -133,8 +131,6 @@ class ToolProxy:
         provider_proxy_url: str | None = None,
         provider_proxy_token: str | None = None,
         job_id: str | None = None,
-        active_honeytokens: list[str] | None = None,
-        honeytoken_injection_rate: float = 0.02,
     ) -> None:
         self._store = store
         self._client = http_client or httpx.AsyncClient(timeout=30.0)
@@ -142,10 +138,6 @@ class ToolProxy:
         self._provider_proxy_url = provider_proxy_url
         self._provider_proxy_token = provider_proxy_token
         self._job_id = job_id
-        self._active_honeytokens = list(active_honeytokens or [])
-        self._honeytoken_rate = honeytoken_injection_rate
-        # Per-conversation counter for deterministic injection keying.
-        self._call_counters: dict[str, int] = {}
 
     async def close(self) -> None:
         if self._owns_client:
@@ -223,20 +215,6 @@ class ToolProxy:
             error_text = f"http_error:{type(exc).__name__}"
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
-        # Honeytoken injection — only applies to search-style tools that
-        # return a list payload. Runs after the real fetch so the injected
-        # entry is visible to the miner alongside legitimate results. Rate
-        # is intentionally low (~2%) so honest miners rarely encounter one.
-        if self._active_honeytokens and error_text is None:
-            call_index = self._call_counters.get(conversation_id, 0)
-            self._call_counters[conversation_id] = call_index + 1
-            payload = inject_honeytokens_into_search_payload(
-                payload,
-                active_set=self._active_honeytokens,
-                conversation_id=conversation_id,
-                call_index=call_index,
-                rate=self._honeytoken_rate,
-            )
         entry = TraceEntry(
             tool_name=tool_name,
             args=dict(args),

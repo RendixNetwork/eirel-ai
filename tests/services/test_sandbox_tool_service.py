@@ -180,11 +180,15 @@ class _FakeBackend:
         code: str,
         timeout_seconds: float | None = None,
         memory_mb: int | None = None,
+        session_id: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> ExecutionResult:
         self.calls.append({
             "code": code,
             "timeout_seconds": timeout_seconds,
             "memory_mb": memory_mb,
+            "session_id": session_id,
+            "attachments": attachments,
         })
         if self._next is not None:
             return self._next

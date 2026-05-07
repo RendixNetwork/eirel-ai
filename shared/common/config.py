@@ -236,14 +236,6 @@ class Settings:
             "EIREL_WEB_SEARCH_PER_BACKEND_TIMEOUT_SECONDS", 10.0
         )
     )
-    x_tool_service_url: str = field(
-        default_factory=lambda: os.getenv(
-            "EIREL_X_TOOL_URL", "http://x-tool-service:8086"
-        )
-    )
-    x_tool_service_token: str = field(
-        default_factory=lambda: os.getenv("EIREL_X_TOOL_TOKEN", "")
-    )
     sandbox_tool_service_url: str = field(
         default_factory=lambda: os.getenv(
             "EIREL_SANDBOX_TOOL_URL", "http://sandbox-tool-service:8091"
@@ -294,12 +286,6 @@ class Settings:
         default_factory=lambda: int(os.getenv("EIREL_GC_THINKING_WEB_EXTRA_CALLS", "5"))
     )
 
-    # Per-API hard caps (enforced at owner-api before dispatching to tool
-    # services). Exceeding these returns 429 to the miner.
-    general_chat_x_api_calls_per_task: int = field(
-        default_factory=lambda: int(os.getenv("EIREL_GC_X_API_CALLS_PER_TASK", "1"))
-    )
-
     # Per-conversation cost budget (used as denominator for the cost
     # dimension in 4D scoring).
     general_chat_instant_cost_budget_usd: float = field(
@@ -316,15 +302,6 @@ class Settings:
             repo_relative_default="eirel-ai/data/owner_datasets/families",
             expected_kind="directory",
         )
-    )
-    judge_base_url: str = field(
-        default_factory=lambda: os.getenv("EIREL_JUDGE_BASE_URL", "")
-    )
-    judge_api_key: str = field(
-        default_factory=lambda: os.getenv("EIREL_JUDGE_API_KEY", "")
-    )
-    judge_timeout_seconds: float = field(
-        default_factory=lambda: _float_env("EIREL_JUDGE_TIMEOUT_SECONDS", 30.0)
     )
     bittensor_network: str = field(
         default_factory=lambda: os.getenv("BITTENSOR_NETWORK", "finney")
@@ -579,15 +556,6 @@ class Settings:
     run_budget_usd: float = field(
         default_factory=lambda: float(os.getenv("EIREL_RUN_BUDGET_USD", "30.0"))
     )
-    trace_gate_penalty_usd: float = field(
-        default_factory=lambda: float(os.getenv("EIREL_TRACE_GATE_PENALTY_USD", "0.50"))
-    )
-    honeytoken_count_per_run: int = field(
-        default_factory=lambda: int(os.getenv("EIREL_HONEYTOKEN_COUNT_PER_RUN", "8"))
-    )
-    honeytoken_injection_rate: float = field(
-        default_factory=lambda: float(os.getenv("EIREL_HONEYTOKEN_INJECTION_RATE", "0.02"))
-    )
     trace_store_backend: str = field(
         default_factory=lambda: os.getenv("EIREL_TRACE_STORE_BACKEND", "memory")
     )
@@ -619,9 +587,6 @@ class Settings:
     )
     first_run_start_time: str = field(
         default_factory=lambda: os.getenv("EIREL_FIRST_RUN_START_TIME", "")
-    )
-    spot_check_duplicate_rate: float = field(
-        default_factory=lambda: _float_env("EIREL_SPOT_CHECK_DUPLICATE_RATE", 0.05)
     )
     active_families: str = field(
         default_factory=lambda: os.getenv("EIREL_ACTIVE_FAMILIES", "general_chat")

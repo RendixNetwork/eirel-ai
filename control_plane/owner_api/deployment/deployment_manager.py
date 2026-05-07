@@ -30,7 +30,6 @@ from control_plane.owner_api._constants import PLACEMENT_RESERVED_STATUSES, PROD
 from control_plane.owner_api._helpers import utcnow
 from infra.miner_runtime.runtime_manager import RuntimeManagerError
 from infra.miner_runtime._k8s_helpers import DeploymentStatus, DeploymentStatusCode
-from tool_platforms.web_search_tool_service.app import generate_job_token
 
 if TYPE_CHECKING:
     from control_plane.owner_api.managed import ManagedOwnerServices
@@ -418,9 +417,6 @@ class DeploymentManager:
             submission.updated_at = utcnow()
             session.commit()
         try:
-            _rt_master = self.settings.web_search_tool_service_token
-            _rt_job_id = f"miner-{deployment_id}"
-            _rt_token = generate_job_token(_rt_master, _rt_job_id) if _rt_master else ""
             handle = await self._owner.runtime_manager.ensure_runtime(
                 deployment_id=deployment_id,
                 submission_id=deployment_id,
@@ -434,8 +430,6 @@ class DeploymentManager:
                 assigned_node_name=deployment.assigned_node_name,
                 requested_cpu_millis=deployment.requested_cpu_millis,
                 requested_memory_bytes=deployment.requested_memory_bytes,
-                research_tool_url=self.settings.web_search_tool_service_url,
-                research_tool_token=_rt_token,
                 run_budget_usd=self.settings.run_budget_usd,
             )
         except Exception as exc:
@@ -575,9 +569,6 @@ class DeploymentManager:
             serving.updated_at = utcnow()
             session.commit()
         try:
-            _rt_master = self.settings.web_search_tool_service_token
-            _rt_job_id = f"miner-{serving_deployment_id}"
-            _rt_token = generate_job_token(_rt_master, _rt_job_id) if _rt_master else ""
             handle = await self._owner.runtime_manager.ensure_runtime(
                 deployment_id=serving_deployment_id,
                 submission_id=serving_deployment_id,
@@ -591,8 +582,6 @@ class DeploymentManager:
                 assigned_node_name=serving.assigned_node_name,
                 requested_cpu_millis=serving.requested_cpu_millis,
                 requested_memory_bytes=serving.requested_memory_bytes,
-                research_tool_url=self.settings.web_search_tool_service_url,
-                research_tool_token=_rt_token,
                 run_budget_usd=self.settings.run_budget_usd,
             )
         except Exception as exc:

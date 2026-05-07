@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+spec:
+  # NodePort 30080 matches the host.docker.internal:30080 scrape target
+  # in monitoring/prometheus/prometheus.yml. The compose-hosted prometheus
+  # reaches it through host-gateway → node host IP → NodePort.
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: kube-state-metrics
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+      protocol: TCP

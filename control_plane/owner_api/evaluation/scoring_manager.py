@@ -956,54 +956,6 @@ class ScoringManager:
             logger.warning("failed to fetch cost for deployment %s: %s", deployment_id, exc)
             return {}
 
-    def charge_trace_gate_penalty(
-        self,
-        deployment_id: str,
-        *,
-        amount_usd: float,
-        reason: str = "trace_gate_fail",
-    ) -> bool:
-        """Debit a USD penalty against a deployment's run budget.
-
-        Called once per conversation that fails the trace integrity gate.
-        Returns True on success, False on any failure (logged — we don't
-        want penalty charging to break the scoring pipeline). The penalty
-        lands unconditionally, even if it overshoots ``max_usd_budget`` —
-        that's the whole point of the economic gate.
-        """
-        if amount_usd <= 0.0:
-            return False
-        proxy_url = self.settings.provider_proxy_url
-        if not proxy_url:
-            logger.warning(
-                "provider_proxy_url not configured; cannot charge trace-gate penalty",
-            )
-            return False
-        url = f"{proxy_url.rstrip('/')}/v1/jobs/miner-{deployment_id}/charge_penalty"
-        headers: dict[str, str] = {}
-        token = getattr(self.settings, "provider_proxy_token", None)
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        try:
-            resp = httpx.post(
-                url,
-                json={"reason": reason, "amount_usd": float(amount_usd)},
-                headers=headers,
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            logger.info(
-                "charged trace-gate penalty: deployment=%s amount_usd=%.4f reason=%s",
-                deployment_id, amount_usd, reason,
-            )
-            return True
-        except Exception as exc:
-            logger.warning(
-                "failed to charge trace-gate penalty for deployment %s: %s",
-                deployment_id, exc,
-            )
-            return False
-
     def populate_cost_columns(
         self,
         record: DeploymentScoreRecord,

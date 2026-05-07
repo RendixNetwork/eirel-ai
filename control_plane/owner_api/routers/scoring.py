@@ -72,11 +72,6 @@ async def family_targets(
             if isinstance((resolved_bundle or {}).get("retrieval_environment"), dict)
             else None
         )
-        judge_config = (
-            dict(resolved_bundle.get("judge_config") or {})
-            if isinstance((resolved_bundle or {}).get("judge_config"), dict)
-            else None
-        )
         return RunTargetResponse(
             run_id=snapshot.run_id,
             family_id=snapshot.family_id,
@@ -91,7 +86,6 @@ async def family_targets(
             members=list(snapshot.members_json),
             evaluation_bundle=resolved_bundle,
             evaluation_bundle_artifact=evaluation_bundle_artifact,
-            judge_config=judge_config,
             retrieval_environment=retrieval_environment,
             allowed_tool_policy=(resolved_bundle or {}).get("allowed_tool_policy") if isinstance(resolved_bundle, dict) else None,
             policy_version=(resolved_bundle or {}).get("policy_version") if isinstance(resolved_bundle, dict) else None,
@@ -112,36 +106,6 @@ async def family_scorecards(
     with services.db.sessionmaker() as session:
         resolved_run_id = run_id or epoch_id or services.ensure_current_run(session).id
         return services.family_scorecards(session, family_id=family_id, run_id=resolved_run_id)
-
-
-@router.get("/v1/internal/runs/{run_id}/families/{family_id}/calibration-report")
-async def internal_family_calibration_report(
-    request: Request,
-    run_id: str,
-    family_id: str,
-    deployment_id: str | None = None,
-    submission_id: str | None = None,
-) -> dict[str, Any]:
-    require_internal_service_token(request)
-    family_id = ensure_active_family_id(family_id)
-    services: ManagedOwnerServices = request.app.state.services
-    with services.db.sessionmaker() as session:
-        try:
-            report, artifact_ref = services.recalculate_family_calibration_report(
-                session,
-                run_id=run_id,
-                family_id=family_id,
-                deployment_id=deployment_id,
-                submission_id=submission_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {
-            "run_id": run_id,
-            "family_id": family_id,
-            "artifact_ref": artifact_ref,
-            "report": report,
-        }
 
 
 @router.get(

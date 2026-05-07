@@ -45,7 +45,7 @@ async def test_clear_many_batches_deletes():
     _, store = _make_store()
     await store.append("c1", TraceEntry(tool_name="web_search", args={}))
     await store.append("c2", TraceEntry(tool_name="sandbox", args={}))
-    await store.append("c3", TraceEntry(tool_name="x_api", args={}))
+    await store.append("c3", TraceEntry(tool_name="web_search", args={}))
     await store.clear_many(["c1", "c2"])
     assert (await store.get_trace("c1")).entries == []
     assert (await store.get_trace("c2")).entries == []

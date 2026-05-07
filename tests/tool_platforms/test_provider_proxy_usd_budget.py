@@ -198,16 +198,13 @@ async def test_get_cost_endpoint_returns_snapshot(_patch_env):
             # Split surfaces for DeploymentScoreRecord population.
             # After one successful LLM call and no tool charges:
             #   * llm_cost_usd comes from the bare ``chutes`` entry
-            #   * tool_cost_usd and penalty_cost_usd are zero (no tool:
-            #     or penalty: prefixed entries)
+            #   * tool_cost_usd is zero (no ``tool:`` prefixed entries)
             assert "llm_cost_usd" in body
             assert "tool_cost_usd" in body
-            assert "penalty_cost_usd" in body
             assert body["llm_cost_usd"] == pytest.approx(
                 body["per_provider"].get("chutes", 0.0)
             )
             assert body["tool_cost_usd"] == pytest.approx(0.0, abs=1e-9)
-            assert body["penalty_cost_usd"] == pytest.approx(0.0, abs=1e-9)
 
 
 async def test_charge_tool_increments_cost(_patch_env):
@@ -269,70 +266,3 @@ async def test_missing_budget_header_rejected(_patch_env):
             )
             assert resp.status_code == 400
             assert "missing run budget header" in resp.json()["detail"]
-
-
-async def test_charge_penalty_increments_cost_unconditionally(_patch_env):
-    app = create_app()
-    async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post(
-                "/v1/chat/completions",
-                json=_base_payload(),
-                headers=_base_headers("5.00"),
-            )
-            cost_before = (await client.get(
-                "/v1/jobs/job-usd-1/cost",
-                headers={"Authorization": "Bearer master-token"},
-            )).json()["cost_usd_used"]
-
-            charge_resp = await client.post(
-                "/v1/jobs/job-usd-1/charge_penalty",
-                json={"reason": "trace_gate_fail", "amount_usd": 0.50},
-                headers={"Authorization": "Bearer master-token"},
-            )
-            assert charge_resp.status_code == 200
-            body = charge_resp.json()
-            assert body["cost_usd_used"] == pytest.approx(cost_before + 0.50)
-            assert body["reason"] == "trace_gate_fail"
-
-            # Per-provider map records the penalty under a "penalty:" prefix.
-            cost_after = (await client.get(
-                "/v1/jobs/job-usd-1/cost",
-                headers={"Authorization": "Bearer master-token"},
-            )).json()
-            assert cost_after["per_provider"].get("penalty:trace_gate_fail") == pytest.approx(0.50)
-
-
-async def test_charge_penalty_overshoots_budget_without_429(_patch_env):
-    app = create_app()
-    async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post(
-                "/v1/chat/completions",
-                json=_base_payload(),
-                headers=_base_headers("5.00"),
-            )
-            # 100x larger than budget — charge_tool would 429, charge_penalty must land.
-            charge_resp = await client.post(
-                "/v1/jobs/job-usd-1/charge_penalty",
-                json={"reason": "trace_gate_fail", "amount_usd": 500.0},
-                headers={"Authorization": "Bearer master-token"},
-            )
-            assert charge_resp.status_code == 200
-            body = charge_resp.json()
-            assert body["cost_usd_used"] >= 500.0
-
-
-async def test_charge_penalty_404_for_unknown_job(_patch_env):
-    app = create_app()
-    async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/v1/jobs/no-such-job/charge_penalty",
-                json={"reason": "trace_gate_fail", "amount_usd": 0.50},
-                headers={"Authorization": "Bearer master-token"},
-            )
-            assert resp.status_code == 404

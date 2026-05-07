@@ -74,6 +74,14 @@ class FeeVerifier:
         Returns a ``FeeVerificationResult`` indicating success or failure with
         a human-readable reason.
         """
+        # Per-call DEBUG audit. Set ``LOG_LEVEL=DEBUG`` to see this; INFO
+        # operators can grep for the boot-time ``fee_verifier: bound to``
+        # line to learn the bound network.
+        logger.debug(
+            "verifying extrinsic %s on %s chain (treasury=%s, fee_rao=%d)",
+            extrinsic_hash, self.network,
+            self.treasury_address, self.fee_rao,
+        )
         # Resolve the coldkey that owns this hotkey (cached).
         expected_coldkey = self._get_hotkey_owner_cached(expected_hotkey)
         if not expected_coldkey:

@@ -100,11 +100,18 @@ def test_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # startup doesn't try to load in-cluster kubeconfig (which fails in
     # CI). Runtime tests swap in FakeRuntimeManager anyway.
     monkeypatch.setenv("OWNER_RUNTIME_BACKEND", "docker")
-    # Private evaluation fixtures are not committed under data/ once the
-    # repo is published. Tests use local copies under tests/fixtures/.
+    # Tests run against a fresh empty dataset directory per test — the
+    # production source of truth is R2 (resolved by convention from
+    # EIREL_EVAL_POOL_BUCKET), not local filesystem fixtures. Tests that
+    # need bundle content seed it via ObjectStore stubs rather than via
+    # on-disk fixtures.
+    dataset_root = tmp_path / "owner_datasets" / "families"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    # Several tests re-derive paths from this env in their own setup;
+    # they then call ``mkdir`` themselves, so we don't pre-create
+    # children — just the families root.
     monkeypatch.setenv(
-        "EIREL_OWNER_DATASET_ROOT_PATH",
-        str(FIXTURES_ROOT / "owner_datasets" / "families"),
+        "EIREL_OWNER_DATASET_ROOT_PATH", str(dataset_root),
     )
 
 
@@ -130,10 +137,8 @@ async def client() -> AsyncIterator[AsyncClient]:
                 assigned_node_name: str | None = None,
                 requested_cpu_millis: int = 0,
                 requested_memory_bytes: int = 0,
-                research_tool_url: str = "",
-                research_tool_token: str = "",
             ) -> MinerRuntimeHandle:
-                del submission_id, archive_sha256, archive_bytes, manifest, owner_api_url, internal_service_token, provider_proxy_url, provider_proxy_token, assigned_node_name, requested_cpu_millis, requested_memory_bytes, research_tool_url, research_tool_token
+                del submission_id, archive_sha256, archive_bytes, manifest, owner_api_url, internal_service_token, provider_proxy_url, provider_proxy_token, assigned_node_name, requested_cpu_millis, requested_memory_bytes
                 handle = MinerRuntimeHandle(
                     submission_id=deployment_id,
                     endpoint_url=f"http://runtime.local/{deployment_id}",

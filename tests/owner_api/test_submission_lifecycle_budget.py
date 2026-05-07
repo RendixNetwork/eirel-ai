@@ -71,10 +71,7 @@ def services(tmp_path, monkeypatch):
     monkeypatch.setenv("EIREL_INTERNAL_SERVICE_TOKEN", "internal-token")
     monkeypatch.setenv("EIREL_ACTIVE_FAMILIES", "general_chat")
     monkeypatch.setenv("EIREL_LAUNCH_MODE", "1")
-    monkeypatch.setenv(
-        "EIREL_OWNER_DATASET_ROOT_PATH",
-        str(FIXTURES_ROOT / "owner_datasets" / "families"),
-    )
+    # Dataset root is set up by the autouse conftest fixture.
     reset_settings()
     settings = Settings()
     db = Database(settings.database_url)

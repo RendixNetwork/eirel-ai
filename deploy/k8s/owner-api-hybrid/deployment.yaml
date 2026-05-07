@@ -46,10 +46,12 @@ spec:
               value: "http://$(SERVER_A_HOST_IP):18092"
             - name: EIREL_WEB_SEARCH_TOOL_URL
               value: "http://$(SERVER_A_HOST_IP):18085"
-            - name: EIREL_X_TOOL_URL
-              value: "http://$(SERVER_A_HOST_IP):18086"
             - name: EIREL_SANDBOX_TOOL_URL
               value: "http://$(SERVER_A_HOST_IP):18091"
+            - name: EIREL_URL_FETCH_TOOL_URL
+              value: "http://$(SERVER_A_HOST_IP):18087"
+            - name: EIREL_RAG_TOOL_URL
+              value: "http://$(SERVER_A_HOST_IP):18088"
           ports:
             - containerPort: 8000
               name: http

@@ -15,12 +15,18 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 from pydantic import BaseModel, Field
 
+from shared.common.config import get_settings
+from shared.common.database import Database
 from shared.common.request_context import RequestIdMiddleware
 from shared.common.tracing import init_tracing, get_tracer
+from orchestration.orchestrator.chat_stream import (
+    ChatSessionStore,
+    stream_family_chat,
+)
 from orchestration.orchestrator.orchestrator import Orchestrator
 
 init_tracing("orchestrator")
@@ -41,6 +47,10 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger(__name__)
     logger.info("orchestrator starting up")
     app.state.orchestrator = Orchestrator()
+    settings = get_settings()
+    db = Database(settings.database_url)
+    db.create_all()
+    app.state.session_store = ChatSessionStore(db)
     yield
     logger.info("orchestrator shutting down")
 
@@ -78,6 +88,53 @@ async def list_tools(request: Request) -> dict[str, Any]:
         "tools": orchestrator.tool_schemas(),
         "count": len(orchestrator.available_tools()),
     }
+
+
+class ChatStreamRequest(BaseModel):
+    """Streaming chat request from consumer-chat-api.
+
+    Mirrors the slim family-agent contract — the orchestrator routes
+    this through (today: 1:1 to ``general_chat``) and proxies the
+    miner's NDJSON back to the caller. Per-session toggles
+    (``mode`` / ``web_search``) are persisted on the session row by
+    the orchestrator so the caller doesn't need to re-assert them on
+    every turn.
+    """
+
+    prompt: str
+    user_id: str = "anonymous"
+    session_id: str | None = None
+    context_history: list[dict[str, Any]] = Field(default_factory=list)
+    # Per-turn overrides — when present, persist on the session row.
+    # When absent, the orchestrator uses whatever's stored on the row.
+    mode: str | None = Field(default=None, pattern="^(instant|thinking)$")
+    web_search: bool | None = None
+
+
+@app.post("/v1/orchestrate/chat/stream")
+async def chat_stream(payload: ChatStreamRequest, request: Request):
+    """Streaming chat — single-family passthrough today, DAG-composed later.
+
+    Today the orchestrator only routes to ``general_chat``. Once more
+    families come online, this entrypoint will fan out / synthesize
+    based on ``select_route()``. The wire shape stays stable: NDJSON
+    StreamChunks back to the caller (consumer-chat-api re-emits as SSE).
+    """
+    session_store: ChatSessionStore = request.app.state.session_store
+    return StreamingResponse(
+        stream_family_chat(
+            store=session_store,
+            family_id="general_chat",
+            prompt=payload.prompt,
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            context_history=payload.context_history,
+            mode_override=payload.mode,
+            web_search_override=payload.web_search,
+        ),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/v1/orchestrate")

@@ -112,6 +112,44 @@ async def test_get_submission_denies_other(client, identities):
     assert resp.status_code == 403
 
 
+async def test_artifact_denies_validator(client, identities):
+    # Validators no longer need miner source — owner-api builds the
+    # miner pod itself via the internal-token path. Only the submitter
+    # may pull their own archive.
+    signer_a = identities["miner"]["signer"]
+    signer_b = identities["validator-1"]["signer"]
+    sub_id = _make_submission(signer_a.hotkey)
+
+    hdrs = signed_headers(
+        signer_b, method="GET", path=f"/v1/submissions/{sub_id}/artifact", body=b""
+    )
+    resp = await client.get(f"/v1/submissions/{sub_id}/artifact", headers=hdrs)
+    assert resp.status_code == 403
+
+
+async def test_artifact_allows_owner(client, identities):
+    signer_a = identities["miner"]["signer"]
+    sub_id = _make_submission(signer_a.hotkey)
+
+    hdrs = signed_headers(
+        signer_a, method="GET", path=f"/v1/submissions/{sub_id}/artifact", body=b""
+    )
+    resp = await client.get(f"/v1/submissions/{sub_id}/artifact", headers=hdrs)
+    assert resp.status_code == 200
+
+
+async def test_scorecards_denies_validator(client, identities):
+    signer_a = identities["miner"]["signer"]
+    signer_b = identities["validator-1"]["signer"]
+    sub_id = _make_submission(signer_a.hotkey)
+
+    hdrs = signed_headers(
+        signer_b, method="GET", path=f"/v1/submissions/{sub_id}/scorecards", body=b""
+    )
+    resp = await client.get(f"/v1/submissions/{sub_id}/scorecards", headers=hdrs)
+    assert resp.status_code == 403
+
+
 # -- Fix 2: Rate limiting -------------------------------------------------
 
 

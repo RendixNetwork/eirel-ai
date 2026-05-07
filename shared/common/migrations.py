@@ -1,3 +1,14 @@
+"""Schema migration runner for eirel-ai.
+
+The schema is owned by ``shared.common.models.Base.metadata.create_all``;
+migrations are a thin advisory-lock wrapper that records "the schema as
+of this revision" in the ``schema_migrations`` table.
+
+Single migration: ``initial_schema``. Pre-launch we collapsed every
+prior migration step into ``Base.metadata.create_all`` since no
+production DBs need in-place ALTERs. Future migrations append a new
+``Migration`` entry to ``MIGRATIONS`` with one-purpose ALTER DDL.
+"""
 from __future__ import annotations
 
 import logging
@@ -7,7 +18,6 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
-from sqlalchemy import inspect
 
 _logger = logging.getLogger(__name__)
 
@@ -25,16 +35,20 @@ def run_migrations(engine: Engine) -> list[str]:
     dialect = engine.dialect.name
     if dialect == "postgresql":
         with engine.begin() as conn:
-            conn.execute(text("SELECT pg_advisory_lock(:lock_id)"),
-                         {"lock_id": _MIGRATION_ADVISORY_LOCK_ID})
+            conn.execute(
+                text("SELECT pg_advisory_lock(:lock_id)"),
+                {"lock_id": _MIGRATION_ADVISORY_LOCK_ID},
+            )
         _logger.info("acquired migration advisory lock")
     try:
         return _run_migrations_unlocked(engine)
     finally:
         if dialect == "postgresql":
             with engine.begin() as conn:
-                conn.execute(text("SELECT pg_advisory_unlock(:lock_id)"),
-                             {"lock_id": _MIGRATION_ADVISORY_LOCK_ID})
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:lock_id)"),
+                    {"lock_id": _MIGRATION_ADVISORY_LOCK_ID},
+                )
             _logger.info("released migration advisory lock")
 
 
@@ -77,421 +91,150 @@ def _ensure_schema_migrations_table(engine: Engine) -> None:
 
 def _applied_versions(engine: Engine) -> set[str]:
     with engine.begin() as conn:
-        rows = conn.execute(text("SELECT version FROM schema_migrations")).fetchall()
+        rows = conn.execute(
+            text("SELECT version FROM schema_migrations")
+        ).fetchall()
     return {str(row[0]) for row in rows}
 
 
-def _migration_family_native_staging_bootstrap(engine: Engine) -> None:
+def _migration_initial_schema(engine: Engine) -> None:
+    """Marker migration — the schema itself is created by
+    ``Base.metadata.create_all`` in ``Database.create_all``.
+
+    Pre-launch we collapsed every prior schema step (validators table,
+    submission/deployment plumbing, evaluation runs/tasks, owner dataset
+    bindings, consumer-side product tables, MCP catalog, server-attested
+    tool-call ledger, etc.) into the ``Base`` SQLAlchemy declaration.
+    Fresh DBs come up via ``create_all``; this migration row records
+    that fact in ``schema_migrations`` so future ALTER-style migrations
+    have a baseline to anchor against.
+    """
     del engine
 
 
-def _migration_remove_legacy_workflow_market_schema(engine: Engine) -> None:
+def _migration_multi_metric_scoring(engine: Engine) -> None:
+    """Add per-dimension score columns to ``task_miner_results``.
+
+    Each task is now scored along six independent dimensions
+    (``pairwise_preference_score`` + 5 outer metrics) plus an aggregate
+    ``final_task_score``. ``applied_weights_json`` records the actual
+    weights after N/A re-normalization for the task type. New columns
+    are nullable so legacy pairwise-only rows coexist.
+
+    Skipped on fresh databases — there ``Base.metadata.create_all``
+    runs after migrations and creates the table with the new columns
+    already in place. Migrations only do work on pre-existing DBs that
+    were bootstrapped before this column set was added.
+    """
+    from sqlalchemy import inspect, text
     inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        if "coalition_score_snapshots" in tables:
-            conn.execute(text("DROP TABLE coalition_score_snapshots"))
-        episode_columns = {
-            column["name"]
-            for column in inspector.get_columns("workflow_episode_records")
-        } if "workflow_episode_records" in tables else set()
-        if "coalition_json" in episode_columns:
-            conn.execute(text("ALTER TABLE workflow_episode_records DROP COLUMN coalition_json"))
-
-
-def _migration_add_distributed_evaluation_schema(engine: Engine) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        if "miner_evaluation_tasks" not in tables:
-            conn.execute(text("""
-                CREATE TABLE miner_evaluation_tasks (
-                    id VARCHAR(36) PRIMARY KEY,
-                    epoch_id VARCHAR(128) NOT NULL,
-                    family_id VARCHAR(64) NOT NULL,
-                    miner_hotkey VARCHAR(128) NOT NULL,
-                    task_id VARCHAR(128) NOT NULL,
-                    task_index INTEGER NOT NULL,
-                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                    claimed_by_validator VARCHAR(128),
-                    claimed_at TIMESTAMP,
-                    claim_expires_at TIMESTAMP,
-                    claim_attempt_count INTEGER NOT NULL DEFAULT 0,
-                    miner_response_json JSON,
-                    judge_output_json JSON,
-                    task_score FLOAT,
-                    task_status VARCHAR(32),
-                    result_metadata_json JSON NOT NULL DEFAULT '{}',
-                    evaluated_at TIMESTAMP,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(epoch_id, family_id, miner_hotkey, task_id)
-                )
-            """))
-            conn.execute(text(
-                "CREATE INDEX idx_met_claimable ON miner_evaluation_tasks (epoch_id, family_id, status, claim_expires_at)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_met_miner ON miner_evaluation_tasks (epoch_id, family_id, miner_hotkey)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_met_epoch_id ON miner_evaluation_tasks (epoch_id)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_met_family_id ON miner_evaluation_tasks (family_id)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_met_status ON miner_evaluation_tasks (status)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_met_claimed_by ON miner_evaluation_tasks (claimed_by_validator)"
-            ))
-        if "miner_evaluation_summaries" not in tables:
-            conn.execute(text("""
-                CREATE TABLE miner_evaluation_summaries (
-                    id VARCHAR(36) PRIMARY KEY,
-                    epoch_id VARCHAR(128) NOT NULL,
-                    family_id VARCHAR(64) NOT NULL,
-                    miner_hotkey VARCHAR(128) NOT NULL,
-                    total_tasks INTEGER NOT NULL,
-                    completed_tasks INTEGER NOT NULL DEFAULT 0,
-                    failed_tasks INTEGER NOT NULL DEFAULT 0,
-                    family_capability_score FLOAT,
-                    robustness_score FLOAT,
-                    anti_gaming_score FLOAT,
-                    official_family_score FLOAT,
-                    protocol_gate_passed BOOLEAN,
-                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                    rollout_metadata_json JSON NOT NULL DEFAULT '{}',
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(epoch_id, family_id, miner_hotkey)
-                )
-            """))
-            conn.execute(text(
-                "CREATE INDEX idx_mes_epoch_id ON miner_evaluation_summaries (epoch_id)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_mes_family_id ON miner_evaluation_summaries (family_id)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_mes_miner ON miner_evaluation_summaries (miner_hotkey)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_mes_status ON miner_evaluation_summaries (status)"
-            ))
-
-
-def _migration_add_neuron_uid_table(engine: Engine) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "neuron_uids" not in tables:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE TABLE neuron_uids (
-                    hotkey VARCHAR(128) PRIMARY KEY,
-                    uid INTEGER NOT NULL,
-                    stake BIGINT NOT NULL DEFAULT 0,
-                    is_validator BOOLEAN NOT NULL DEFAULT FALSE,
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    last_synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            conn.execute(text("CREATE INDEX idx_neuron_uids_uid ON neuron_uids (uid)"))
-
-
-def _migration_add_owner_dataset_bindings(engine: Engine) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "owner_dataset_bindings" in tables:
+    if "task_miner_results" not in inspector.get_table_names():
         return
-    with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE owner_dataset_bindings (
-                id VARCHAR(36) PRIMARY KEY,
-                family_id VARCHAR(64) NOT NULL,
-                run_id VARCHAR(128) NOT NULL,
-                bundle_uri VARCHAR(1024) NOT NULL,
-                bundle_sha256 VARCHAR(64) NOT NULL,
-                generator_version VARCHAR(128) NOT NULL,
-                generated_by VARCHAR(128) NOT NULL,
-                signature_hex VARCHAR(256) NOT NULL,
-                generator_provider VARCHAR(64) NOT NULL DEFAULT '',
-                generator_model VARCHAR(128) NOT NULL DEFAULT '',
-                status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                provenance_json JSON NOT NULL DEFAULT '{}',
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                activated_at TIMESTAMP NULL,
-                CONSTRAINT uq_owner_dataset_bindings_family_run UNIQUE (family_id, run_id)
-            )
-        """))
-        conn.execute(text(
-            "CREATE INDEX idx_owner_dataset_bindings_family ON owner_dataset_bindings (family_id)"
-        ))
-        conn.execute(text(
-            "CREATE INDEX idx_owner_dataset_bindings_run ON owner_dataset_bindings (run_id)"
-        ))
-        conn.execute(text(
-            "CREATE INDEX idx_owner_dataset_bindings_family_status "
-            "ON owner_dataset_bindings (family_id, status)"
-        ))
-
-
-def _migration_add_cost_accounting_columns(engine: Engine) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "deployment_score_records" not in tables:
-        return
-    existing = {col["name"] for col in inspector.get_columns("deployment_score_records")}
-    new_columns = {
-        "run_budget_usd": "FLOAT NOT NULL DEFAULT 30.0",
-        "run_cost_usd_used": "FLOAT NOT NULL DEFAULT 0.0",
-        "llm_cost_usd": "FLOAT NOT NULL DEFAULT 0.0",
-        "tool_cost_usd": "FLOAT NOT NULL DEFAULT 0.0",
-        "cost_rejection_count": "INTEGER NOT NULL DEFAULT 0",
+    existing_columns = {
+        col["name"] for col in inspector.get_columns("task_miner_results")
     }
+    columns_to_add = (
+        ("pairwise_preference_score", "DOUBLE PRECISION"),
+        ("grounded_correctness", "DOUBLE PRECISION"),
+        ("retrieval_quality", "DOUBLE PRECISION"),
+        ("tool_routing", "DOUBLE PRECISION"),
+        ("instruction_safety", "DOUBLE PRECISION"),
+        ("latency_cost", "DOUBLE PRECISION"),
+        ("computation_correctness", "DOUBLE PRECISION"),
+        ("final_task_score", "DOUBLE PRECISION"),
+        ("applied_weights_json", "JSON"),
+        ("applicable_metrics_json", "JSON"),
+        ("task_type", "VARCHAR(64)"),
+    )
     with engine.begin() as conn:
-        for col_name, col_def in new_columns.items():
-            if col_name not in existing:
-                conn.execute(text(
-                    f"ALTER TABLE deployment_score_records ADD COLUMN {col_name} {col_def}"
-                ))
+        for name, col_type in columns_to_add:
+            if name in existing_columns:
+                continue
+            conn.execute(
+                text(
+                    f"ALTER TABLE task_miner_results ADD COLUMN {name} {col_type}"
+                )
+            )
 
 
-def _migration_add_pending_runtime_stop(engine: Engine) -> None:
+def _migration_eval_feedback_table(engine: Engine) -> None:
+    """Create the ``eval_feedback`` table for per-(run, miner, task)
+    EvalJudge outcomes.
+
+    Skipped on fresh databases — there ``Base.metadata.create_all``
+    runs after migrations and creates the table from the SQLAlchemy
+    model declaration. This migration only does work on pre-existing
+    DBs that were bootstrapped before the table existed.
+    """
+    from sqlalchemy import inspect, text
     inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "managed_deployments" not in tables:
-        return
-    existing = {col["name"] for col in inspector.get_columns("managed_deployments")}
-    if "pending_runtime_stop" in existing:
-        return
-    default_literal = "false" if engine.dialect.name == "postgresql" else "0"
-    with engine.begin() as conn:
-        conn.execute(text(
-            f"ALTER TABLE managed_deployments ADD COLUMN pending_runtime_stop BOOLEAN NOT NULL DEFAULT {default_literal}"
-        ))
-
-
-def _migration_add_snapshot_unique_constraint(engine: Engine) -> None:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if "epoch_target_snapshots" not in tables:
-        return
-    indexes = inspector.get_indexes("epoch_target_snapshots")
-    existing_names = {idx["name"] for idx in indexes}
-    if "uq_snapshot_run_family" in existing_names:
-        return
-    if "uq_epoch_target_snapshots_epoch_family" in existing_names:
+    if "eval_feedback" in inspector.get_table_names():
         return
     with engine.begin() as conn:
-        conn.execute(text(
-            "CREATE UNIQUE INDEX uq_snapshot_run_family "
-            "ON epoch_target_snapshots (epoch_id, family_id)"
-        ))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS eval_feedback (
+                    id VARCHAR(36) PRIMARY KEY,
+                    run_id VARCHAR(64) NOT NULL,
+                    miner_hotkey VARCHAR(64) NOT NULL,
+                    task_id VARCHAR(64) NOT NULL,
+                    outcome VARCHAR(32) NOT NULL,
+                    failure_mode VARCHAR(64),
+                    guidance TEXT NOT NULL DEFAULT '',
+                    prompt_excerpt TEXT NOT NULL DEFAULT '',
+                    response_excerpt TEXT NOT NULL DEFAULT '',
+                    composite_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    knockout_reasons_json JSON NOT NULL,
+                    oracle_status VARCHAR(32),
+                    created_at TIMESTAMP NOT NULL,
+                    CONSTRAINT uq_eval_feedback_run_miner_task
+                        UNIQUE (run_id, miner_hotkey, task_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_eval_feedback_miner_run "
+                "ON eval_feedback (miner_hotkey, run_id)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_eval_feedback_run_task "
+                "ON eval_feedback (run_id, task_id)"
+            )
+        )
 
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
-        version="family_native_staging_bootstrap",
-        description="Initialize family-native staging schema baseline",
-        apply=_migration_family_native_staging_bootstrap,
-    ),
-    Migration(
-        version="remove_legacy_workflow_market_schema",
-        description="Drop legacy workflow-market coalition storage",
-        apply=_migration_remove_legacy_workflow_market_schema,
-    ),
-    Migration(
-        version="add_distributed_evaluation_schema",
-        description="Add miner_evaluation_tasks and miner_evaluation_summaries tables for distributed task evaluation",
-        apply=_migration_add_distributed_evaluation_schema,
-    ),
-    Migration(
-        version="add_neuron_uid_table",
-        description="Add neuron_uids table for all hotkey-to-uid mappings from metagraph",
-        apply=_migration_add_neuron_uid_table,
-    ),
-    Migration(
-        version="add_owner_dataset_bindings",
-        description="Add owner_dataset_bindings table for private dataset pipeline",
-        apply=_migration_add_owner_dataset_bindings,
-    ),
-    Migration(
-        version="add_cost_accounting_columns",
-        description="Add per-run USD cost accounting columns to deployment_score_records",
-        apply=_migration_add_cost_accounting_columns,
-    ),
-    Migration(
-        version="add_pending_runtime_stop",
-        description="Add pending_runtime_stop flag to managed_deployments for orphan cleanup",
-        apply=_migration_add_pending_runtime_stop,
-    ),
-    Migration(
-        version="add_snapshot_unique_constraint",
-        description="Add unique constraint on (epoch_id, family_id) to epoch_target_snapshots",
-        apply=_migration_add_snapshot_unique_constraint,
-    ),
-    Migration(
-        version="drop_registered_neurons_is_active",
-        description="Drop is_active column from registered_neurons — presence = registered",
-        apply=lambda engine: _drop_registered_neurons_is_active(engine),
-    ),
-    Migration(
-        version="refactor_to_task_level_evaluation",
+        version="initial_schema",
         description=(
-            "Replace miner_evaluation_tasks with task_evaluations + "
-            "task_miner_results for task-level validator claims and pairwise "
-            "judging vs OpenAI baseline"
+            "Initial schema — owned by Base.metadata.create_all. "
+            "Subsequent migrations append ALTER DDL for in-place upgrades."
         ),
-        apply=lambda engine: _migration_refactor_to_task_level_evaluation(engine),
+        apply=_migration_initial_schema,
     ),
     Migration(
-        version="add_miner_latency_to_task_miner_results",
+        version="multi_metric_scoring",
         description=(
-            "Add miner_latency_seconds column to task_miner_results so the "
-            "leaderboard can show miner response latency separately from "
-            "judge latency, and for the latency-violation scoring gate"
+            "Per-dimension score columns on task_miner_results: "
+            "pairwise + grounded + retrieval + tool_routing + safety + "
+            "latency_cost + computation_correctness + final_task_score, "
+            "plus applied_weights_json / applicable_metrics_json / task_type."
         ),
-        apply=lambda engine: _migration_add_miner_latency_to_task_miner_results(engine),
+        apply=_migration_multi_metric_scoring,
     ),
     Migration(
-        version="add_miner_first_token_to_task_miner_results",
+        version="add_eval_feedback_table",
         description=(
-            "Add miner_first_token_seconds column to task_miner_results to "
-            "store time-to-first-token from the streaming invocation path; "
-            "feeds the mode-agnostic 10s TTFB SLA gate"
+            "Create eval_feedback table for per-(run, miner, task) "
+            "EvalJudge outcomes. Indexed on (miner_hotkey, run_id) for "
+            "the per-miner read path and (run_id, task_id) for "
+            "operator dashboard cross-miner drill-in."
         ),
-        apply=lambda engine: _migration_add_miner_first_token_to_task_miner_results(engine),
-    ),
-    Migration(
-        version="drop_miner_first_token_seconds",
-        description=(
-            "Drop miner_first_token_seconds — TTFB metric removed; only "
-            "completion-time latency is recorded and gated. Most LLM "
-            "providers stream first token <20s anyway, so the gate added "
-            "noise without changing miner ranking."
-        ),
-        apply=lambda engine: _migration_drop_miner_first_token_seconds(engine),
+        apply=_migration_eval_feedback_table,
     ),
 )
-
-
-def _migration_add_miner_latency_to_task_miner_results(engine: Engine) -> None:
-    inspector = inspect(engine)
-    if "task_miner_results" not in set(inspector.get_table_names()):
-        return
-    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
-    if "miner_latency_seconds" in cols:
-        return
-    with engine.begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE task_miner_results "
-            "ADD COLUMN miner_latency_seconds FLOAT NOT NULL DEFAULT 0.0"
-        ))
-
-
-def _migration_add_miner_first_token_to_task_miner_results(engine: Engine) -> None:
-    inspector = inspect(engine)
-    if "task_miner_results" not in set(inspector.get_table_names()):
-        return
-    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
-    if "miner_first_token_seconds" in cols:
-        return
-    with engine.begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE task_miner_results "
-            "ADD COLUMN miner_first_token_seconds FLOAT NOT NULL DEFAULT 0.0"
-        ))
-
-
-def _migration_drop_miner_first_token_seconds(engine: Engine) -> None:
-    inspector = inspect(engine)
-    if "task_miner_results" not in set(inspector.get_table_names()):
-        return
-    cols = {c["name"] for c in inspector.get_columns("task_miner_results")}
-    if "miner_first_token_seconds" not in cols:
-        return
-    with engine.begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE task_miner_results DROP COLUMN miner_first_token_seconds"
-        ))
-
-
-def _drop_registered_neurons_is_active(engine: Engine) -> None:
-    inspector = inspect(engine)
-    if "registered_neurons" not in set(inspector.get_table_names()):
-        return
-    if "is_active" not in {c["name"] for c in inspector.get_columns("registered_neurons")}:
-        return
-    with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE registered_neurons DROP COLUMN is_active"))
-
-
-def _migration_refactor_to_task_level_evaluation(engine: Engine) -> None:
-    """Replace per-(miner, task) rows with task-level rows + per-miner results.
-
-    Drops `miner_evaluation_tasks` (per-pair claim rows) and creates
-    `task_evaluations` (one row per task, validator claims this) plus
-    `task_miner_results` (one row per miner per task, stores pairwise judge
-    output vs OpenAI baseline). Non-reversible: any in-flight pairs are lost.
-    """
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        if "miner_evaluation_tasks" in tables:
-            conn.execute(text("DROP TABLE miner_evaluation_tasks"))
-        if "task_evaluations" not in tables:
-            conn.execute(text("""
-                CREATE TABLE task_evaluations (
-                    id VARCHAR(36) PRIMARY KEY,
-                    epoch_id VARCHAR(128) NOT NULL,
-                    family_id VARCHAR(64) NOT NULL,
-                    task_id VARCHAR(128) NOT NULL,
-                    task_index INTEGER NOT NULL,
-                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                    claimed_by_validator VARCHAR(128),
-                    claimed_at TIMESTAMP,
-                    claim_expires_at TIMESTAMP,
-                    claim_attempt_count INTEGER NOT NULL DEFAULT 0,
-                    baseline_response_json JSON,
-                    evaluated_at TIMESTAMP,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(epoch_id, family_id, task_id)
-                )
-            """))
-            conn.execute(text(
-                "CREATE INDEX idx_te_claimable ON task_evaluations (epoch_id, family_id, status, claim_expires_at)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_te_epoch_id ON task_evaluations (epoch_id)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_te_status ON task_evaluations (status)"
-            ))
-        if "task_miner_results" not in tables:
-            conn.execute(text("""
-                CREATE TABLE task_miner_results (
-                    id VARCHAR(36) PRIMARY KEY,
-                    task_evaluation_id VARCHAR(36) NOT NULL REFERENCES task_evaluations(id) ON DELETE CASCADE,
-                    epoch_id VARCHAR(128) NOT NULL,
-                    family_id VARCHAR(64) NOT NULL,
-                    task_id VARCHAR(128) NOT NULL,
-                    miner_hotkey VARCHAR(128) NOT NULL,
-                    miner_response_json JSON NOT NULL,
-                    miner_citations_json JSON NOT NULL DEFAULT '[]',
-                    judge_output_json JSON,
-                    agreement_verdict VARCHAR(32) NOT NULL,
-                    agreement_score FLOAT NOT NULL DEFAULT 0.0,
-                    latency_seconds FLOAT NOT NULL DEFAULT 0.0,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(task_evaluation_id, miner_hotkey)
-                )
-            """))
-            conn.execute(text(
-                "CREATE INDEX idx_tmr_miner ON task_miner_results (epoch_id, family_id, miner_hotkey)"
-            ))
-            conn.execute(text(
-                "CREATE INDEX idx_tmr_task_eval ON task_miner_results (task_evaluation_id)"
-            ))

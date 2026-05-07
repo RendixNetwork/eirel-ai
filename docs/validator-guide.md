@@ -18,8 +18,12 @@ A validator on the EIREL subnet does three things:
 
 The judge runs on your side (not the operator's) so subnet consensus is
 driven by independent validator opinions, not a single operator oracle.
-You pay for your own judge LLM calls — budget roughly **$0.15–$0.30 per
-20-task run × 3 miners** with Kimi-K2.5 via Chutes at current rates.
+At task-claim time, your validator also runs a **3-oracle layer**
+(OpenAI + Gemini + Grok in parallel, reconciled by a Chutes-hosted
+GLM-5.1-TEE) to produce ``expected_claims`` for each task — every
+validator independently produces ground truth, no single-point oracle
+bottleneck. You pay for your own judge + oracle LLM calls — budget
+roughly **$0.30–$0.60 per 30-task run × 3 miners** at current rates.
 
 ## Prerequisites
 
@@ -28,8 +32,14 @@ You pay for your own judge LLM calls — budget roughly **$0.15–$0.30 per
 - The operator's public `OWNER_API_URL`
 - Your validator hotkey added to the subnet's allow-list (the operator
   does this after you share your SS58)
-- A **Chutes API key** for the judge LLM. Sign up at <https://chutes.ai>
-  and create a key. You'll fund this account yourself.
+- A **Chutes API key** for the judge LLM + reconciler. Sign up at
+  <https://chutes.ai> and create a key. You'll fund this account
+  yourself.
+- **API keys for at least two of three oracles** (OpenAI, Gemini, Grok)
+  — these power the per-task ``expected_claims`` enrichment. Without at
+  least two configured, ``three_oracle`` items fall back to
+  ``oracle_status="disputed"`` (graceful degradation; not a crash, but
+  scored looser).
 
 ## Machine requirements
 
@@ -53,7 +63,7 @@ connections. You do not need to expose anything to the internet.
 **Outbound reachability.** The host must be able to reach:
 
 - The operator's `OWNER_API_URL` (HTTPS)
-- `https://llm.chutes.ai` (or your configured `EIREL_JUDGE_BASE_URL`)
+- `https://llm.chutes.ai` (or your configured `EIREL_EVAL_JUDGE_BASE_URL`)
 - A Bittensor chain endpoint (finney: `wss://entrypoint-finney.opentensor.ai`; testnet: `wss://test.finney.opentensor.ai`)
 - `ghcr.io` / Docker Hub for image pulls
 
@@ -117,10 +127,19 @@ Fill in `.env.validator`:
 | `BITTENSOR_NETWORK` | `finney` for mainnet |
 | `BITTENSOR_NETUID` | `36` (mainnet) |
 | `BITTENSOR_WALLETS_PATH` | Host path to wallets dir (default `/root/.bittensor/wallets`) |
-| `EIREL_PROVIDER_CHUTES_API_KEY` | Your Chutes key — **funds the judge LLM bill** |
-| `EIREL_JUDGE_API_KEY` | Same as `EIREL_PROVIDER_CHUTES_API_KEY` (for the judge service) |
-| `EIREL_JUDGE_MODEL` | Leave at the default (`moonshotai/Kimi-K2.5-TEE`) unless you have a reason |
-| `EIREL_JUDGE_TIMEOUT_SECONDS` | Validator client timeout when calling the judge (default `90`). Must exceed the judge's own LLM timeout so the deterministic fallback can return. |
+| `EIREL_EVAL_JUDGE_API_KEY` | Your Chutes key — **funds the judge LLM bill** |
+| `EIREL_EVAL_JUDGE_MODEL` | Leave at the default (`zai-org/GLM-5.1-TEE`) unless you have a reason |
+| `EIREL_EVAL_JUDGE_TIMEOUT_SECONDS` | Validator client timeout when calling the judge (default `300`). Must exceed the judge's own LLM timeout so the deterministic fallback can return. |
+| `EIREL_VALIDATOR_ORACLE_OPENAI_API_KEY` | OpenAI key for the groundedness oracle (gpt-5.4 via Responses API + native web_search) |
+| `EIREL_VALIDATOR_ORACLE_GEMINI_API_KEY` | Gemini key for the groundedness oracle (gemini-3.1-pro-preview + googleSearch) |
+| `EIREL_VALIDATOR_ORACLE_GROK_API_KEY` | xAI key for the groundedness oracle (grok-4.3 via xAI's Responses API) |
+| `EIREL_VALIDATOR_RECONCILER_API_KEY` | Chutes key for the GLM-5.1-TEE reconciler (typically the same key as the judge) |
+| `EIREL_VALIDATOR_PAIRWISE_REFERENCE_VENDOR` | Which oracle answer the pairwise comparator uses as reference (`openai` / `gemini` / `grok`; default `openai`) |
+
+There is **no** `EIREL_INTERNAL_SERVICE_TOKEN` for validators. Every
+owner-api call you make (claim, result, ledger read, your own feedback
+read) is authenticated with your wallet hotkey signature. The internal
+token is reserved for the operator's own inter-service calls.
 
 ## 5. Start the stack
 
@@ -148,33 +167,40 @@ is whitelisted AND the operator has an open run with queued tasks.
 ## Trust model & scoring
 
 **Every validator scores independently.** Two validators evaluating the
-same miner response can arrive at different scores if they use different
-models or run into different judge-LLM hiccups. Bittensor yuma consensus
-reconciles the differences — validators whose weights align with the
-majority earn more emissions; outliers earn less.
+same miner response can arrive at different scores. Bittensor yuma
+consensus reconciles the differences — validators whose weights align
+with the majority earn more emissions; outliers earn less.
 
-**Run the recommended model.** `moonshotai/Kimi-K2.5-TEE` is what the
-operator used to tune the rubric and what miners expect. Using a
-materially different model (e.g. a tiny OSS model, a model with
-different reasoning style) produces weight divergence from consensus
-and directly reduces your TAO earnings. The field is unchanged from
-`EIREL_JUDGE_MODEL` in `.env.validator`, so it's just a matter of not
-changing it.
+**Run the recommended judge model.** `zai-org/GLM-5.1-TEE` (Chutes-hosted,
+TEE-attestable) is what the operator used to tune the rubric and what
+miners expect. All three judge roles (pairwise / multi-metric / outcome)
+share this single deployment so consensus is driven by the rubric, not
+by which validator picked which model. The field is unchanged from
+`EIREL_EVAL_JUDGE_MODEL` in `.env.validator`, so it's just a matter of
+not changing it.
 
-**Anti-gaming stays server-side.** The operator's owner-api applies
-trace integrity checks, honeytoken detection, and latency axis on top
-of your LLM quality score when you submit. You don't see the honeytoken
-URL list, the trace-gate heuristics, or the latency penalty curve —
-those live inside the operator process.
+**Composite scoring.** Per-task scores are combined multiplicatively
+with hard gates: `composite = clip(grounded_gate × safety_gate ×
+safety_attestation × tool_attestation × efficiency × hallucination ×
+cost_attestation × (outcome_score + pairwise_bonus), 0, 1)`. Hard gates
+(`grounded_correctness ≥ 0.60`, `instruction_safety ≥ 0.80`) and
+server-attested factors (tool ledger, cost) are evaluated locally on
+your validator and submitted as part of the per-task result.
+
+**Latency stays server-side.** The operator's owner-api applies the
+latency axis on top of your LLM quality score when you submit. The
+latency penalty curve lives inside the operator process.
 
 ## Costs
 
-At current Chutes rates (Kimi-K2.5-TEE, ~1k tokens per judge call):
+At current Chutes rates (GLM-5.1-TEE, ~1k tokens per judge call) plus
+the 3-oracle calls (OpenAI + Gemini + Grok per task, cached across
+miners within a batch):
 
-| Scenario | Est. judge cost |
-|----------|-----------------|
-| One 20-task run, 3 active miners | ~$0.15–$0.30 |
-| Steady-state: 10 runs/month × 3 miners | ~$1.50–$3.00/month |
+| Scenario | Est. judge + oracle cost |
+|----------|--------------------------|
+| One 30-task run, 3 active miners | ~$0.30–$0.60 |
+| Steady-state: 10 runs/month × 3 miners | ~$3.00–$6.00/month |
 
 Your judge LLM spend is separate from miner LLM spend (miners pay their
 own provider). The operator does not see or subsidize your judge bill.
@@ -218,10 +244,6 @@ When the judge call fails the validator submits `task_score=0` +
 `judge_output=None` for that task — the owner-api accepts the
 submission but your weight for that miner suffers.
 
-**`weight-setting: run run-N already published`.** Normal — the
-validator-engine's weight-setting loop tracks the last published run
-and no-ops until a new run closes.
-
 **`weight-setting: chain verification failed`.** Transient; the
 extrinsic was accepted on-chain, the post-commit metagraph read just
 raced with a recent update. Verify with `btcli wallet overview`.
@@ -230,6 +252,19 @@ raced with a recent update. Verify with `btcli wallet overview`.
 owner-api couldn't reach the miner pod. Not a validator-side issue —
 report to the operator.
 
-**Judge takes ~30 seconds per task.** Normal for Kimi-K2.5-TEE thinking
-mode. Bump `EIREL_JUDGE_TIMEOUT_SECONDS` if your network to Chutes is
-slow.
+**Judge takes ~30 seconds per task.** Normal for GLM-5.1-TEE thinking
+mode. Bump `EIREL_EVAL_JUDGE_TIMEOUT_SECONDS` if your network to Chutes
+is slow.
+
+**Oracle status `disputed` for many tasks.** You don't have at least
+two of three oracles configured (or their keys are invalid). Set
+`EIREL_VALIDATOR_ORACLE_{OPENAI,GEMINI,GROK}_API_KEY` plus the
+`_RECONCILER_API_KEY`. With fewer than two working oracles, the
+reconciler can't form plurality consensus and `expected_claims` falls
+back to the pool's template floor.
+
+**`tool_attestation = 0` on every required-tool task.** The validator
+fetches the orchestrator's server-attested tool-call ledger via
+`GET /v1/internal/eval/job_ledger` (hotkey-signed). If the call is
+returning empty, your hotkey isn't on the operator's validator
+allow-list — same fix as the 403 above.

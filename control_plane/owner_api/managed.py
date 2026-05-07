@@ -18,7 +18,6 @@ from shared.common.object_store import ObjectStore
 from eirel.groups import ensure_family_id
 from control_plane.owner_api.deployment import DeploymentManager, ManagedDeploymentRuntimeManager
 from control_plane.owner_api.evaluation import (
-    CalibrationManager,
     EvaluationTaskManager,
     RunManager,
     ScoringManager,
@@ -82,7 +81,6 @@ def _build_manager_method_map() -> dict[str, str]:
     """Build mapping of method_name -> manager_attr_name by inspecting manager classes."""
     mapping: dict[str, str] = {}
     manager_classes = {
-        "calibration": CalibrationManager,
         "deployments": DeploymentManager,
         "runs": RunManager,
         "scoring": ScoringManager,
@@ -114,7 +112,6 @@ class ManagedOwnerServices:
     runtime_manager: ManagedDeploymentRuntimeManager
     artifact_store: ArtifactStore
     object_store: ObjectStore | None = None
-    bundle_signature_verifier: Any | None = None
     top_k_per_group: int = 3
     benchmark_version: str = "family_benchmark_v2"
     rubric_version: str = "family_rubric_v2"
@@ -128,7 +125,6 @@ class ManagedOwnerServices:
     leases: LeaseManager = None  # type: ignore[assignment]
     tasks: TaskOrchestrator = None  # type: ignore[assignment]
     miners: MinerRegistry = None  # type: ignore[assignment]
-    calibration: CalibrationManager = None  # type: ignore[assignment]
     deployments: DeploymentManager = None  # type: ignore[assignment]
     runs: RunManager = None  # type: ignore[assignment]
     scoring: ScoringManager = None  # type: ignore[assignment]
@@ -145,7 +141,6 @@ class ManagedOwnerServices:
         self.leases = LeaseManager(self)
         self.tasks = TaskOrchestrator(self)
         self.miners = MinerRegistry(self)
-        self.calibration = CalibrationManager(self)
         self.deployments = DeploymentManager(self)
         self.runs = RunManager(self)
         self.scoring = ScoringManager(self)

@@ -2,23 +2,32 @@
 # Validator stack — what a third-party validator runs to participate in the
 # EIREL subnet. Two services:
 #
-#   - eiretes-judge: LLM judge that scores miner responses locally on your
-#                    machine. You supply your own Chutes API key and pay
-#                    the judge LLM bill yourself (~$0.15-$0.30 per 20-task
-#                    run with Kimi-K2.5 at current Chutes rates).
+#   - eiretes-judge: LLM judge sidecar — three roles (pairwise / multi /
+#                    eval) all backed by ONE Chutes-hosted GLM-5.1-TEE
+#                    deployment. You supply your own Chutes API key.
+#                    Cost: ~$0.05/judge call × 100 tasks × N miners
+#                    = ~$5 × N per run.
 #   - validator-engine: claims tasks from the operator's owner-api, invokes
-#                    miners (via owner-api proxy), calls local eiretes-judge,
-#                    submits results. Also runs the in-process weight-setting
-#                    loop that publishes consensus weights on-chain via the
-#                    Subtensor network every ~180 blocks.
+#                    miners (via owner-api proxy), runs the 3-oracle
+#                    fanout (OpenAI + Gemini + Grok) at task-claim time
+#                    for items tagged ``oracle_source: three_oracle``,
+#                    calls local eiretes-judge for the per-(task, miner)
+#                    composite score, writes EvalFeedback rows back to
+#                    owner-api, and submits results. Also runs the
+#                    in-process weight-setting loop that publishes
+#                    consensus weights on-chain via the Subtensor
+#                    network every ~180 blocks.
+#                    Oracle cost: ~100 tasks × 4 LLM calls = ~400
+#                    per cycle, cached across miners.
 #
 # Validators do NOT run the operator services (owner-api, tool services,
 # miner runtime, etc.) — those are hosted by the subnet operator and
-# reached over HTTP via OPERATOR_OWNER_API_URL.
+# reached over HTTP via OWNER_API_URL.
 #
 # Quickstart:
 #     cp .env.validator.example .env.validator
-#     # Edit .env.validator with your wallet + operator URL + Chutes API key
+#     # Edit .env.validator with your wallet + operator URL + provider keys
+#     # (Chutes, OpenAI, Gemini, Grok, internal-service token)
 #     docker compose -f docker-compose.validator.yml up -d
 #
 # See README.validator.md for full instructions, including trust model,
@@ -44,11 +53,14 @@ services:
     container_name: eiretes-judge
     env_file: .env.validator
     environment:
-      EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
-      EIREL_JUDGE_BASE_URL: ${EIREL_JUDGE_BASE_URL:-https://llm.chutes.ai/v1}
-      EIREL_JUDGE_API_KEY: ${EIREL_JUDGE_API_KEY:-${EIREL_PROVIDER_CHUTES_API_KEY}}
-      # EIREL_JUDGE_TIMEOUT_SECONDS is read from env_file (.env.validator).
-      # Reasoning models like Kimi-K2.5-TEE commonly need >30s per judgement.
+      # Eiretes' three judge roles (pairwise / multi / eval) all read
+      # from this EIREL_EVAL_JUDGE_* block — one Chutes-hosted
+      # GLM-5.1-TEE deployment serves them all.
+      EIREL_EVAL_JUDGE_MODEL: ${EIREL_EVAL_JUDGE_MODEL:-zai-org/GLM-5.1-TEE}
+      EIREL_EVAL_JUDGE_BASE_URL: ${EIREL_EVAL_JUDGE_BASE_URL:-https://llm.chutes.ai/v1}
+      EIREL_EVAL_JUDGE_API_KEY: ${EIREL_EVAL_JUDGE_API_KEY:-}
+      # EIREL_EVAL_JUDGE_TIMEOUT_SECONDS is read from env_file (.env.validator).
+      # Reasoning models commonly need >30s per judgement.
       EIRETES_JUDGE_PORT: "8095"
     ports:
       - "${EIRETES_JUDGE_HOST_PORT:-18095}:8095"
@@ -74,7 +86,7 @@ services:
       EIREL_VALIDATOR_AUTO_LOOP: "true"
       EIREL_VALIDATOR_ACTIVE_FAMILIES: ${EIREL_VALIDATOR_ACTIVE_FAMILIES:-general_chat}
       EIREL_JUDGE_SERVICE_URL: ${EIREL_JUDGE_SERVICE_URL:-http://eiretes-judge:8095}
-      EIREL_JUDGE_MODEL: ${EIREL_JUDGE_MODEL:-moonshotai/Kimi-K2.5-TEE}
+      EIREL_EVAL_JUDGE_MODEL: ${EIREL_EVAL_JUDGE_MODEL:-zai-org/GLM-5.1-TEE}
     depends_on:
       eiretes-judge:
         condition: service_healthy

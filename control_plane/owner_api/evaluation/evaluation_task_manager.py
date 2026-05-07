@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from shared.common.models import (
     EpochTargetSnapshot,
+    EvalFeedback,
     MinerEvaluationSummary,
     TaskEvaluation,
     TaskMinerResult,
@@ -27,6 +28,70 @@ from shared.common.models import (
 from eirel.groups import ensure_active_family_id
 
 from control_plane.owner_api._helpers import _strip_sensitive_task_metadata
+
+
+def _opt_float(value: Any) -> float | None:
+    """Coerce numeric scores to float; preserve ``None`` for N/A dimensions."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _upsert_eval_feedback(
+    session: Session,
+    *,
+    run_id: str,
+    miner_hotkey: str,
+    task_id: str,
+    judge_meta: dict[str, Any],
+) -> None:
+    """Idempotently write one EvalFeedback row from validator-supplied metadata.
+
+    UPDATE in place when a row already exists for ``(run_id, miner_hotkey,
+    task_id)`` so a validator retry on a flaky network doesn't trip the
+    unique constraint. Caller has already verified ``eval_outcome`` is
+    present in ``judge_meta``.
+    """
+    knockout_reasons = judge_meta.get("eval_knockout_reasons")
+    if not isinstance(knockout_reasons, list):
+        knockout_reasons = []
+    composite_score = judge_meta.get("composite_score")
+    try:
+        composite_score = float(composite_score) if composite_score is not None else 0.0
+    except (TypeError, ValueError):
+        composite_score = 0.0
+
+    existing = session.scalars(
+        select(EvalFeedback).where(
+            EvalFeedback.run_id == run_id,
+            EvalFeedback.miner_hotkey == miner_hotkey,
+            EvalFeedback.task_id == task_id,
+        )
+    ).one_or_none()
+    fields = {
+        "outcome": str(judge_meta.get("eval_outcome") or ""),
+        "failure_mode": judge_meta.get("eval_failure_mode") or None,
+        "guidance": str(judge_meta.get("eval_guidance") or "")[:400],
+        "prompt_excerpt": str(judge_meta.get("eval_prompt_excerpt") or "")[:200],
+        "response_excerpt": str(judge_meta.get("eval_response_excerpt") or "")[:500],
+        "composite_score": composite_score,
+        "knockout_reasons_json": [str(x) for x in knockout_reasons],
+        "oracle_status": judge_meta.get("oracle_status") or None,
+    }
+    if existing is not None:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        return
+    session.add(EvalFeedback(
+        run_id=run_id,
+        miner_hotkey=miner_hotkey,
+        task_id=task_id,
+        **fields,
+    ))
+
 
 if TYPE_CHECKING:
     from control_plane.owner_api.managed import ManagedOwnerServices
@@ -330,6 +395,11 @@ class EvaluationTaskManager:
             citations = entry.get("miner_citations") or []
             if not isinstance(citations, list):
                 citations = []
+            # Multi-metric per-task scoring blob. All keys nullable —
+            # a task type that doesn't apply a metric leaves it unset
+            # and re-normalization handles the math.
+            applied_weights = entry.get("applied_weights") or None
+            applicable_metrics = entry.get("applicable_metrics") or None
             session.add(TaskMinerResult(
                 task_evaluation_id=task.id,
                 run_id=task.run_id,
@@ -343,7 +413,43 @@ class EvaluationTaskManager:
                 agreement_score=float(score),
                 miner_latency_seconds=float(entry.get("miner_latency_seconds") or 0.0),
                 latency_seconds=float(entry.get("latency_seconds") or 0.0),
+                # Costs are server-side ground truth: ``proxy_cost_usd``
+                # came from owner-api's provider-proxy ledger lookup and
+                # was injected into the miner's done-chunk metadata;
+                # ``judge_cost_usd`` came from eiretes-judge's response
+                # metadata. Validator passes both through verbatim.
+                proxy_cost_usd=float(entry.get("proxy_cost_usd") or 0.0),
+                judge_cost_usd=float(entry.get("judge_cost_usd") or 0.0),
+                # Per-dimension scores; None = N/A for this task type.
+                pairwise_preference_score=_opt_float(entry.get("pairwise_preference_score")),
+                grounded_correctness=_opt_float(entry.get("grounded_correctness")),
+                retrieval_quality=_opt_float(entry.get("retrieval_quality")),
+                tool_routing=_opt_float(entry.get("tool_routing")),
+                instruction_safety=_opt_float(entry.get("instruction_safety")),
+                latency_cost=_opt_float(entry.get("latency_cost")),
+                computation_correctness=_opt_float(entry.get("computation_correctness")),
+                final_task_score=_opt_float(entry.get("final_task_score")),
+                applied_weights_json=applied_weights if isinstance(applied_weights, dict) else None,
+                applicable_metrics_json=(
+                    list(applicable_metrics) if isinstance(applicable_metrics, list) else None
+                ),
+                task_type=str(entry.get("task_type") or "") or None,
             ))
+
+            # Derive the durable EvalFeedback row from the judge metadata
+            # the validator embedded in this entry. Skipped on legacy
+            # rows (no eval_outcome). Idempotent on
+            # (run_id, miner_hotkey, task_id) for validator retries.
+            judge_output = entry.get("judge_output") or {}
+            judge_meta = judge_output.get("metadata") if isinstance(judge_output, dict) else None
+            if isinstance(judge_meta, dict) and judge_meta.get("eval_outcome"):
+                _upsert_eval_feedback(
+                    session,
+                    run_id=task.run_id,
+                    miner_hotkey=miner_hotkey,
+                    task_id=task.task_id,
+                    judge_meta=judge_meta,
+                )
         session.flush()
 
         remaining = self._remaining_tasks(session, task)
@@ -759,15 +865,17 @@ class EvaluationTaskManager:
                 if tid:
                     tasks_by_id[tid] = task_def
 
-        judge_config = None
-        if isinstance(bundle, dict):
-            judge_config = bundle.get("judge_config")
-
         items = []
         for task in claimed_tasks:
             task_payload = tasks_by_id.get(task.task_id, {})
             if isinstance(task_payload, dict):
-                task_payload = _strip_sensitive_task_metadata(task_payload)
+                # Validators run inside the operator's stack and need
+                # ``expected_output.answer`` to compute multi-metric
+                # per-task scores. Sensitive metadata keys (seed_id,
+                # hidden_fixture, etc.) are still scrubbed.
+                task_payload = _strip_sensitive_task_metadata(
+                    task_payload, strip_expected_output=False,
+                )
             items.append({
                 "task_evaluation_id": task.id,
                 "run_id": task.run_id,
@@ -777,7 +885,6 @@ class EvaluationTaskManager:
                 "task_payload": task_payload,
                 "miners": miners,
                 "claim_expires_at": task.claim_expires_at.isoformat() if task.claim_expires_at else "",
-                "judge_config": judge_config,
                 "rubric_version": snapshot.rubric_version,
                 "benchmark_version": snapshot.benchmark_version,
             })

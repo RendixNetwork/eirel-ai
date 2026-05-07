@@ -12,7 +12,6 @@ from shared.common.models import (
     ManagedDeployment,
     ManagedMinerSubmission,
     SubmissionArtifact,
-    ValidatorRecord,
 )
 from control_plane.owner_api.dependencies import require_internal_service_token, signature_dependency
 from control_plane.owner_api.managed import ManagedOwnerServices, fixed_family_weight
@@ -196,13 +195,18 @@ async def download_artifact(
     submission_id: str,
     hotkey: str = Depends(signature_dependency),
 ):
+    # Own-hotkey only. Validators never download miner source — they
+    # invoke the owner-api-managed pod over HTTP via the endpoint URL
+    # surfaced in TaskClaimItem.miners. Owner-api itself uses the
+    # internal-token-gated /v1/internal/submissions/{id}/artifact path
+    # to fetch bytes for runtime image builds; no other consumer needs
+    # the public artifact, so we deny everything except the submitter.
     services: ManagedOwnerServices = request.app.state.services
     with services.db.sessionmaker() as session:
         submission = session.get(ManagedMinerSubmission, submission_id)
         if submission is None:
             raise HTTPException(status_code=404, detail="submission not found")
-        allowed = submission.miner_hotkey == hotkey or session.get(ValidatorRecord, hotkey) is not None
-        if not allowed:
+        if submission.miner_hotkey != hotkey:
             raise HTTPException(status_code=403, detail="artifact access denied")
         artifact = session.get(SubmissionArtifact, submission.artifact_id)
         if artifact is None:
@@ -225,8 +229,7 @@ async def submission_scorecards(
         submission = session.get(ManagedMinerSubmission, submission_id)
         if submission is None:
             raise HTTPException(status_code=404, detail="submission not found")
-        allowed = submission.miner_hotkey == hotkey or session.get(ValidatorRecord, hotkey) is not None
-        if not allowed:
+        if submission.miner_hotkey != hotkey:
             raise HTTPException(status_code=403, detail="scorecard access denied")
         return services.submission_scorecards(session, submission_id=submission_id, limit=limit)
 

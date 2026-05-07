@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Request
+import io
+import tarfile
+
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from sqlalchemy import select
 
 from eirel.groups import ensure_family_id
+from shared.common.models import (
+    DeploymentScoreRecord,
+    EvaluationRun,
+    ManagedMinerSubmission,
+    SubmissionArtifact,
+)
 from control_plane.owner_api.dashboard import queries
 from control_plane.owner_api.dashboard.cache import TTLCache
 from control_plane.owner_api.dashboard.schemas import (
@@ -11,8 +21,11 @@ from control_plane.owner_api.dashboard.schemas import (
     MinerProfileResponse,
     MinerRunsResponse,
     OverviewResponse,
+    QueuedSubmissionsResponse,
     RunDetailResponse,
     RunListResponse,
+    SubmissionFile,
+    SubmissionFilesResponse,
 )
 from control_plane.owner_api.managed import ManagedOwnerServices
 
@@ -118,6 +131,26 @@ async def get_leaderboard(
     return result
 
 
+@router.get("/submissions/queued", response_model=QueuedSubmissionsResponse)
+async def get_queued_submissions(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+) -> QueuedSubmissionsResponse:
+    services: ManagedOwnerServices = request.app.state.services
+    key = ("queued_submissions", limit)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+    with services.db.sessionmaker() as session:
+        result = queries.fetch_queued_submissions(
+            session, services=services, limit=limit,
+        )
+    # Submissions move through states quickly enough that a 5s TTL keeps
+    # the queue page feeling live without hammering the DB.
+    _CACHE.set(key, result, ttl=_OPEN_RUN_TTL)
+    return result
+
+
 @router.get("/miners/{hotkey}", response_model=MinerProfileResponse)
 async def get_miner_profile(
     request: Request,
@@ -195,3 +228,101 @@ async def get_miner_run_detail(
 
 def _reset_cache_for_tests() -> None:
     _CACHE.clear()
+
+
+# ── Public submission viewer (closed runs only) ────────────────────────────
+#
+# Once a run closes, every submission scored in that run becomes publicly
+# downloadable + viewable on the leaderboard. The gate below enforces:
+#   1. The run exists and its status is "completed" (the canonical
+#      post-run state in this codebase — "closed" is not used).
+#   2. The submission was actually scored in this run (DeploymentScoreRecord
+#      lookup) — prevents probing a stranger submission_id against a closed
+#      run id you happen to know.
+# Any failure → 404 (not 403) so we don't leak existence of the submission.
+
+_MAX_VIEWABLE_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _load_archive_for_closed_run(
+    request: Request, *, run_id: str, submission_id: str
+) -> bytes:
+    services: ManagedOwnerServices = request.app.state.services
+    with services.db.sessionmaker() as session:
+        run = session.get(EvaluationRun, run_id)
+        if run is None or run.status != "completed":
+            raise HTTPException(status_code=404, detail="not found")
+        score_rec = session.execute(
+            select(DeploymentScoreRecord).where(
+                DeploymentScoreRecord.run_id == run_id,
+                DeploymentScoreRecord.submission_id == submission_id,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if score_rec is None:
+            raise HTTPException(status_code=404, detail="not found")
+        submission = session.get(ManagedMinerSubmission, submission_id)
+        if submission is None:
+            raise HTTPException(status_code=404, detail="not found")
+        artifact = session.get(SubmissionArtifact, submission.artifact_id)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return artifact.archive_bytes
+
+
+@router.get("/runs/{run_id}/submissions/{submission_id}/artifact")
+async def public_download_submission_artifact(
+    request: Request, run_id: str, submission_id: str
+):
+    archive = _load_archive_for_closed_run(
+        request, run_id=run_id, submission_id=submission_id
+    )
+    return Response(content=archive, media_type="application/gzip")
+
+
+@router.get(
+    "/runs/{run_id}/submissions/{submission_id}/files",
+    response_model=SubmissionFilesResponse,
+)
+async def public_list_submission_files(
+    request: Request, run_id: str, submission_id: str
+) -> SubmissionFilesResponse:
+    archive = _load_archive_for_closed_run(
+        request, run_id=run_id, submission_id=submission_id
+    )
+    files: list[SubmissionFile] = []
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            files.append(
+                SubmissionFile(path=member.name, size_bytes=member.size)
+            )
+    files.sort(key=lambda f: f.path)
+    return SubmissionFilesResponse(files=files)
+
+
+@router.get("/runs/{run_id}/submissions/{submission_id}/files/{path:path}")
+async def public_get_submission_file(
+    request: Request, run_id: str, submission_id: str, path: str
+) -> Response:
+    archive = _load_archive_for_closed_run(
+        request, run_id=run_id, submission_id=submission_id
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        try:
+            member = tar.getmember(path)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="file not found")
+        if not member.isfile():
+            raise HTTPException(status_code=404, detail="not a file")
+        if member.size > _MAX_VIEWABLE_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="file too large to view")
+        extracted = tar.extractfile(member)
+        if extracted is None:
+            raise HTTPException(status_code=404, detail="file not readable")
+        raw = extracted.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=415, detail="binary file")
+    return Response(content=text, media_type="text/plain; charset=utf-8")

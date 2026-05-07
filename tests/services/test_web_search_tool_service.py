@@ -13,8 +13,8 @@ from tool_platforms.web_search_tool_service.app import (
 )
 
 
-async def test_research_tool_service_enforces_auth_and_request_budgets(monkeypatch):
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_API_TOKEN", "tool-token")
+async def test_web_search_tool_service_enforces_auth_and_request_budgets(monkeypatch):
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "tool-token")
     app = create_app(
         ResearchCatalogStore(
             documents={
@@ -66,8 +66,8 @@ async def test_research_tool_service_enforces_auth_and_request_budgets(monkeypat
             assert usage.json()["retrieval_ledger_id"] == "ledger:job-1"
 
 
-async def test_research_tool_service_exposes_retrieval_ledger(monkeypatch):
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_API_TOKEN", "tool-token")
+async def test_web_search_tool_service_exposes_retrieval_ledger(monkeypatch):
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "tool-token")
     app = create_app(
         ResearchCatalogStore(
             documents={
@@ -106,8 +106,8 @@ async def test_research_tool_service_exposes_retrieval_ledger(monkeypatch):
             assert payload["find_on_page_events"][0]["pattern"] == "coverage"
 
 
-async def test_research_tool_service_brave_search_reranks_preferred_domains(monkeypatch):
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_API_TOKEN", "tool-token")
+async def test_web_search_tool_service_brave_search_reranks_preferred_domains(monkeypatch):
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "tool-token")
     monkeypatch.setenv("EIREL_BRAVE_SEARCH_API_KEY", "brave-token")
 
     def _search_handler(request: httpx.Request) -> httpx.Response:
@@ -162,8 +162,8 @@ async def test_research_tool_service_brave_search_reranks_preferred_domains(monk
             assert payload["documents"][0]["document_id"].startswith("web-")
 
 
-async def test_research_tool_service_live_open_page_and_find_on_page_use_opened_text(monkeypatch):
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_API_TOKEN", "tool-token")
+async def test_web_search_tool_service_live_open_page_and_find_on_page_use_opened_text(monkeypatch):
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "tool-token")
     monkeypatch.setenv("EIREL_BRAVE_SEARCH_API_KEY", "brave-token")
 
     def _search_handler(request: httpx.Request) -> httpx.Response:
@@ -266,8 +266,8 @@ async def test_research_tool_service_live_open_page_and_find_on_page_use_opened_
             ]
 
 
-async def test_research_tool_service_live_open_page_marks_unsupported_content(monkeypatch):
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_API_TOKEN", "tool-token")
+async def test_web_search_tool_service_live_open_page_marks_unsupported_content(monkeypatch):
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "tool-token")
     monkeypatch.setenv("EIREL_BRAVE_SEARCH_API_KEY", "brave-token")
 
     def _search_handler(request: httpx.Request) -> httpx.Response:
@@ -327,7 +327,7 @@ async def test_research_tool_service_live_open_page_marks_unsupported_content(mo
 
 
 async def test_per_job_scoped_token_auth(monkeypatch):
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_API_TOKEN", "master-token")
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "master-token")
     app = create_app(
         ResearchCatalogStore(
             documents={

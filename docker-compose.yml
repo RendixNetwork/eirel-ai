@@ -17,13 +17,13 @@ x-eirel-ai-run: &eirel-ai-run
   image: ${DOCKERHUB_NAMESPACE:-rendixnetwork}/eirel-ai:${EIREL_AI_IMAGE_TAG:-latest}
   working_dir: /app/eirel-ai
   env_file: .env
-  # Bind-mount host datasets read-only at the container paths the code expects
-  # (EIREL_*_ROOT_PATH in .env). Mounted as subdirs (not /app/data wholesale)
-  # so the image's baked-in /app/data/research_tool_catalog.json is preserved.
+  # Bind-mount the owner-dataset root read-only so each container's
+  # Settings.__post_init__ validator (`_validate_owner_dataset_root`)
+  # finds the directory at /app/data/owner_datasets/families. The
+  # production task source is R2 (OwnerDatasetBinding) read by owner-api
+  # in k3s; compose services never load datasets from this path.
   volumes:
     - ./data/owner_datasets:/app/data/owner_datasets:ro
-    - ./data/calibration:/app/data/calibration:ro
-    - ./data/workflow_corpus:/app/data/workflow_corpus:ro
 
 services:
   postgres:
@@ -69,8 +69,9 @@ services:
       OWNER_API_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
       OWNER_API_INTERNAL_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
-      EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
       EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
+      EIREL_URL_FETCH_TOOL_URL: ${EIREL_URL_FETCH_TOOL_URL:-http://url-fetch-tool-service:8087}
+      EIREL_RAG_TOOL_URL: ${EIREL_RAG_TOOL_URL:-http://rag-tool-service:8088}
       EIREL_PROVIDER_PROXY_URL: http://provider-proxy:8092
       EIREL_PROVIDER_PROXY_TOKEN: ${EIREL_PROVIDER_PROXY_MASTER_TOKEN:-provider-proxy-token}
     depends_on:
@@ -80,9 +81,11 @@ services:
         condition: service_started
       web-search-tool-service:
         condition: service_healthy
-      x-tool-service:
-        condition: service_healthy
       sandbox-tool-service:
+        condition: service_healthy
+      url-fetch-tool-service:
+        condition: service_healthy
+      rag-tool-service:
         condition: service_healthy
     ports:
       - "127.0.0.1:${ORCHESTRATOR_HOST_PORT:-18050}:8050"
@@ -97,8 +100,9 @@ services:
       ORCHESTRATOR_URL: http://orchestrator:8050
       EIREL_WEB_SEARCH_TOOL_URL: ${EIREL_WEB_SEARCH_TOOL_URL:-http://web-search-tool-service:8085}
       EIREL_WEB_SEARCH_TOOL_BACKEND: ${EIREL_WEB_SEARCH_TOOL_BACKEND:-catalog}
-      EIREL_X_TOOL_URL: ${EIREL_X_TOOL_URL:-http://x-tool-service:8086}
       EIREL_SANDBOX_TOOL_URL: ${EIREL_SANDBOX_TOOL_URL:-http://sandbox-tool-service:8091}
+      EIREL_URL_FETCH_TOOL_URL: ${EIREL_URL_FETCH_TOOL_URL:-http://url-fetch-tool-service:8087}
+      EIREL_RAG_TOOL_URL: ${EIREL_RAG_TOOL_URL:-http://rag-tool-service:8088}
     depends_on:
       postgres:
         condition: service_started
@@ -108,9 +112,11 @@ services:
         condition: service_started
       web-search-tool-service:
         condition: service_healthy
-      x-tool-service:
-        condition: service_healthy
       sandbox-tool-service:
+        condition: service_healthy
+      url-fetch-tool-service:
+        condition: service_healthy
+      rag-tool-service:
         condition: service_healthy
     ports:
       - "127.0.0.1:${EXECUTION_WORKER_HOST_PORT:-18006}:8006"
@@ -202,28 +208,6 @@ services:
     ports:
       - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${WEB_SEARCH_TOOL_SERVICE_HOST_PORT:-18085}:8085"
 
-  x-tool-service:
-    <<: *eirel-ai-run
-    command: ["x-tool-service"]
-    environment:
-      EIREL_X_TOOL_API_TOKEN: ${EIREL_X_TOOL_API_TOKEN:-}
-      EIREL_X_BEARER_TOKEN: ${EIREL_X_BEARER_TOKEN:-}
-      EIREL_X_API_CALLS_PER_TASK: ${EIREL_X_API_CALLS_PER_TASK:-1}
-      EIREL_X_MOCK: ${EIREL_X_MOCK:-false}
-      REDIS_URL: ${REDIS_URL}
-    depends_on:
-      redis:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8086/healthz')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    ports:
-      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${X_TOOL_SERVICE_HOST_PORT:-18086}:8086"
-
   sandbox-tool-service:
     <<: *eirel-ai-run
     command: ["sandbox-tool-service"]
@@ -262,6 +246,62 @@ services:
     restart: unless-stopped
     ports:
       - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${SANDBOX_TOOL_SERVICE_HOST_PORT:-18091}:8091"
+
+  url-fetch-tool-service:
+    <<: *eirel-ai-run
+    command: ["url-fetch-tool-service"]
+    environment:
+      EIREL_URL_FETCH_API_TOKEN: ${EIREL_URL_FETCH_API_TOKEN:-}
+      EIREL_URL_FETCH_PORT: 8087
+      EIREL_URL_FETCH_DEFAULT_MAX_REQUESTS: ${EIREL_URL_FETCH_DEFAULT_MAX_REQUESTS:-10000}
+      EIREL_URL_FETCH_MAX_RESPONSE_BYTES: ${EIREL_URL_FETCH_MAX_RESPONSE_BYTES:-1048576}
+      EIREL_URL_FETCH_TIMEOUT_SECONDS: ${EIREL_URL_FETCH_TIMEOUT_SECONDS:-15.0}
+      EIREL_URL_FETCH_MAX_REDIRECTS: ${EIREL_URL_FETCH_MAX_REDIRECTS:-5}
+      EIREL_URL_FETCH_PER_HOST_RATE: ${EIREL_URL_FETCH_PER_HOST_RATE:-4}
+      EIREL_URL_FETCH_PER_HOST_WINDOW_SECONDS: ${EIREL_URL_FETCH_PER_HOST_WINDOW_SECONDS:-10.0}
+      REDIS_URL: ${REDIS_URL}
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8087/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    ports:
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${URL_FETCH_TOOL_SERVICE_HOST_PORT:-18087}:8087"
+
+  rag-tool-service:
+    <<: *eirel-ai-run
+    command: ["rag-tool-service"]
+    environment:
+      EIREL_RAG_TOOL_API_TOKEN: ${EIREL_RAG_TOOL_API_TOKEN:-}
+      EIREL_RAG_TOOL_PORT: 8088
+      EIREL_RAG_DEFAULT_MAX_REQUESTS: ${EIREL_RAG_DEFAULT_MAX_REQUESTS:-30}
+      EIREL_RAG_MAX_DOCUMENTS_PER_INDEX: ${EIREL_RAG_MAX_DOCUMENTS_PER_INDEX:-200}
+      EIREL_RAG_MAX_CHARS_PER_DOC: ${EIREL_RAG_MAX_CHARS_PER_DOC:-200000}
+      # Embedding provider — defaults to OpenAI's text-embedding-3-small.
+      # Reuses OPENAI_API_KEY if not separately set.
+      EIREL_RAG_EMBEDDING_BASE_URL: ${EIREL_RAG_EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+      EIREL_RAG_EMBEDDING_API_KEY: ${EIREL_RAG_EMBEDDING_API_KEY:-${OPENAI_API_KEY:-}}
+      EIREL_RAG_EMBEDDING_MODEL: ${EIREL_RAG_EMBEDDING_MODEL:-text-embedding-3-small}
+      OWNER_API_URL: http://${SERVER_A_HOST_IP:-host.docker.internal}:${OWNER_API_NODEPORT:-30020}
+      EIREL_INTERNAL_SERVICE_TOKEN: ${EIREL_INTERNAL_SERVICE_TOKEN:-internal-token}
+      REDIS_URL: ${REDIS_URL}
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8088/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    ports:
+      - "${SERVER_A_HOST_IP:?SERVER_A_HOST_IP must be set in .env}:${RAG_TOOL_SERVICE_HOST_PORT:-18088}:8088"
 
   prometheus:
     profiles: ["monitoring"]

@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import PlainTextResponse
 
 from tool_platforms._charge_tool import charge_tool_cost
+from tool_platforms._record_tool_call import record_tool_call
 from tool_platforms.web_search_tool_service.backends import (
     DEFAULT_BRAVE_SEARCH_BASE_URL,
     DEFAULT_FETCH_USER_AGENT,
@@ -75,9 +76,6 @@ def default_catalog_path() -> Path | None:
     override = os.getenv("EIREL_WEB_SEARCH_TOOL_CATALOG_PATH", "").strip()
     if override:
         return Path(override)
-    legacy = os.getenv("EIREL_RESEARCH_TOOL_CATALOG_PATH", "").strip()
-    if legacy:
-        return Path(legacy)
     return None
 
 
@@ -124,18 +122,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.catalog_store = catalog_store or load_catalog_store(default_catalog_path())
-        app.state.auth_token = os.getenv(
-            "EIREL_WEB_SEARCH_TOOL_API_TOKEN",
-            os.getenv("EIREL_RESEARCH_TOOL_API_TOKEN", ""),
-        )
+        app.state.auth_token = os.getenv("EIREL_WEB_SEARCH_TOOL_API_TOKEN", "")
         backends_str = backend
         if not backends_str:
             backends_str = os.getenv("EIREL_WEB_SEARCH_TOOL_BACKENDS")
         if not backends_str:
-            backends_str = os.getenv(
-                "EIREL_WEB_SEARCH_TOOL_BACKEND",
-                os.getenv("EIREL_RESEARCH_TOOL_BACKEND"),
-            )
+            backends_str = os.getenv("EIREL_WEB_SEARCH_TOOL_BACKEND")
         if not backends_str:
             has_brave = bool(os.getenv("EIREL_BRAVE_SEARCH_API_KEY", "").strip())
             has_serper = bool(os.getenv("EIREL_SERPER_API_KEY", "").strip())
@@ -207,16 +199,10 @@ def create_app(
             os.getenv("EIREL_RESEARCH_FETCH_USER_AGENT", DEFAULT_FETCH_USER_AGENT),
         )
         app.state.fetch_redirect_limit = int(
-            os.getenv(
-                "EIREL_WEB_SEARCH_FETCH_REDIRECT_LIMIT",
-                os.getenv("EIREL_RESEARCH_FETCH_REDIRECT_LIMIT", "5"),
-            )
+            os.getenv("EIREL_WEB_SEARCH_FETCH_REDIRECT_LIMIT", "5")
         )
         app.state.default_max_requests = int(
-            os.getenv(
-                "EIREL_WEB_SEARCH_TOOL_DEFAULT_MAX_REQUESTS",
-                os.getenv("EIREL_RESEARCH_TOOL_DEFAULT_MAX_REQUESTS", "12"),
-            )
+            os.getenv("EIREL_WEB_SEARCH_TOOL_DEFAULT_MAX_REQUESTS", "12")
         )
         app.state.job_usage: dict[str, JobUsageRecord] = {}
         app.state.fetch_transport = fetch_transport
@@ -419,6 +405,15 @@ def create_app(
         await charge_tool_cost(
             job_id=job_id, tool_name="web_search", amount_usd=per_query_cost,
         )
+        # Server-attested ledger row for the eval pipeline. Fire-and-forget;
+        # owner-api outage drops one row but never breaks the tool.
+        await record_tool_call(
+            job_id=job_id, tool_name="web_search",
+            args={"query": payload.query, "top_k": payload.top_k},
+            result={"backend": result.backend_name, "n_results": len(documents)},
+            cost_usd=per_query_cost,
+            status_str="ok",
+        )
         return SearchResponse(
             query=payload.query,
             snapshot_id=payload.snapshot_id,
@@ -515,6 +510,12 @@ def create_app(
         }
         usage.opened_pages[payload.document_id] = snapshot_row
         usage.opened_page_text[payload.document_id] = fetched["content"]
+        await record_tool_call(
+            job_id=job_id, tool_name="web_search.open_page",
+            args={"document_id": payload.document_id},
+            result={"final_url": fetched["final_url"], "n_chars": len(fetched["content"])},
+            status_str="ok",
+        )
         return PageOpenResponse(
             snapshot_id=payload.snapshot_id,
             document_id=payload.document_id,

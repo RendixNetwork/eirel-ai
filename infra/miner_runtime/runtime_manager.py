@@ -222,31 +222,68 @@ def _deployment_manifest_common(
     # explicitly from the values owner-api already has in settings.
     miner_env.append({"name": "EIREL_PROVIDER_PROXY_URL", "value": provider_proxy_url})
     miner_env.append({"name": "EIREL_PROVIDER_PROXY_TOKEN", "value": provider_proxy_token})
-    # Tool service URLs for the miner SDK (web_search / x_api / semantic
-    # scholar / sandbox). The shared Secret injected below provides the
-    # *_TOKEN counterparts but no URLs, so without these the miner
-    # instantiates tool clients with base_url="", fails silently on every
-    # call, and never records citations. Names match what the general_chat
-    # agent's _service_client() calls read via os.getenv.
+    # Tool service URLs for the miner SDK (web_search / sandbox). The
+    # shared Secret injected below provides the *_TOKEN counterparts
+    # but no URLs, so without these the miner instantiates tool clients
+    # with base_url="", fails silently on every call, and never records
+    # citations. Names match what the general_chat agent's
+    # _service_client() calls read via os.getenv.
     miner_env.append({
         "name": "EIREL_WEB_SEARCH_URL",
         "value": os.getenv("EIREL_WEB_SEARCH_TOOL_URL", ""),
     })
     miner_env.append({
-        "name": "EIREL_X_API_URL",
-        "value": os.getenv("EIREL_X_TOOL_URL", os.getenv("EIREL_X_TOOL_SERVICE_URL", "")),
-    })
-    miner_env.append({
-        "name": "EIREL_SEMANTIC_SCHOLAR_URL",
-        "value": os.getenv(
-            "EIREL_SEMANTIC_SCHOLAR_TOOL_SERVICE_URL",
-            os.getenv("EIREL_SEMANTIC_SCHOLAR_URL", ""),
-        ),
-    })
-    miner_env.append({
         "name": "EIREL_SANDBOX_URL",
         "value": os.getenv("EIREL_SANDBOX_TOOL_URL", os.getenv("EIREL_SANDBOX_TOOL_SERVICE_URL", "")),
     })
+    miner_env.append({
+        "name": "EIREL_URL_FETCH_URL",
+        "value": os.getenv("EIREL_URL_FETCH_TOOL_URL", ""),
+    })
+    miner_env.append({
+        "name": "EIREL_RAG_URL",
+        "value": os.getenv("EIREL_RAG_TOOL_URL", ""),
+    })
+    # Graph-runtime miners post their checkpoints back through
+    # eirel-ai's internal checkpoints API, keyed by a per-miner
+    # namespace. The namespace prefix matches what the checkpoints
+    # router expects (``miner-{deployment_id}``). Skipped for
+    # ``base_agent`` miners — they never call the SDK's
+    # PostgresCheckpointer, so the env vars would be inert anyway.
+    runtime_kind = str(getattr(runtime, "kind", "base_agent") or "base_agent")
+    if runtime_kind == "graph" and deployment_id:
+        backend_url = os.getenv(
+            "EIREL_CHECKPOINT_BACKEND_URL",
+            os.getenv("OWNER_API_URL", ""),
+        )
+        miner_env.append(
+            {"name": "EIREL_CHECKPOINT_BACKEND_URL", "value": backend_url}
+        )
+        miner_env.append(
+            {
+                "name": "EIREL_CHECKPOINT_NAMESPACE",
+                "value": f"miner-{deployment_id}",
+            }
+        )
+        miner_env.append(
+            {
+                "name": "EIREL_CHECKPOINT_BACKEND_TOKEN",
+                "value": internal_service_token,
+            }
+        )
+        # Resume-token signing secret. Graph agents use this to mint the
+        # token they return on Interrupt; the validator hands it back on
+        # the next turn and the SDK decodes it to find the checkpoint.
+        # Reuse the existing miner-internal secret rather than introducing
+        # a new key material — owner-api already owns and rotates it.
+        miner_env.append(
+            {
+                "name": "EIREL_RESUME_TOKEN_SECRET",
+                "value": os.getenv(
+                    "EIREL_RESUME_TOKEN_SECRET", internal_service_token
+                ),
+            }
+        )
     if shared_secret_name is not None:
         container["envFrom"] = [{"secretRef": {"name": shared_secret_name}}]
         container["env"] = miner_env
@@ -260,13 +297,39 @@ def _deployment_manifest_common(
             {"name": "MINER_HEALTH_PATH", "value": health_path},
             {"name": "MINER_INVOKE_PATH", "value": invoke_path},
             {"name": "EIREL_PROVIDER_PROXY_JOB_ID", "value": _job_id},
-            {"name": "X_TOOL_URL", "value": os.getenv("EIREL_X_TOOL_SERVICE_URL", "http://x-tool-service:8086")},
-            {"name": "X_TOOL_TOKEN", "value": os.getenv("EIREL_X_TOOL_SERVICE_TOKEN", "")},
-            {"name": "SEC_EDGAR_TOOL_URL", "value": os.getenv("EIREL_SEC_EDGAR_TOOL_SERVICE_URL", "http://sec-edgar-tool-service:8087")},
-            {"name": "SEC_EDGAR_TOOL_TOKEN", "value": os.getenv("EIREL_SEC_EDGAR_TOOL_SERVICE_TOKEN", "")},
             {"name": "SANDBOX_TOOL_URL", "value": os.getenv("EIREL_SANDBOX_TOOL_SERVICE_URL", "http://sandbox-tool-service:8091")},
             {"name": "SANDBOX_TOOL_TOKEN", "value": os.getenv("EIREL_SANDBOX_TOOL_SERVICE_TOKEN", "")},
+            {"name": "EIREL_URL_FETCH_URL", "value": os.getenv("EIREL_URL_FETCH_TOOL_URL", "http://url-fetch-tool-service:8087")},
+            {"name": "EIREL_RAG_URL", "value": os.getenv("EIREL_RAG_TOOL_URL", "http://rag-tool-service:8088")},
         ]
+        # Mirror the graph-runtime checkpoint env into the no-secret
+        # branch so K8s pods deployed without a shared Secret still see
+        # the checkpoint backend config when ``runtime.kind == graph``.
+        if runtime_kind == "graph" and deployment_id:
+            backend_url = os.getenv(
+                "EIREL_CHECKPOINT_BACKEND_URL",
+                os.getenv("OWNER_API_URL", ""),
+            )
+            container["env"].extend(
+                [
+                    {"name": "EIREL_CHECKPOINT_BACKEND_URL", "value": backend_url},
+                    {
+                        "name": "EIREL_CHECKPOINT_NAMESPACE",
+                        "value": f"miner-{deployment_id}",
+                    },
+                    {
+                        "name": "EIREL_CHECKPOINT_BACKEND_TOKEN",
+                        "value": internal_service_token,
+                    },
+                    {
+                        "name": "EIREL_RESUME_TOKEN_SECRET",
+                        "value": os.getenv(
+                            "EIREL_RESUME_TOKEN_SECRET",
+                            internal_service_token,
+                        ),
+                    },
+                ]
+            )
     if code_configmap_name is not None:
         container["volumeMounts"] = [
             {"name": "submission-code", "mountPath": "/submission"},
@@ -541,8 +604,6 @@ class DockerMinerRuntimeManager(MinerRuntimeManager):
         internal_service_token = kwargs["internal_service_token"]
         provider_proxy_url = kwargs["provider_proxy_url"]
         provider_proxy_token = kwargs["provider_proxy_token"]
-        research_tool_url: str = kwargs.get("research_tool_url", "")
-        research_tool_token: str = kwargs.get("research_tool_token", "")
         run_budget_usd: str = str(kwargs.get("run_budget_usd", "30.0"))
         assigned_node_name = kwargs.get("assigned_node_name")
         requested_cpu_millis = int(kwargs.get("requested_cpu_millis", 0) or 0)
@@ -569,14 +630,10 @@ class DockerMinerRuntimeManager(MinerRuntimeManager):
         # compose service name directly; otherwise rewrite for host access.
         if self.docker_network:
             resolved_provider_proxy_url = provider_proxy_url
-            resolved_research_tool_url = research_tool_url
         else:
             resolved_provider_proxy_url = provider_proxy_url.replace(
                 "provider-proxy:8092", "host.docker.internal:18092"
             )
-            resolved_research_tool_url = research_tool_url.replace(
-                "research-tool-service:8085", "host.docker.internal:18085"
-            ) if research_tool_url else ""
         run_command = [
             self.docker_binary,
             "run",
@@ -616,16 +673,6 @@ class DockerMinerRuntimeManager(MinerRuntimeManager):
             f"EIREL_PROVIDER_PROXY_JOB_ID=miner-{kwargs.get('deployment_id') or submission_id}",
             "-e",
             f"EIREL_RUN_BUDGET_USD={run_budget_usd}",
-            "-e",
-            f"RESEARCH_TOOL_URL={resolved_research_tool_url}",
-            "-e",
-            f"EIREL_RESEARCH_TOOL_URL={resolved_research_tool_url}",
-            "-e",
-            f"RESEARCH_TOOL_TOKEN={research_tool_token}",
-            "-e",
-            f"EIREL_RESEARCH_TOOL_TOKEN={research_tool_token}",
-            "-e",
-            f"EIREL_RESEARCH_TOOL_JOB_ID=miner-{submission_id}",
             "-e",
             f"MINER_SUBMISSION_ID={submission_id}",
             self._base_image_tag,

@@ -89,6 +89,53 @@ class SpecialistBenchmarkTask(BaseModel):
         return ensure_family_id(str(value))
 
 
+class EvaluationConversationTurn(BaseModel):
+    """One turn in a multi-turn evaluation fixture.
+
+    ``user`` is always the user message for that turn. ``assistant`` is
+    optional:
+      * **None (default)** — *live* mode. The validator calls the miner
+        and the baseline for that turn; whatever each one replies is
+        appended to its own private history before the next user turn.
+      * **set** — *scripted* mode. Both miner and baseline see the
+        identical canned assistant message in their history; neither is
+        called for that turn. Used to set up specific multi-turn probes
+        (clarification, contradiction, reference-resolution, etc.).
+
+    The final turn is always live — it produces the assistant answer the
+    pairwise judge scores.
+
+    Distinct from the runtime ``ConversationTurn`` (defined later in
+    this module) which uses ``role`` / ``content`` for in-flight
+    history; this fixture model is the on-disk schema for a multi-turn
+    benchmark task and uses ``user`` / ``assistant`` to make scripted
+    vs live turns visually obvious.
+    """
+
+    user: str
+    assistant: str | None = None
+
+
+OracleSource = Literal["three_oracle", "deterministic"]
+
+# Legacy ``oracle_source`` values published by older bundles describing
+# the pool's gold-provenance shape (live_lookup baked from a structured
+# endpoint, sandbox computed deterministically, etc.). All map to
+# ``deterministic`` under the new architecture — the validator's
+# 3-oracle enrichment is opt-in via ``oracle_source="three_oracle"``,
+# which legacy bundles never set.
+_LEGACY_DETERMINISTIC_ORACLE_SOURCES: frozenset[str] = frozenset({
+    "live_endpoint",
+    "live_endpoint_composed",
+    "deterministic_grader",
+    "gpt5_oracle",  # eirel-eval-pool's prior single-GPT-5 path
+    "planted_fact",
+    "document_span",
+    "sandbox_reference",
+    "url_fetch_cache",
+})
+
+
 class FamilyEvaluationTask(BaseModel):
     task_id: str
     family_id: FamilyId
@@ -104,17 +151,77 @@ class FamilyEvaluationTask(BaseModel):
     # explicit field Pydantic would drop it on bundle validation, so the
     # dashboard would always render "no web".
     web_search: bool = False
+    # Multi-turn evaluation fixture. When set, the validator replays the
+    # ``turns`` script against the miner and the baseline (each building
+    # its own history) and judges the *final* assistant answer only.
+    # Single-turn tasks leave this None and use ``prompt``.
+    turns: list[EvaluationConversationTurn] | None = None
     risk_tags: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     retrieval_constraints: dict[str, Any] = Field(default_factory=dict)
     expected_output: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Tells the validator whether to run 3-oracle enrichment at
+    # task-claim time. ``three_oracle`` → fan out OpenAI/Gemini/Grok +
+    # Chutes reconciler, produce ``expected_claims`` in-memory,
+    # consumed by ``_judge_miner`` for every miner that judges this
+    # task. ``deterministic`` → skip enrichment; the pool's built-in
+    # grader (live_endpoint / sandbox_python / span F1 / regex) is the
+    # truth. None defaults to ``deterministic`` for back-compat with
+    # bundles published before this field existed.
+    oracle_source: OracleSource | None = None
 
     @field_validator("family_id", mode="before")
     @classmethod
     def normalize_evaluation_task_family_id(cls, value: Any) -> str:
         return ensure_family_id(str(value))
+
+    @field_validator("oracle_source", mode="before")
+    @classmethod
+    def normalize_oracle_source(cls, value: Any) -> str | None:
+        """Accept both new enum values and legacy gold-provenance tags.
+
+        Legacy bundles publish ``oracle_source`` as a free-form string
+        describing the pool's grader shape (``live_endpoint`` /
+        ``deterministic_grader`` / etc.). Map those to ``deterministic``
+        so existing pool deployments keep loading without coordinating
+        a lockstep cutover. New bundles emit ``three_oracle`` /
+        ``deterministic`` directly.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if cleaned in ("three_oracle", "deterministic"):
+            return cleaned
+        if cleaned in _LEGACY_DETERMINISTIC_ORACLE_SOURCES:
+            return "deterministic"
+        # Unknown value — drop to None rather than crash the load. The
+        # validator treats None as "deterministic, no enrichment" so a
+        # mistagged item still gets judged; operators see the
+        # unfamiliar value preserved nowhere on the loaded task.
+        return None
+
+
+class RagBundleDocument(BaseModel):
+    """One document inside a bundle-level RAG corpus."""
+
+    doc_id: str
+    content: str
+    title: str | None = None
+
+
+class RagBundleCorpus(BaseModel):
+    """A corpus the validator must index into the rag-tool-service
+    before tasks fan out. Every ``rag_required`` task references one
+    of these by ``corpus_id``."""
+
+    corpus_id: str
+    documents: list[RagBundleDocument] = Field(default_factory=list)
 
 
 class FamilyEvaluationBundle(BaseModel):
@@ -124,9 +231,12 @@ class FamilyEvaluationBundle(BaseModel):
     benchmark_version: str
     rubric_version: str
     tasks: list[FamilyEvaluationTask] = Field(default_factory=list)
+    # RAG eval — corpora the validator must POST to the rag-tool-service
+    # at run-start so ``rag.retrieve`` calls have an indexed source.
+    # Empty / missing on bundles without rag_required tasks (back-compat).
+    corpora: list[RagBundleCorpus] = Field(default_factory=list)
     retrieval_environment: dict[str, Any] | None = None
     allowed_tool_policy: dict[str, Any] | None = None
-    judge_config: dict[str, Any] | None = None
     policy_version: str | None = None
     source_artifacts: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -261,15 +371,10 @@ class ConversationScore(BaseModel):
     quality: float = Field(ge=0.0, le=1.0)
     latency: float = Field(ge=0.0, le=1.0)
     cost: float = Field(ge=0.0, le=1.0)
-    trace_gate: float = Field(ge=0.0, le=1.0)
     total: float = Field(ge=0.0, le=1.0)
     per_dimension: dict[str, float] = Field(default_factory=dict)
     mode: Literal["instant", "thinking"] = "instant"
     web_search: bool = False
-    # USD penalty the scoring manager should charge against the run budget
-    # when this conversation's trace integrity gate failed. 0.0 when the
-    # gate passed or when no penalty was configured.
-    trace_gate_penalty_usd: float = Field(ge=0.0, default=0.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -284,10 +389,6 @@ class MinerGeneralChatScore(BaseModel):
     llm_cost_usd: float = Field(ge=0.0, default=0.0)
     tool_cost_usd: float = Field(ge=0.0, default=0.0)
     cost_rejection_count: int = Field(ge=0, default=0)
-    # Bad-actor flag: True iff any conversation in this run cited an
-    # active honeytoken URL. When True, ``blended`` is forced to 0.0
-    # regardless of quality — fabricated citations zero the miner.
-    honeytoken_cited: bool = False
     conversation_scores: list[ConversationScore] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -323,13 +424,13 @@ VERDICT_SCORES: dict[str, float] = {
 
 
 class BaselineResponse(BaseModel):
-    """Normalized OpenAI Responses API baseline for a task.
+    """Pairwise-comparator reference for a task.
 
-    Filled by the validator's openai_baseline client and stored on the
-    TaskEvaluation row so reruns of the same task (e.g. after a validator
-    crash and re-claim) don't repeat the baseline call. Citations are
-    preserved for dashboard display only — they do not participate in
-    scoring.
+    Filled by the validator from the chosen oracle's cached answer
+    (no separate per-task model call) and stored on the TaskEvaluation
+    row so reruns of the same task don't re-run reconciliation.
+    Citations are preserved for dashboard display only — they do not
+    participate in scoring.
     """
 
     response_text: str

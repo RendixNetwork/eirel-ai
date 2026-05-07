@@ -247,7 +247,6 @@ async def test_run_staging_validation_reports_passed_matrix(monkeypatch):
                 "benchmark_version": f"{family_id}_family_v2",
                 "rubric_version": f"{family_id}_family_rubric_v2",
                 "retrieval_environment": {"mode": "live_web"} if family_id == "analyst" else {},
-                "judge_config": {"model": "judge-model"} if family_id == "analyst" else {},
                 "evaluation_bundle": {
                     "kind": "family_evaluation_bundle",
                     "tasks": (
@@ -451,7 +450,6 @@ async def test_run_staging_validation_reports_passed_matrix(monkeypatch):
     assert report["serving_cutover"]["checks"]["builder_registry_matches_release"] is True
     assert report["serving_cutover"]["checks"]["builder_winner_matches_serving_release"] is True
     assert report["serving_cutover"]["checks"]["workflow_composition_matches_family_winners"] is True
-    assert report["serving_cutover"]["checks"]["deprecated_endpoints_absent"] is True
 
 
 @pytest.mark.asyncio
