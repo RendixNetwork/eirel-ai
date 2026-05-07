@@ -16,6 +16,7 @@ from shared.common.redis_job_ledger import (
     create_job_ledger,
 )
 from tool_platforms._charge_tool import charge_tool_cost
+from tool_platforms._record_tool_call import record_tool_call
 from tool_platforms.sandbox_tool_service.backends import (
     SandboxBackend,
     SubprocessBackend,
@@ -23,6 +24,7 @@ from tool_platforms.sandbox_tool_service.backends import (
 from tool_platforms.sandbox_tool_service.models import (
     SandboxExecuteRequest,
     SandboxExecuteResponse,
+    SandboxFileWrite,
 )
 
 
@@ -80,6 +82,13 @@ def create_app(
             yield
         finally:
             await app.state.job_ledger.close()
+            shutdown_backend = getattr(app.state, "backend", None)
+            close = getattr(shutdown_backend, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:  # pragma: no cover - best-effort teardown
+                    pass
 
     app = FastAPI(
         title="sandbox-tool-service",
@@ -202,10 +211,17 @@ def create_app(
         app.state.metrics["execute_requests_total"] += 1
         retrieved_at = _utcnow()
 
+        attachments = (
+            [a.model_dump() for a in payload.attachments]
+            if payload.attachments
+            else None
+        )
         result = await app.state.backend.execute(
             code=payload.code,
             timeout_seconds=payload.timeout_seconds,
             memory_mb=payload.memory_mb,
+            session_id=payload.session_id,
+            attachments=attachments,
         )
 
         if result.timed_out:
@@ -220,7 +236,30 @@ def create_app(
         await charge_tool_cost(
             job_id=job_id, tool_name="sandbox", amount_usd=per_exec_cost,
         )
+        await record_tool_call(
+            job_id=job_id, tool_name="sandbox",
+            args={
+                "code_n_bytes": len(payload.code.encode("utf-8")),
+                "session_id": payload.session_id,
+                "n_attachments": len(payload.attachments or []),
+            },
+            result={
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+                "stdout_n_chars": len(result.stdout or ""),
+                "stderr_n_chars": len(result.stderr or ""),
+                "n_files_written": len(getattr(result, "files", ()) or ()),
+                "timed_out": result.timed_out,
+            },
+            latency_ms=int(result.duration_ms or 0),
+            cost_usd=per_exec_cost,
+            status_str="ok" if result.exit_code == 0 and not result.timed_out else "error",
+        )
 
+        files_payload = [
+            SandboxFileWrite(path=f.path, size=f.size, content_b64=f.content_b64)
+            for f in getattr(result, "files", ())
+        ]
         return SandboxExecuteResponse(
             stdout=result.stdout,
             stderr=result.stderr,
@@ -229,9 +268,12 @@ def create_app(
             truncated=result.truncated,
             retrieved_at=retrieved_at,
             retrieval_ledger_id=usage.ledger_id,
+            session_id=payload.session_id,
+            files=files_payload,
             metadata={
                 "backend": type(app.state.backend).__name__,
                 "timed_out": result.timed_out,
+                "session_id": payload.session_id,
             },
         )
 

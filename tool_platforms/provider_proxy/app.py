@@ -41,6 +41,30 @@ logger = logging.getLogger(__name__)
 class ChargeToolRequest(_BaseModel):
     tool_name: str
     amount_usd: float = _Field(ge=0.0)
+    span_id: str | None = None
+    parent_span_id: str | None = None
+
+
+class ReserveBatchEstimate(_BaseModel):
+    estimated_cost: float = _Field(ge=0.0)
+    estimated_tokens: int = _Field(ge=0)
+    provider: str
+    model: str
+    span_id: str | None = None
+
+
+class ReserveBatchRequest(_BaseModel):
+    """Atomic batch reservation for graph parallel-tool dispatch.
+
+    All ``estimates`` must fit under the run budget *together* — if the
+    sum would exceed it, none are reserved and the call returns a 429.
+    This eliminates the race where N concurrent reserve_estimate calls
+    each pass an individually-affordable check but collectively blow
+    the cap.
+    """
+
+    max_usd_budget: float = _Field(ge=0.0)
+    estimates: list[ReserveBatchEstimate]
 
 
 @dataclass(slots=True)
@@ -182,6 +206,13 @@ def create_app() -> FastAPI:
                 tool_cost_usd += float(value)
             else:
                 llm_cost_usd += float(value)
+        # Aggregate per-span totals across buckets (tool/llm).
+        cost_by_span_totals: dict[str, float] = {}
+        for key, value in (usage.cost_by_span or {}).items():
+            span_id, _, _bucket = key.partition("::")
+            cost_by_span_totals[span_id] = round(
+                cost_by_span_totals.get(span_id, 0.0) + float(value), 8
+            )
         return {
             "cost_usd_used": usage.cost_usd_used,
             "llm_cost_usd": round(llm_cost_usd, 8),
@@ -189,6 +220,9 @@ def create_app() -> FastAPI:
             "max_usd_budget": usage.max_usd_budget,
             "cost_rejections": usage.cost_rejections,
             "per_provider": dict(usage.cost_by_provider),
+            "per_span": cost_by_span_totals,
+            "per_span_buckets": dict(usage.cost_by_span or {}),
+            "span_parents": dict(usage.span_parents or {}),
         }
 
     @app.post("/v1/jobs/{job_id}/charge_tool")
@@ -196,6 +230,8 @@ def create_app() -> FastAPI:
         job_id: str,
         body: ChargeToolRequest,
         _: str = Depends(require_auth),
+        x_eirel_span_id: str | None = Header(default=None),
+        x_eirel_parent_span_id: str | None = Header(default=None),
     ) -> dict[str, Any]:
         store = app.state.services.store
         if not await store.exists(job_id):
@@ -203,15 +239,67 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="job not found",
             )
+        # Header takes precedence over body.span_id so callers that wire
+        # tracing once at the HTTP layer don't have to plumb span ids
+        # through every payload. Body fields are kept as a fallback for
+        # codepaths that can't set headers (e.g. retries on a queued tool
+        # call replay).
+        span_id = x_eirel_span_id or body.span_id
+        parent_span_id = x_eirel_parent_span_id or body.parent_span_id
         accepted, cost_used = await store.charge_tool(
-            job_id=job_id, tool_name=body.tool_name, amount_usd=body.amount_usd,
+            job_id=job_id,
+            tool_name=body.tool_name,
+            amount_usd=body.amount_usd,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
         )
         if not accepted:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="run budget exhausted",
             )
-        return {"cost_usd_used": cost_used}
+        return {"cost_usd_used": cost_used, "span_id": span_id}
+
+    @app.post("/v1/jobs/{job_id}/reserve_batch_estimate")
+    async def reserve_batch_estimate(
+        job_id: str,
+        body: ReserveBatchRequest,
+        _: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Atomic batch reservation for parallel-tool dispatch.
+
+        On success returns the per-estimate ``span_id`` of every
+        reservation that landed alongside the new ``cost_usd_used``.
+        On budget exhaustion, NONE of the estimates are recorded and
+        the call 429s — that's the whole point of batching.
+        """
+        store = app.state.services.store
+        if not body.estimates:
+            return {"cost_usd_used": 0.0, "reserved": []}
+        accepted, cost_used = await store.reserve_batch_estimate(
+            job_id=job_id,
+            max_usd_budget=body.max_usd_budget,
+            estimates=[
+                {
+                    "estimated_cost": e.estimated_cost,
+                    "estimated_tokens": e.estimated_tokens,
+                    "provider": e.provider,
+                    "model": e.model,
+                    "span_id": e.span_id,
+                }
+                for e in body.estimates
+            ],
+        )
+        if not accepted:
+            app.state.services.metrics["quota_rejections_total"] += 1
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="run budget exhausted",
+            )
+        return {
+            "cost_usd_used": cost_used,
+            "reserved": [e.span_id for e in body.estimates],
+        }
 
     @app.post("/v1/chat/completions", response_model=ProviderProxyResponse)
     async def chat_completions(

@@ -47,6 +47,10 @@ _USAGE_PREFIX = "provider_proxy:usage:"
 _PROVIDER_COUNTS_PREFIX = "provider_proxy:provider_counts:"
 _MODEL_COUNTS_PREFIX = "provider_proxy:model_counts:"
 _COST_BY_PROVIDER_PREFIX = "provider_proxy:cost_by_provider:"
+# Per-graph-span cost attribution. Key = ``tool:<span_id>`` or
+# ``tool:<provider>:<span_id>`` so eiretes can compute per-span cost
+# without parsing the cost_by_provider hash.
+_COST_BY_SPAN_PREFIX = "provider_proxy:cost_by_span:"
 
 
 @dataclass(slots=True)
@@ -63,6 +67,12 @@ class JobUsage:
     max_usd_budget: float = 0.0
     cost_by_provider: dict[str, float] = field(default_factory=dict)
     cost_rejections: int = 0
+    # Graph-runtime per-span cost attribution. Keys are
+    # ``"<span_id>::<bucket>"`` where bucket is ``tool:<name>`` or
+    # ``llm:<provider>:<model>``. ``span_parents`` maps span_id ->
+    # parent_span_id so consumers can rebuild the span tree.
+    cost_by_span: dict[str, float] = field(default_factory=dict)
+    span_parents: dict[str, str] = field(default_factory=dict)
 
 
 # -- Lua scripts -------------------------------------------------------------
@@ -298,11 +308,25 @@ class ProviderJobStore:
         job_id: str,
         tool_name: str,
         amount_usd: float,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
     ) -> tuple[bool, float]:
         """Atomically check budget and charge a tool call.
 
         Returns ``(accepted, cost_usd_used)``.  ``accepted=False`` → 429.
+
+        When ``span_id`` is set, the same amount is also written to the
+        per-span cost hash so downstream consumers (eiretes trace KPIs)
+        can attribute cost to the graph span that emitted the call.
+        ``parent_span_id`` is recorded in the cost-by-span entry's
+        adjacent metadata key for parent linkage.
         """
+        # The Lua script handles only the budget-and-cost-by-provider
+        # bookkeeping; per-span cost is layered on top via a follow-up
+        # HINCRBYFLOAT on the dedicated key. That stays race-safe because
+        # the budget invariant is enforced by the Lua atomicity *before*
+        # we touch the span hash — over-charging the span hash is just
+        # accounting, never affects rejection.
         if self._lua_available:
             try:
                 result = await self._charge_tool_script(
@@ -318,6 +342,14 @@ class ProviderJobStore:
                 )
                 rejected = int(result[0]) == 1
                 cost_used = float(result[1])
+                if not rejected:
+                    await self._record_span_cost(
+                        job_id=job_id,
+                        span_id=span_id,
+                        parent_span_id=parent_span_id,
+                        amount_usd=amount_usd,
+                        bucket=f"tool:{tool_name}",
+                    )
                 return (not rejected, cost_used)
             except ResponseError as exc:
                 if "unknown command" not in str(exc).lower():
@@ -325,7 +357,11 @@ class ProviderJobStore:
                 self._lua_available = False
                 _logger.info("Lua scripting unavailable; using Python fallback path")
         return await self._charge_tool_fallback(
-            job_id=job_id, tool_name=tool_name, amount_usd=amount_usd,
+            job_id=job_id,
+            tool_name=tool_name,
+            amount_usd=amount_usd,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
         )
 
     async def _charge_tool_fallback(
@@ -334,6 +370,8 @@ class ProviderJobStore:
         job_id: str,
         tool_name: str,
         amount_usd: float,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
     ) -> tuple[bool, float]:
         usage_key = _USAGE_PREFIX + job_id
         cost_key = _COST_BY_PROVIDER_PREFIX + job_id
@@ -352,7 +390,109 @@ class ProviderJobStore:
                 pipe.expire(usage_key, self._ttl)
                 pipe.expire(cost_key, self._ttl)
                 await pipe.execute()
+            await self._record_span_cost(
+                job_id=job_id,
+                span_id=span_id,
+                parent_span_id=parent_span_id,
+                amount_usd=amount_usd,
+                bucket=f"tool:{tool_name}",
+            )
             return (True, cost + amount_usd)
+
+    async def reserve_batch_estimate(
+        self,
+        *,
+        job_id: str,
+        max_usd_budget: float,
+        estimates: list[dict],
+    ) -> tuple[bool, float]:
+        """Atomically reserve N estimates as one operation.
+
+        Either every estimate fits under ``max_usd_budget`` and all
+        reservations land, or none do and the call returns
+        ``(False, current_cost)``. Eliminates the over-reservation race
+        when graph parallel-tool nodes fire many ``reserve_estimate``
+        calls concurrently against the same job_id.
+
+        Each entry in ``estimates`` is a dict with keys
+        ``estimated_cost``, ``estimated_tokens``, ``provider``, ``model``,
+        and optional ``span_id`` for per-span cost attribution.
+        """
+        if not estimates:
+            usage = await self.get(job_id)
+            return (True, usage.cost_usd_used if usage else 0.0)
+        usage_key = _USAGE_PREFIX + job_id
+        async with self._per_job_locks[job_id]:
+            cost_str = await self._client.hget(usage_key, "cost_usd_used")
+            current = float(cost_str) if cost_str is not None else 0.0
+            sum_estimated = sum(float(e["estimated_cost"]) for e in estimates)
+            if current + sum_estimated > max_usd_budget:
+                await self._client.hincrby(usage_key, "cost_rejections", 1)
+                await self._client.expire(usage_key, self._ttl)
+                return (False, current)
+            # All-or-nothing commit: pipe a single transaction that
+            # writes every estimate. Span attribution is best-effort and
+            # piggybacks onto the same pipe.
+            async with self._client.pipeline(transaction=True) as pipe:
+                pipe.hsetnx(usage_key, "started_at", str(time.monotonic()))
+                pipe.hsetnx(usage_key, "max_usd_budget", str(max_usd_budget))
+                for est in estimates:
+                    estimated_cost = float(est["estimated_cost"])
+                    estimated_tokens = int(est.get("estimated_tokens") or 0)
+                    provider = str(est["provider"])
+                    model = str(est["model"])
+                    pipe.hincrbyfloat(usage_key, "cost_usd_used", estimated_cost)
+                    pipe.hincrby(usage_key, "request_count", 1)
+                    pipe.hincrby(usage_key, "estimated_total_tokens", estimated_tokens)
+                    pipe.hincrby(
+                        _PROVIDER_COUNTS_PREFIX + job_id, provider, 1
+                    )
+                    pipe.hincrby(
+                        _MODEL_COUNTS_PREFIX + job_id, f"{provider}:{model}", 1
+                    )
+                pipe.expire(usage_key, self._ttl)
+                pipe.expire(_PROVIDER_COUNTS_PREFIX + job_id, self._ttl)
+                pipe.expire(_MODEL_COUNTS_PREFIX + job_id, self._ttl)
+                await pipe.execute()
+            # Per-span attribution after the budget commit — best effort.
+            for est in estimates:
+                span_id = est.get("span_id")
+                if not span_id:
+                    continue
+                await self._record_span_cost(
+                    job_id=job_id,
+                    span_id=str(span_id),
+                    parent_span_id=None,
+                    amount_usd=float(est["estimated_cost"]),
+                    bucket=f"llm:{est['provider']}:{est['model']}",
+                )
+            return (True, current + sum_estimated)
+
+    async def _record_span_cost(
+        self,
+        *,
+        job_id: str,
+        span_id: str | None,
+        parent_span_id: str | None,
+        amount_usd: float,
+        bucket: str,
+    ) -> None:
+        if not span_id:
+            return
+        cost_by_span_key = _COST_BY_SPAN_PREFIX + job_id
+        # Hash field is "<span_id>:<bucket>" so a span that drives both
+        # an LLM call and a tool call surfaces both buckets.
+        field = f"{span_id}::{bucket}"
+        async with self._client.pipeline(transaction=True) as pipe:
+            pipe.hincrbyfloat(cost_by_span_key, field, float(amount_usd))
+            if parent_span_id:
+                pipe.hset(
+                    cost_by_span_key,
+                    f"__parent::{span_id}",
+                    parent_span_id,
+                )
+            pipe.expire(cost_by_span_key, self._ttl)
+            await pipe.execute()
 
     # ------------------------------------------------------------------
     # Reads
@@ -366,14 +506,29 @@ class ProviderJobStore:
         provider_counts_key = _PROVIDER_COUNTS_PREFIX + job_id
         model_counts_key = _MODEL_COUNTS_PREFIX + job_id
         cost_key = _COST_BY_PROVIDER_PREFIX + job_id
+        cost_by_span_key = _COST_BY_SPAN_PREFIX + job_id
         async with self._client.pipeline(transaction=False) as pipe:
             pipe.hgetall(usage_key)
             pipe.hgetall(provider_counts_key)
             pipe.hgetall(model_counts_key)
             pipe.hgetall(cost_key)
-            usage_raw, provider_raw, model_raw, cost_raw = await pipe.execute()
+            pipe.hgetall(cost_by_span_key)
+            (
+                usage_raw,
+                provider_raw,
+                model_raw,
+                cost_raw,
+                span_raw,
+            ) = await pipe.execute()
         if not usage_raw:
             return None
+        cost_by_span: dict[str, float] = {}
+        span_parents: dict[str, str] = {}
+        for k, v in (span_raw or {}).items():
+            if k.startswith("__parent::"):
+                span_parents[k[len("__parent::"):]] = str(v)
+            else:
+                cost_by_span[k] = float(v)
         return JobUsage(
             started_at=float(usage_raw.get("started_at", 0.0) or 0.0),
             request_count=int(usage_raw.get("request_count", 0) or 0),
@@ -385,6 +540,8 @@ class ProviderJobStore:
             provider_request_counts={k: int(v) for k, v in (provider_raw or {}).items()},
             model_request_counts={k: int(v) for k, v in (model_raw or {}).items()},
             cost_by_provider={k: float(v) for k, v in (cost_raw or {}).items()},
+            cost_by_span=cost_by_span,
+            span_parents=span_parents,
         )
 
     async def list_all(self) -> dict[str, JobUsage]:
