@@ -32,6 +32,20 @@ router = APIRouter(tags=["runtime"])
 # own timeout fires.
 _STREAM_TIMEOUT_SECONDS = 660.0
 
+# Graph-runtime miners can run multi-turn cycles with reflection +
+# parallel tool dispatch — set a longer wall-clock budget for them so a
+# legitimately long graph doesn't get cut off mid-cycle. Triggered by
+# manifest.runtime.kind == "graph" via the per-call cost_tag context.
+_GRAPH_STREAM_TIMEOUT_SECONDS = 1800.0
+
+# Event taxonomy carried over the miner-pod NDJSON stream. The graph
+# rollout introduces ``tool_result``, ``trace``, and ``checkpoint``
+# alongside the existing ``delta``/``tool_call``/``citation``/``done``.
+# ``trace`` is teed to eiretes for KPI computation but never reaches
+# downstream consumers.
+_TRACE_EVENT = "trace"
+_TERMINAL_EVENT = "done"
+
 # Provider-proxy URL used for cost reconciliation after a miner stream
 # completes. Owner-api stamps a per-task ``X-Eirel-Job-Id`` header on
 # the way to the miner; the miner SDK forwards that as the proxy
@@ -484,6 +498,9 @@ async def _proxy_stream_lines_to_pod(
     pod_endpoint: str,
     payload: dict[str, Any],
     cost_tag: str | None = None,
+    runtime_kind: str = "base_agent",
+    run_id: str | None = None,
+    deployment_hotkey: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Forward the pod's NDJSON line-by-line.
 
@@ -498,29 +515,54 @@ async def _proxy_stream_lines_to_pod(
     tag and merge ``{proxy_cost_usd, proxy_request_count, ...}`` into
     the chunk's ``metadata`` before re-emitting. Cost data is the
     server-side ground truth; miner self-report is never trusted.
+
+    Event taxonomy
+    --------------
+    Event taxonomy: ``delta`` / ``tool_call`` / ``tool_result`` /
+    ``citation`` / ``trace`` / ``checkpoint`` / ``done``. All
+    non-``done`` events pass through byte-for-byte to the caller.
     """
     url = f"{pod_endpoint.rstrip('/')}/v1/agent/infer/stream"
     headers = {"X-Eirel-Job-Id": cost_tag} if cost_tag else {}
     pending_done: dict[str, Any] | None = None
+    trace_buffer: list[dict[str, Any]] = []
+    timeout = (
+        _GRAPH_STREAM_TIMEOUT_SECONDS
+        if runtime_kind == "graph"
+        else _STREAM_TIMEOUT_SECONDS
+    )
     try:
-        async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     stripped = line.strip()
                     if not stripped:
                         continue
-                    # Hold the terminal ``done`` chunk so we can
-                    # augment it with cost metadata before forwarding.
-                    # All non-done chunks pass through verbatim.
                     try:
                         parsed = _json.loads(stripped)
                     except _json.JSONDecodeError:
+                        # Non-JSON garbage: pass through so the consumer
+                        # sees exactly what the pod emitted.
                         yield (stripped + "\n").encode("utf-8")
                         continue
-                    if isinstance(parsed, dict) and parsed.get("event") == "done":
-                        pending_done = parsed
-                        continue
+                    if isinstance(parsed, dict):
+                        event = parsed.get("event")
+                        if event == _TERMINAL_EVENT:
+                            # Hold the terminal ``done`` so we can
+                            # augment it with cost metadata before
+                            # forwarding.
+                            pending_done = parsed
+                            continue
+                        if event == _TRACE_EVENT:
+                            # Tee trace frames to eiretes; never forward
+                            # them downstream — consumers expect only
+                            # the wire-stable event vocabulary.
+                            trace_buffer.append(parsed)
+                            continue
+                    # All other events (delta, tool_call, tool_result,
+                    # citation, checkpoint, plus any future additions)
+                    # pass through byte-for-byte.
                     yield (stripped + "\n").encode("utf-8")
     except httpx.HTTPStatusError as exc:
         logger.warning("stream pod returned %d for %s", exc.response.status_code, url)
@@ -553,8 +595,40 @@ async def _proxy_stream_lines_to_pod(
                 float(cost.get("tool_cost_usd") or 0.0), 8,
             )
             meta["proxy_cost_absent"] = bool(cost.get("absent", False))
+            # Per-graph-span cost attribution: surfaces the roll-up
+            # so eiretes' trace KPIs and the leaderboard can attribute
+            # cost to the specific span that emitted it.
+            per_span = cost.get("per_span") or {}
+            if isinstance(per_span, dict) and per_span:
+                meta["proxy_cost_by_span"] = {
+                    str(k): round(float(v), 8) for k, v in per_span.items()
+                }
             pending_done["metadata"] = meta
+
+    # Advertise the runtime kind so eiretes knows the pod shape.
+    if runtime_kind:
+        meta = pending_done.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.setdefault("runtime_kind", runtime_kind)
+        pending_done["metadata"] = meta
+
     yield (_json.dumps(pending_done, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _runtime_kind_from_manifest(manifest_json: dict[str, Any] | None) -> str:
+    """Extract ``runtime.kind`` from a submission manifest.
+
+    Defaults to ``base_agent`` for old manifests that predate the field.
+    """
+    if not isinstance(manifest_json, dict):
+        return "base_agent"
+    runtime_section = manifest_json.get("runtime")
+    if isinstance(runtime_section, dict):
+        kind = runtime_section.get("kind")
+        if isinstance(kind, str) and kind:
+            return kind
+    return "base_agent"
 
 
 async def _eval_stream_impl(
@@ -565,12 +639,18 @@ async def _eval_stream_impl(
     payload: dict[str, Any],
 ) -> StreamingResponse:
     services: ManagedOwnerServices = request.app.state.services
+    runtime_kind = "base_agent"
+    deployment_hotkey: str | None = None
     with services.db.sessionmaker() as session:
         deployment = session.get(ManagedDeployment, deployment_id)
         if deployment is None:
             raise HTTPException(status_code=404, detail="deployment not found")
         if deployment.status == "retired":
             raise HTTPException(status_code=409, detail="deployment retired")
+        deployment_hotkey = deployment.miner_hotkey
+        submission = session.get(ManagedMinerSubmission, deployment.submission_id)
+        if submission is not None:
+            runtime_kind = _runtime_kind_from_manifest(submission.manifest_json)
         if run_id is not None:
             snapshot, member = services.resolve_run_member(
                 session, run_id=run_id, deployment_id=deployment_id,
@@ -591,6 +671,9 @@ async def _eval_stream_impl(
             pod_endpoint=handle.endpoint_url,
             payload=payload,
             cost_tag=cost_tag,
+            runtime_kind=runtime_kind,
+            run_id=run_id,
+            deployment_hotkey=deployment_hotkey,
         ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
@@ -657,12 +740,18 @@ async def serving_runtime_infer_stream(
     _token: None = Depends(require_internal_service_token),
 ) -> StreamingResponse:
     services: ManagedOwnerServices = request.app.state.services
+    runtime_kind = "base_agent"
+    serving_hotkey: str | None = None
     with services.db.sessionmaker() as session:
         serving = session.get(ServingDeployment, serving_deployment_id)
         if serving is None:
             raise HTTPException(status_code=404, detail="serving deployment not found")
         if serving.status != "healthy" or serving.health_status != "healthy":
             raise HTTPException(status_code=409, detail="serving deployment is not healthy")
+        serving_hotkey = getattr(serving, "miner_hotkey", None)
+        submission = session.get(ManagedMinerSubmission, serving.submission_id)
+        if submission is not None:
+            runtime_kind = _runtime_kind_from_manifest(submission.manifest_json)
     await ensure_serving_runtime_available(
         services=services, serving_deployment_id=serving_deployment_id,
     )
@@ -677,6 +766,9 @@ async def serving_runtime_infer_stream(
             pod_endpoint=handle.endpoint_url,
             payload=payload,
             cost_tag=cost_tag,
+            runtime_kind=runtime_kind,
+            run_id=None,
+            deployment_hotkey=serving_hotkey,
         ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},

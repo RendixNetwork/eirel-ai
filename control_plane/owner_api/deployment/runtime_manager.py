@@ -48,8 +48,6 @@ class ManagedDeploymentRuntimeManager:
         assigned_node_name: str | None = None,
         requested_cpu_millis: int = 0,
         requested_memory_bytes: int = 0,
-        research_tool_url: str = "",
-        research_tool_token: str = "",
         run_budget_usd: float = 30.0,
     ) -> MinerRuntimeHandle:
         return await self.backend.ensure_runtime(
@@ -65,8 +63,6 @@ class ManagedDeploymentRuntimeManager:
             assigned_node_name=assigned_node_name,
             requested_cpu_millis=requested_cpu_millis,
             requested_memory_bytes=requested_memory_bytes,
-            research_tool_url=research_tool_url,
-            research_tool_token=research_tool_token,
             run_budget_usd=run_budget_usd,
         )
 

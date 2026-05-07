@@ -23,7 +23,6 @@ class RunTargetResponse(BaseModel):
     members: list[dict[str, Any]] = Field(default_factory=list)
     evaluation_bundle: dict[str, Any] | None = None
     evaluation_bundle_artifact: dict[str, Any] | None = None
-    judge_config: dict[str, Any] | None = None
     retrieval_environment: dict[str, Any] | None = None
     allowed_tool_policy: dict[str, Any] | None = None
     policy_version: str | None = None
@@ -213,7 +212,6 @@ class TaskClaimItem(BaseModel):
     task_payload: dict[str, Any]
     miners: list[TaskClaimMiner] = Field(default_factory=list)
     claim_expires_at: str
-    judge_config: dict[str, Any] | None = None
     rubric_version: str | None = None
     benchmark_version: str | None = None
 
@@ -271,28 +269,3 @@ class WeightsResponse(BaseModel):
     ready: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Owner dataset binding schemas (Phase 4 — owner-signed admin endpoints)
-# ---------------------------------------------------------------------------
-
-
-class DatasetBindingResponse(BaseModel):
-    id: str
-    family_id: str
-    run_id: str
-    bundle_uri: str
-    bundle_sha256: str
-    generator_version: str
-    generated_by: str
-    signature_hex: str
-    generator_provider: str
-    generator_model: str
-    status: str
-    provenance: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime | None = None
-    activated_at: datetime | None = None
-
-
-class DatasetBindingListResponse(BaseModel):
-    family_id: str
-    bindings: list[DatasetBindingResponse] = Field(default_factory=list)

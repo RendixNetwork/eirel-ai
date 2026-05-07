@@ -31,14 +31,6 @@ from shared.common.models import (
     TaskEvaluation,
     RunFamilyResult,
 )
-from control_plane.owner_api.evaluation.calibration import (
-    CALIBRATION_POLICY_VERSION,
-    CONSISTENCY_POLICY_VERSION,
-    CONSISTENCY_REQUIRED_PASS_COUNT,
-    CONSISTENCY_WINDOW,
-    supports_family_promotion_gates,
-)
-from control_plane.owner_api.evaluation.dataset_generator import build_generated_run_bundle
 from shared.contracts.models import BenchmarkRunRecord
 from shared.contracts.specialist_contracts import contract_for_family
 from shared.core.evaluation_models import FamilyEvaluationBundle
@@ -59,9 +51,10 @@ from control_plane.owner_api._helpers import (
     utcnow as _utcnow_fn,
 )
 from control_plane.owner_api.dataset_loader import (
-    BindingNotFoundError,
+    EvalPoolConfigError,
+    EvalPoolFetchError,
     LoaderResult,
-    load_owner_evaluation_bundle_via_binding,
+    load_owner_evaluation_bundle,
 )
 
 
@@ -197,23 +190,6 @@ class RunManager:
         return deployment_ids
 
     # ------------------------------------------------------------------
-    # Judge config
-    # ------------------------------------------------------------------
-
-    def _run_family_judge_config(self, family_id: str) -> dict[str, Any]:
-        policy = _evaluation_policy_payload(family_id)
-        return {
-            "base_url": self.settings.judge_base_url,
-            "api_key_present": bool(self.settings.judge_api_key),
-            "timeout_seconds": self.settings.judge_timeout_seconds,
-            "model": self._owner.judge_model,
-            "rubric_version": policy["rubric_version"],
-            "official_scoring_version": policy["official_scoring_version"],
-            "judge_mode": policy["judge_mode"],
-            "scoring_policy_version": policy["scoring_policy_version"],
-        }
-
-    # ------------------------------------------------------------------
     # Evaluation bundle construction & persistence
     # ------------------------------------------------------------------
 
@@ -222,64 +198,44 @@ class RunManager:
         *,
         family_id: str,
         run_id: str,
-        session: Session | None,
     ) -> FamilyEvaluationBundle:
-        """Resolve the evaluation bundle seed for a run.
+        """Resolve the evaluation bundle for a run from R2.
 
-        Lookup order:
-            1. ``OwnerDatasetBinding`` row for ``(family_id, run_id)`` →
-               fetch + verify via ``object_store``.
-            2. Filesystem under ``settings.owner_dataset_root_path`` (legacy /
-               dev fallback).
+        Convention-based: the bundle URI is derived as
+        ``s3://${EIREL_EVAL_POOL_BUCKET}/${family_id}/pool-run-${run_id}.json``.
+        ``ObjectStore`` is R2-aware via ``EIREL_R2_*`` env vars.
 
-        In ``s3`` source mode, step 2 is forbidden — a missing binding raises
-        a clear error so a run never opens against stale data.
+        A failed fetch raises — runs must never open against stale
+        or absent data.
         """
-        source_type = str(getattr(self.settings, "owner_dataset_source_type", "filesystem")).strip().lower()
-        if session is not None and self._owner.object_store is not None:
-            try:
-                result = load_owner_evaluation_bundle_via_binding(
-                    family_id=family_id,
-                    run_id=run_id,
-                    session=session,
-                    object_store=self._owner.object_store,
-                    cache_dir=getattr(self.settings, "owner_dataset_cache_dir", None),
-                    signature_verifier=self._owner.bundle_signature_verifier,
-                )
-            except BindingNotFoundError:
-                if source_type == "s3":
-                    raise RuntimeError(
-                        f"no active OwnerDatasetBinding for family={family_id!r} "
-                        f"run_id={run_id!r}; register the binding out-of-band"
-                    )
-                # Filesystem mode: fall back to disk loader.
-            else:
-                logger.info(
-                    "loaded evaluation bundle via binding family=%s run_id=%s sha256=%s cache_hit=%s",
-                    family_id,
-                    run_id,
-                    result.binding.bundle_sha256,
-                    result.cache_hit,
-                )
-                return result.bundle
-        return _load_owner_evaluation_bundle_seed(
-            root_path=self.settings.owner_dataset_root_path,
+        if self._owner.object_store is None:
+            raise RuntimeError(
+                "evaluation bundle requires an ObjectStore; "
+                "owner-api was started without one"
+            )
+        result = load_owner_evaluation_bundle(
             family_id=family_id,
+            run_id=run_id,
+            object_store=self._owner.object_store,
+            cache_dir=getattr(self.settings, "owner_dataset_cache_dir", None),
         )
+        logger.info(
+            "loaded evaluation bundle family=%s run_id=%s uri=%s cache_hit=%s bytes=%d",
+            family_id, run_id, result.bundle_uri, result.cache_hit, result.bytes_fetched,
+        )
+        return result.bundle
 
     def _build_run_evaluation_bundle(
         self,
         *,
         run: EvaluationRun,
         family_id: str,
-        session: Session | None = None,
     ) -> FamilyEvaluationBundle:
         family_id = ensure_family_id(family_id)
         policy = _evaluation_policy_payload(family_id)
         seed = self._load_evaluation_bundle_seed(
             family_id=family_id,
-            run_id=run.id,
-            session=session,
+            run_id=str(run.sequence),
         )
         retrieval_environment = (
             _live_research_retrieval_environment_payload(self.settings)
@@ -312,21 +268,16 @@ class RunManager:
                 "tasks": tasks,
                 "retrieval_environment": retrieval_environment,
                 "allowed_tool_policy": _default_allowed_tool_policy_for_bundle(seed),
-                "judge_config": self._run_family_judge_config(family_id),
                 "policy_version": str(policy["scoring_policy_version"]),
             }
         )
-        bundle = build_generated_run_bundle(
-            seed=prepared_seed,
-            run_id=run.id,
-            family_id=family_id,
-            benchmark_version=str(policy["benchmark_version"]),
-            rubric_version=str(policy["rubric_version"]),
-            dataset_source_root=self.settings.owner_dataset_root_path,
-            retrieval_environment=retrieval_environment,
-            allowed_tool_policy=_default_allowed_tool_policy_for_bundle(seed),
-            judge_config=self._run_family_judge_config(family_id),
-            policy_version=str(policy["scoring_policy_version"]),
+        bundle = prepared_seed.model_copy(
+            update={
+                "run_id": run.id,
+                "family_id": family_id,
+                "benchmark_version": str(policy["benchmark_version"]),
+                "rubric_version": str(policy["rubric_version"]),
+            }
         )
         return FamilyEvaluationBundle.model_validate(bundle.model_dump(mode="json"))
 
@@ -346,10 +297,23 @@ class RunManager:
             bundle_payload = self._build_run_evaluation_bundle(
                 run=run,
                 family_id=family_id,
-                session=session,
             ).model_dump(mode="json")
             evaluation_bundles[family_id] = bundle_payload
             metadata["evaluation_bundles"] = evaluation_bundles
+            # Index any RAG corpora into the rag-tool-service.
+            # Best-effort: log on failure, let the run continue. Fired
+            # only on the first-build (cache-miss) branch so we don't
+            # re-index every claim.
+            corpora_payload = bundle_payload.get("corpora") or []
+            if corpora_payload:
+                from control_plane.owner_api.evaluation.corpus_indexer import (
+                    index_bundle_corpora,
+                )
+                indexed = index_bundle_corpora(corpora_payload)
+                logger.info(
+                    "rag indexing summary family=%s run=%s indexed=%d corpora",
+                    family_id, run.id, len(indexed),
+                )
         tasks = [item for item in bundle_payload.get("tasks", []) if isinstance(item, dict)]
         summary_payload = {
             family_id: {
@@ -465,9 +429,6 @@ class RunManager:
         bundle = self.ensure_run_evaluation_bundle(session, run=run, family_id="analyst")
         retrieval_environment = bundle.get("retrieval_environment")
         return dict(retrieval_environment or {}) if isinstance(retrieval_environment, dict) else None
-
-    def run_live_research_judge_config(self) -> dict[str, Any]:
-        return self._run_family_judge_config("analyst")
 
     # ------------------------------------------------------------------
     # Artifact helpers
@@ -710,105 +671,6 @@ class RunManager:
                             else:
                                 selected_record = baseline_record
                                 metadata["winner_selection"] = "previous_winner_retained"
-                    blocked_top_candidate_submission_id: str | None = None
-                    blocked_top_candidate_failures: list[dict[str, Any]] = []
-                    blocked_top_candidate_consistency_failures: list[dict[str, Any]] = []
-                    if supports_family_promotion_gates(family_id):
-                        calibration_report = self._owner._build_family_calibration_report(
-                            session,
-                            run=run,
-                            family_id=family_id,
-                            ranked_records=ranked_records,
-                        )
-                        calibration_artifact = self._owner._persist_family_calibration_report(
-                            session,
-                            run=run,
-                            family_id=family_id,
-                            report=calibration_report,
-                        )
-                        metadata["calibration_policy_version"] = CALIBRATION_POLICY_VERSION
-                        metadata["consistency_policy_version"] = CONSISTENCY_POLICY_VERSION
-                        metadata["consistency_window"] = CONSISTENCY_WINDOW
-                        metadata["consistency_required_pass_count"] = CONSISTENCY_REQUIRED_PASS_COUNT
-                        metadata["calibration_report_artifact"] = calibration_artifact
-                        passing_records = [
-                            row
-                            for row in ranked_records
-                            if bool(dict(row.metadata_json or {}).get("promotion_gate_passed", False))
-                        ]
-                        consistency_passing_records = [
-                            row
-                            for row in passing_records
-                            if bool(dict(row.metadata_json or {}).get("consistency_gate_passed", False))
-                        ]
-                        metadata["gate_passed_candidate_count"] = len(passing_records)
-                        metadata["consistency_passed_candidate_count"] = len(consistency_passing_records)
-                        top_gate_meta = dict(ranked_records[0].metadata_json or {})
-                        top_consistency_meta = dict(ranked_records[0].metadata_json or {})
-                        metadata["top_candidate_gate_status"] = top_gate_meta.get("promotion_gate_status")
-                        metadata["top_candidate_consistency_status"] = top_consistency_meta.get("consistency_gate_status")
-                        score_selected_meta = dict(selected_record.metadata_json or {}) if selected_record is not None else {}
-                        selected_by_score_passed = bool(score_selected_meta.get("promotion_gate_passed", False))
-                        selected_by_score_consistent = bool(score_selected_meta.get("consistency_gate_passed", False))
-                        if selected_record is not None and (not selected_by_score_passed or not selected_by_score_consistent):
-                            blocked_top_candidate_submission_id = selected_record.submission_id
-                            blocked_top_candidate_failures = list(score_selected_meta.get("promotion_gate_failures", []) or [])
-                            blocked_top_candidate_consistency_failures = list(score_selected_meta.get("consistency_gate_failures", []) or [])
-                            metadata["blocked_top_candidate_submission_id"] = blocked_top_candidate_submission_id
-                            metadata["blocked_top_candidate_failures"] = blocked_top_candidate_failures
-                            metadata["blocked_top_candidate_consistency_failures"] = blocked_top_candidate_consistency_failures
-                            if consistency_passing_records:
-                                selected_record = consistency_passing_records[0]
-                                metadata["winner_selection"] = "gate_selected_highest_passing_candidate"
-                                metadata["promotion_recommendation"] = "promote"
-                                metadata["promotion_gate_status"] = "blocked_top_candidate"
-                                metadata["consistency_gate_status"] = "blocked_top_candidate"
-                            else:
-                                previous_winner_deployment = (
-                                    session.get(ManagedDeployment, previous_winner.winner_deployment_id)
-                                    if previous_winner is not None and previous_winner.winner_deployment_id
-                                    else None
-                                )
-                                previous_winner_healthy = (
-                                    previous_winner_deployment is not None
-                                    and previous_winner_deployment.status != "retired"
-                                    and previous_winner_deployment.health_status == "healthy"
-                                )
-                                if previous_winner is not None and previous_winner_healthy:
-                                    selected_record = None
-                                    winner_deployment_id = previous_winner.winner_deployment_id
-                                    winner_submission_id = previous_winner.winner_submission_id
-                                    winner_hotkey = previous_winner.winner_hotkey
-                                    has_winner = True
-                                    metadata["winner_selection"] = "gate_retained_previous_winner"
-                                    metadata["promotion_recommendation"] = "retain_previous_winner"
-                                    metadata["promotion_gate_status"] = "retained_previous_winner"
-                                    metadata["consistency_gate_status"] = "retained_previous_winner"
-                                    metadata["winner_gate_status"] = "retained_previous_winner"
-                                    metadata["winner_gate_failures"] = blocked_top_candidate_failures
-                                    metadata["winner_consistency_status"] = "retained_previous_winner"
-                                    metadata["selected_candidate_gate_passed"] = False
-                                    metadata["selected_candidate_gate_metrics"] = {}
-                                    metadata["selected_candidate_consistency_passed"] = False
-                                else:
-                                    has_winner = False
-                                    winner_deployment_id = None
-                                    winner_submission_id = None
-                                    winner_hotkey = None
-                                    selected_record = None
-                                    metadata["winner_selection"] = "gate_blocked_no_passing_candidate"
-                                    metadata["promotion_recommendation"] = "no_promotion"
-                                    metadata["promotion_gate_status"] = "no_promotion"
-                                    metadata["consistency_gate_status"] = "no_promotion"
-                                    metadata["winner_gate_status"] = "no_promotion"
-                                    metadata["winner_gate_failures"] = blocked_top_candidate_failures
-                                    metadata["winner_consistency_status"] = "no_promotion"
-                                    metadata["selected_candidate_gate_passed"] = False
-                                    metadata["selected_candidate_gate_metrics"] = {}
-                                    metadata["selected_candidate_consistency_passed"] = False
-                        else:
-                            metadata["promotion_gate_status"] = "passed"
-                            metadata["consistency_gate_status"] = "passed"
                     if selected_record is not None:
                         selected_meta = dict(selected_record.metadata_json or {})
                         winner_deployment_id = selected_record.deployment_id
@@ -824,25 +686,8 @@ class RunManager:
                         metadata["rollback_candidate_submission_id"] = previous_winner.winner_submission_id if previous_winner is not None else None
                         metadata["rollback_candidate_hotkey"] = previous_winner.winner_hotkey if previous_winner is not None else None
                         metadata["qualifies_for_incentives"] = (
-                            bool(selected_meta.get("promotion_gate_passed", False))
-                            and bool(selected_meta.get("consistency_gate_passed", False))
-                            if supports_family_promotion_gates(family_id)
-                            else float(selected_record.raw_score) >= min_score
+                            float(selected_record.raw_score) >= min_score
                         )
-                        if supports_family_promotion_gates(family_id):
-                            metadata["selected_candidate_gate_passed"] = bool(selected_meta.get("promotion_gate_passed", False))
-                            metadata["selected_candidate_gate_metrics"] = dict(selected_meta.get("promotion_gate_metrics", {}) or {})
-                            metadata["selected_candidate_consistency_passed"] = bool(selected_meta.get("consistency_gate_passed", False))
-                            metadata["winner_gate_status"] = selected_meta.get("promotion_gate_status")
-                            metadata["winner_gate_failures"] = list(selected_meta.get("promotion_gate_failures", []) or [])
-                            metadata["winner_consistency_status"] = selected_meta.get("consistency_gate_status")
-                    elif supports_family_promotion_gates(family_id):
-                        metadata.setdefault("selected_candidate_gate_passed", False)
-                        metadata.setdefault("selected_candidate_gate_metrics", {})
-                        metadata.setdefault("selected_candidate_consistency_passed", False)
-                        metadata.setdefault("winner_gate_status", None)
-                        metadata.setdefault("winner_gate_failures", [])
-                        metadata.setdefault("winner_consistency_status", None)
                 try:
                     metadata["family_contract"] = contract_for_family(family_id)
                 except KeyError:

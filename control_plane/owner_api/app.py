@@ -36,7 +36,6 @@ from control_plane.owner_api.routers import (
     health,
     submissions,
     deployments,
-    datasets,
     dashboard,
     evaluation_tasks,
     runs,
@@ -47,6 +46,8 @@ from control_plane.owner_api.routers import (
     runtime,
     validators,
     internal,
+    internal_eval,
+    checkpoints,
 )
 from shared.common.request_context import RequestIdMiddleware
 from shared.common.security import create_replay_protector
@@ -266,7 +267,7 @@ async def lifespan(app: FastAPI):
     run_migrations(db.engine)
     logger.info(
         "owner-api startup: backend=%s, database_url=%s, redis_url=%s, "
-        "provider_proxy_url=%s, web_search_tool_url=%s, x_tool_url=%s, "
+        "provider_proxy_url=%s, web_search_tool_url=%s, "
         "sandbox_tool_url=%s, "
         "namespace=%s, system_namespace=%s, control_plane_namespace=%s",
         settings.owner_runtime_backend,
@@ -274,7 +275,6 @@ async def lifespan(app: FastAPI):
         settings.redis_url,
         settings.provider_proxy_url,
         settings.web_search_tool_service_url,
-        settings.x_tool_service_url,
         settings.sandbox_tool_service_url,
         settings.owner_runtime_namespace,
         settings.owner_runtime_system_namespace,
@@ -304,7 +304,6 @@ async def lifespan(app: FastAPI):
             health_timeout_seconds=settings.owner_runtime_health_timeout_seconds,
             storage_root=settings.owner_baremetal_storage_root,
             provider_proxy_url_override=settings.owner_baremetal_provider_proxy_url,
-            research_tool_url_override=settings.owner_baremetal_research_tool_url,
         )
     else:
         backend = DockerMinerRuntimeManager(
@@ -467,10 +466,11 @@ app.include_router(evaluation_tasks.router)
 app.include_router(serving.router)
 app.include_router(workflows.router)
 app.include_router(operator.router)
-app.include_router(datasets.router)
 app.include_router(runtime.router)
 app.include_router(validators.router)
 app.include_router(internal.router)
+app.include_router(internal_eval.router)
+app.include_router(checkpoints.router)
 app.include_router(dashboard.router)
 
 from control_plane.owner_api.routers import admin as admin_router

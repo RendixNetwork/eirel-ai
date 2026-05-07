@@ -172,35 +172,41 @@ _SENSITIVE_TASK_METADATA_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _strip_sensitive_task_metadata(task_dict: dict[str, Any]) -> dict[str, Any]:
+def _strip_sensitive_task_metadata(
+    task_dict: dict[str, Any],
+    *,
+    strip_expected_output: bool = True,
+) -> dict[str, Any]:
     """Return a copy of ``task_dict`` with anti-gaming-sensitive fields removed.
 
     Removes:
     - sensitive keys from ``metadata`` (hidden_fixture/visibility/seed_id/topic)
-    - the entire ``expected_output`` field (C4) — it contains the rubric
-      (must_cover/must_avoid/judge_rubric/required_structure/...) which
-      validators must not receive. Validators invoke the miner with
-      ``prompt`` + ``inputs`` and then call the owner-api judge proxy
-      (``/v1/internal/tasks/{task_assignment_id}/judge``) to score; the
-      rubric never leaves the owner process.
+    - the full ``expected_output`` field (when ``strip_expected_output=True``)
+      — for the dashboard / public-display path, the reference answer
+      and grading rubric must not surface.
+
+    The validator-claim path passes ``strip_expected_output=False`` —
+    validators run inside the operator's stack and need
+    ``expected_output.answer`` / ``must_not_claim`` to compute the
+    multi-metric per-task score. Miners never see ``expected_output``
+    regardless; that strip happens upstream when the task is dispatched
+    to the miner pod.
     """
     task_metadata = dict(task_dict.get("metadata") or {})
     for key in _SENSITIVE_TASK_METADATA_KEYS:
         task_metadata.pop(key, None)
     result = dict(task_dict)
     result["metadata"] = task_metadata
-    # C4: strip the full rubric payload. Keep a minimal breadcrumb so
-    # validators can still branch on execution_mode / task_family without
-    # being able to read any grading criterion.
-    expected_output = task_dict.get("expected_output")
-    if isinstance(expected_output, dict):
-        result["expected_output"] = {
-            key: expected_output[key]
-            for key in ("execution_mode", "task_family")
-            if key in expected_output
-        }
-    else:
-        result["expected_output"] = {}
+    if strip_expected_output:
+        expected_output = task_dict.get("expected_output")
+        if isinstance(expected_output, dict):
+            result["expected_output"] = {
+                key: expected_output[key]
+                for key in ("execution_mode", "task_family")
+                if key in expected_output
+            }
+        else:
+            result["expected_output"] = {}
     return result
 
 
@@ -276,10 +282,10 @@ def _load_owner_evaluation_bundle_seed(
     """Filesystem loader.
 
     Reads ``<root_path>/<family_id>.json`` from disk and re-runs the analyst
-    contract. This path is used in dev mode and as a fallback when no
-    ``OwnerDatasetBinding`` exists for the run; production with bundles
-    registered in the bindings table goes through
-    ``load_owner_evaluation_bundle_via_binding``.
+    contract. This path is used in dev mode and tests. Production runs
+    fetch the bundle from R2 via ``load_owner_evaluation_bundle`` (resolved
+    by convention from ``EIREL_EVAL_POOL_BUCKET`` + ``family_id`` +
+    ``run_id``).
     """
     family_id = ensure_family_id(family_id)
     payload = json.loads((Path(root_path) / f"{family_id}.json").read_text(encoding="utf-8"))
@@ -313,24 +319,29 @@ def _default_allowed_tool_policy_for_bundle(
 
 
 def _live_research_retrieval_environment_payload(settings: Settings) -> dict[str, Any]:
+    """Default retrieval environment for live_web tasks.
+
+    Points at the web_search tool service. Returns a static skeleton
+    today; richer dynamic config is a follow-up.
+    """
+    del settings
     return {
         "mode": "live_web",
-        "backend": settings.research_tool_backend,
-        "search_provider": "brave" if settings.research_tool_backend == "brave_live_web" else "catalog",
-        "base_url": settings.research_tool_service_url,
-        "timeout_seconds": settings.research_tool_timeout_seconds,
-        "policy_version": settings.research_tool_policy_version,
+        "backend": "catalog",
+        "search_provider": "catalog",
+        "base_url": "",
+        "timeout_seconds": 20.0,
+        "policy_version": "v1",
         "allowed_tool_policy": {
             "provider_proxy_required": True,
             "provider_proxy_only": False,
             "allowed_tools": ["retrieval_search", "browser_open", "browser_find_on_page"],
         },
         "budget_policy": {
-            "retrieval_request_soft_limit": settings.research_tool_max_requests,
+            "retrieval_request_soft_limit": 12,
         },
         "trusted_domain_mode": "prefer_configured_domains",
     }
-
 
 
 def _score_record_official_family_score(row: DeploymentScoreRecord) -> float:
