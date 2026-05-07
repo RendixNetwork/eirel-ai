@@ -14,8 +14,11 @@ deployment, score the responses locally, and publish weights that drive
 TAO emissions.
 
 The only launch family is **`general_chat`** — multi-turn conversational
-assistant with optional web search, across `instant` and `thinking`
-modes. Future families are on the roadmap.
+assistant across `instant` and `thinking` modes. Owner-routed tool
+services are available to your agent: web search, URL fetch, a Python
+sandbox for verifiable computation, and `rag.retrieve` over per-run
+document corpora (used by `rag_required` tasks). Future families are on
+the roadmap.
 
 ## Prerequisites
 
@@ -49,12 +52,21 @@ btcli subnet register \
 pip install eirel
 ```
 
-The SDK ships a minimal `general_chat` agent under
-`eirel/examples/general_chat_agent/` that you can fork as a starting
-point. See the SDK README for:
+The SDK ships a reference `general_chat` agent under
+`eirel/examples/graph_general_chat/` that you can fork as a starting
+point. The canonical authoring shape is the graph SDK
+(`StateGraph` + `GraphAgent`); the legacy `BaseAgent` / `MinerApp`
+shape is still exported but graph-based composition is preferred for
+new agents.
 
-- `BaseAgent` / `MinerApp` patterns
+See the SDK README for:
+
+- `StateGraph` builder + `GraphAgent` (canonical authoring shape)
 - `MinerProviderConfig.from_env()` + `AgentProviderClient` for LLM routing
+- Built-in tools: `WebSearchTool`, `UrlFetchTool`, `SandboxTool`,
+  `RagTool` (the RAG client is required for `rag_required` tasks; pass
+  the `metadata.rag_corpus_id` from the request envelope to
+  `rag.retrieve`)
 - `submission.yaml` manifest format (declares family, model, providers,
   resource requests)
 - Local testing with `eirel serve`
@@ -123,6 +135,36 @@ with `--extrinsic-hash <hash> --block-hash <hash>` instead of re-paying.
 - **Latency is measured at the proxy.** Your deployment's p50 latency
   feeds a penalty curve on the operator side. Large p50 deficits drag
   your official score down even if raw quality is high.
+- **Tool calls are server-attested.** When you invoke a subnet tool
+  (web search, URL fetch, sandbox, `rag.retrieve`), the orchestrator
+  records the call on a server-side ledger. Validators score
+  `tool_attestation` from this ledger — claiming "I retrieved the
+  document" in your response without actually calling `rag.retrieve`
+  zeros that factor for `rag_required` tasks.
+- **Source goes public after the run that scored it closes.** During
+  the run, only you can download your own archive. Once the run is
+  marked `completed`, every submission archive scored in that run is
+  publicly downloadable + viewable from the leaderboard. Plan
+  accordingly — your competitors can study your code after a run
+  ends.
+
+## Per-task feedback
+
+After each run, you can fetch your per-(task) `EvalFeedback` rows from
+owner-api directly with a hotkey-signed request:
+
+```bash
+curl -H "X-Eirel-Hotkey: <your-hotkey>" \
+     -H "Authorization: <signature>" \
+     "$OWNER_API_URL/v1/eval/feedback?run_id=run-N"
+```
+
+The `eirel` CLI's `status` subcommand surfaces these alongside the
+scorecard. Each row includes `outcome` (correct / partial / wrong /
+hallucinated / refused / disputed), `failure_mode`, `guidance`,
+`composite_score`, and any `knockout_reasons` that zeroed your score.
+Rows are filtered to your hotkey by the signature — you can't read
+another miner's feedback.
 
 ## Troubleshooting
 
