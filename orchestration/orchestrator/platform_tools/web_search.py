@@ -17,8 +17,8 @@ from orchestration.orchestrator.platform_tools.base import PlatformTool, ToolRes
 
 _logger = logging.getLogger(__name__)
 
-RESEARCH_TOOL_URL = os.getenv(
-    "EIREL_RESEARCH_TOOL_SERVICE_URL", "http://research-tool-service:8085"
+WEB_SEARCH_TOOL_URL = os.getenv(
+    "EIREL_WEB_SEARCH_TOOL_URL", "http://web-search-tool-service:8085"
 )
 SEARCH_TIMEOUT = float(os.getenv("WEB_SEARCH_TIMEOUT_SECONDS", "20"))
 MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "10"))
@@ -52,7 +52,7 @@ class WebSearchTool(PlatformTool):
         try:
             async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{RESEARCH_TOOL_URL}/v1/search",
+                    f"{WEB_SEARCH_TOOL_URL}/v1/search",
                     json=payload,
                 )
                 resp.raise_for_status()
