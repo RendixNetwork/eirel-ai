@@ -206,12 +206,50 @@ def _file_exists(path: str) -> bool:
 
 
 def _build_default_s3_client() -> Any:
+    """Build a boto3 S3 client.
+
+    When R2 env vars are set, configure for Cloudflare R2 (S3-compatible
+    endpoint at ``https://<account>.r2.cloudflarestorage.com``); else
+    fall back to the default AWS session (reads ``AWS_*`` env vars).
+
+    Bundle URIs always look like ``s3://<bucket>/<key>`` regardless of
+    backend — switching from AWS to R2 is just a credentials swap.
+
+    R2 env vars (read in this order; all four required to enable R2 mode):
+        EIREL_R2_ACCOUNT_ID
+        EIREL_R2_ACCESS_KEY_ID
+        EIREL_R2_SECRET_ACCESS_KEY
+        (EIREL_R2_ENDPOINT_URL — optional override; default derived from
+        account id; useful for tests / localstack)
+    """
+    import os
+
     try:
         import boto3
     except ImportError as exc:
         raise ObjectStoreError(
             "boto3 is required for s3:// URIs but is not installed"
         ) from exc
+
+    account_id = os.getenv("EIREL_R2_ACCOUNT_ID", "").strip()
+    access_key_id = os.getenv("EIREL_R2_ACCESS_KEY_ID", "").strip()
+    secret_access_key = os.getenv("EIREL_R2_SECRET_ACCESS_KEY", "")
+    if account_id and access_key_id and secret_access_key:
+        endpoint_url = os.getenv("EIREL_R2_ENDPOINT_URL", "").strip()
+        if not endpoint_url:
+            endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+        from botocore.config import Config
+        return boto3.client(
+            service_name="s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+            region_name="auto",
+        )
     session = boto3.session.Session()
     return session.client("s3")
 

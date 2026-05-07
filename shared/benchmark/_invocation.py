@@ -42,51 +42,82 @@ def _build_body(
     task_id: str,
     history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build the slim 0.3.0 invocation body.
+    """Build the slim invocation body.
 
     Family agents are stateless specialists; they receive only the
-    prompt, the per-turn knobs, and any prior conversation. Anything
-    eval-internal (``expected_output``, ``category``, ``difficulty``,
-    grading hints) stays server-side and never crosses the wire — old
-    builds leaked the answer key here via ``inputs.expected_output``.
+    prompt, the per-turn knobs, prior conversation, and any inline
+    content (attached documents). Anything eval-internal
+    (``expected_output``, ``category``, ``difficulty``, grading hints)
+    stays server-side and never crosses the wire — old builds leaked
+    the answer key here via ``inputs.expected_output``.
 
-    By default we also populate the legacy fields
-    (``primary_goal``/``subtask``/``inputs.{mode,web_search}``) so
-    miners on 0.2.x keep working through the migration window. Set
-    ``EIREL_VALIDATOR_SLIM_ONLY=1`` to suppress the legacy mirror —
-    used to airtight-test that miners are reading the 0.3.0 contract
-    (any miner that secretly relied on the legacy fields will
-    immediately fail the run with empty prompts).
+    Inline content the miner SEES via ``inputs``:
+      * ``inputs.document_text``       — single attached document
+                                         (long-doc tasks).
+      * ``inputs.attached_documents``  — list of attached files
+                                         (compute / orchestrate tasks).
+      * ``inputs.mode`` / ``inputs.web_search`` — per-turn knobs;
+                                         defaults filled in below.
+
+    Multi-turn fixtures (``task.turns`` populated) ALSO pass the
+    pre-flattened structured transcript through ``body["turns"]``
+    alongside ``body["history"]``. Miners with session-memory
+    infrastructure should prefer ``turns`` for the structural signal;
+    naive miners can keep reading ``history``.
     """
     inputs = getattr(task, "inputs", {}) or {}
     mode = inputs.get("mode") or "instant"
     web_search = bool(inputs.get("web_search", False))
 
+    # Forward all task-level ``inputs.*`` (document_text,
+    # attached_documents, etc.) and fill in mode/web_search defaults
+    # only when missing. Don't STRIP fields the renderer baked in —
+    # those are how attached content reaches the miner.
+    forwarded_inputs: dict[str, Any] = dict(inputs)
+    forwarded_inputs.setdefault("mode", mode)
+    forwarded_inputs.setdefault("web_search", web_search)
+
     # Multi-turn replay: caller passes ``history`` accumulated from
     # prior turns of the same fixture. Single-turn tasks pass None /
-    # empty. We don't read ``inputs.history`` anymore — that was only
-    # relevant in the pre-Phase-B shape.
+    # empty. ``turns`` (when present on the task) preserves the
+    # structural fixture before flattening — miners with retrieval /
+    # summarization infrastructure can use it directly.
     cleaned_history = [
         {"role": h.get("role"), "content": h.get("content")}
         for h in (history or [])
         if isinstance(h, dict) and h.get("role") in ("user", "assistant")
     ]
+    raw_turns = getattr(task, "turns", None)
+    structured_turns: list[dict[str, Any]] | None = None
+    if raw_turns:
+        structured_turns = []
+        for t in raw_turns:
+            if hasattr(t, "user"):
+                structured_turns.append({
+                    "user": getattr(t, "user", ""),
+                    "assistant": getattr(t, "assistant", None),
+                })
+            elif isinstance(t, dict):
+                structured_turns.append({
+                    "user": str(t.get("user") or ""),
+                    "assistant": t.get("assistant"),
+                })
 
     body: dict[str, Any] = {
-        # Slim 0.3.0 contract — what new miners read.
+        # Slim contract — what new miners read.
         "turn_id": task_id,
         "prompt": prompt,
         "mode": mode,
         "web_search": web_search,
         "history": cleaned_history,
+        "inputs": forwarded_inputs,
     }
+    if structured_turns is not None:
+        body["turns"] = structured_turns
     if os.getenv("EIREL_VALIDATOR_SLIM_ONLY", "0") not in {"1", "true", "yes"}:
         body.update({
             "task_id": task_id,
             "family_id": family_id,
-            "primary_goal": prompt,
-            "subtask": prompt,
-            "inputs": {"mode": mode, "web_search": web_search},
         })
     return body
 
@@ -159,10 +190,10 @@ async def _invoke_stream(
                         citations = list(chunk["citations"])
                     if isinstance(chunk.get("metadata"), dict):
                         final_metadata = chunk["metadata"]
-                    # Tool calls: 0.3.0 emits them under
-                    # ``metadata.executed_tool_calls``; 0.2.x emitted a
-                    # top-level ``tool_calls``. Read both during the
-                    # migration window — slim wins when both present.
+                    # Tool calls: current SDK emits them under
+                    # ``metadata.executed_tool_calls``; pre-0.3.0 SDKs
+                    # emitted a top-level ``tool_calls``. Accept both —
+                    # the metadata location wins when both are present.
                     meta_tcs = final_metadata.get("executed_tool_calls")
                     if isinstance(meta_tcs, list):
                         tool_calls = list(meta_tcs)

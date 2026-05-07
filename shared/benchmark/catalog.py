@@ -14,11 +14,6 @@ TOOL_NAME_ALIASES = {
     "retrieval_find_on_page": "browser_find_on_page",
 }
 NON_CALLABLE_TOOLS = {"provider_proxy"}
-DEFAULT_RESEARCH_TOOLS = (
-    "retrieval_search",
-    "browser_open",
-    "browser_find_on_page",
-)
 
 
 def load_family_benchmarks(family_id: str, *, context: BenchmarkRunContext | None = None) -> list[BenchmarkTask]:
