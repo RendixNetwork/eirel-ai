@@ -23,7 +23,7 @@ class DistributedBenchmarkRequest(BaseModel):
     batch_size: int = Field(default=1, ge=1, le=40)
     max_parallel: int = Field(default=2, ge=1, le=20)
     rubric_version: str = "family_rubric_v2"
-    judge_model: str = Field(default_factory=lambda: os.getenv("EIREL_JUDGE_MODEL", "local-rubric-judge"))
+    judge_model: str = Field(default_factory=lambda: os.getenv("EIREL_EVAL_JUDGE_MODEL", "local-rubric-judge"))
 
 
 _AUTO_LOOP_ENABLED = os.getenv("EIREL_VALIDATOR_AUTO_LOOP", "true").lower() not in ("0", "false", "no")
