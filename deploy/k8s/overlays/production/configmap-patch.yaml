@@ -27,8 +27,7 @@ data:
   METAGRAPH_LISTENER_PUBLIC_URL: http://metagraph-listener.eirel-prod.svc.cluster.local:8011
   PROVIDER_PROXY_PUBLIC_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
   EIREL_PROVIDER_PROXY_URL: http://provider-proxy.eirel-prod.svc.cluster.local:8092
-  RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel-prod.svc.cluster.local:8085
-  EIREL_RESEARCH_TOOL_SERVICE_URL: http://research-tool-service.eirel-prod.svc.cluster.local:8085
+  EIREL_WEB_SEARCH_TOOL_URL: http://web-search-tool-service.eirel-prod.svc.cluster.local:8085
   # -- Object storage (production uses external S3) ---
   OBJECT_STORAGE_BACKEND: s3
   OBJECT_STORAGE_USE_SSL: "true"
