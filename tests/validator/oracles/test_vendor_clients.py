@@ -63,13 +63,29 @@ def _gemini_cfg() -> ProviderConfig:
 
 
 def _ok_openai(answer: str) -> httpx.Response:
+    """OpenAI/Grok ``/v1/responses`` payload shape (Responses API).
+
+    Both vendors share the same wire format here — a top-level
+    ``output`` array of ``{type: message, status, content: [...]}``
+    items, where each content part of type ``output_text`` carries the
+    text. See ``openai_compatible.py:_parse_responses_api_response``.
+    """
     return httpx.Response(
         200,
         json={
-            "choices": [{
-                "message": {"content": json.dumps({"answer": answer})},
-                "finish_reason": "stop",
-            }],
+            "output": [
+                {
+                    "type": "message",
+                    "status": "stop",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": json.dumps({"answer": answer}),
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
             "usage": {"total_cost_usd": 0.001},
         },
     )
@@ -131,12 +147,25 @@ async def test_openai_oracle_timeout_surfaces_error():
 
 
 async def test_openai_oracle_malformed_answer_surfaces_error():
+    """Server returned a valid Responses-API envelope but the
+    ``output_text`` is non-JSON garbage — oracle parses ``raw_text``
+    successfully but fails the JSON-shape extraction step."""
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": "not even close to JSON"}}
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "stop",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "not even close to JSON",
+                                "annotations": [],
+                            }
+                        ],
+                    }
                 ],
             },
         )
@@ -152,10 +181,25 @@ async def test_openai_oracle_malformed_answer_surfaces_error():
 
 
 async def test_openai_oracle_missing_answer_field_surfaces_error():
+    """JSON parses fine but the required ``answer`` field is absent."""
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps({"foo": "bar"})}}]},
+            json={
+                "output": [
+                    {
+                        "type": "message",
+                        "status": "stop",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps({"foo": "bar"}),
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+            },
         )
 
     transport = httpx.MockTransport(handler)
