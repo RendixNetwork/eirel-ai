@@ -77,7 +77,7 @@ class DeploymentStatus:
     last_pod_phase: str | None
 
 
-# -- Phase 4 helpers -----------------------------------------------------------
+# -- K8s deployment helpers ---------------------------------------------------
 
 _CONFIGMAP_MAX_BYTES = 900 * 1024
 

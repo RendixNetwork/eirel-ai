@@ -59,7 +59,6 @@ class BaremetalDockerMinerRuntimeManager(MinerRuntimeManager):
         health_timeout_seconds: float,
         storage_root: str = "/var/lib/eirel",
         provider_proxy_url_override: str = "",
-        research_tool_url_override: str = "",
     ) -> None:
         super().__init__()
         self.inventory_path = inventory_path
@@ -70,7 +69,6 @@ class BaremetalDockerMinerRuntimeManager(MinerRuntimeManager):
         self.health_timeout_seconds = health_timeout_seconds
         self.storage_root = storage_root
         self._provider_proxy_url_override = provider_proxy_url_override
-        self._research_tool_url_override = research_tool_url_override
         self._node_map: dict[str, BaremetalNode] = {}
         self._base_image_ready: bool = False
         self._base_image_lock = asyncio.Lock()
@@ -303,8 +301,6 @@ class BaremetalDockerMinerRuntimeManager(MinerRuntimeManager):
         manifest = kwargs["manifest"]
         provider_proxy_url: str = self._provider_proxy_url_override or kwargs.get("provider_proxy_url", "")
         provider_proxy_token: str = kwargs.get("provider_proxy_token", "")
-        research_tool_url: str = self._research_tool_url_override or kwargs.get("research_tool_url", "")
-        research_tool_token: str = kwargs.get("research_tool_token", "")
         internal_service_token: str = kwargs.get("internal_service_token", "")
         assigned_node_name: str | None = kwargs.get("assigned_node_name")
         requested_cpu_millis = int(kwargs.get("requested_cpu_millis", 0) or 0)
@@ -359,11 +355,6 @@ class BaremetalDockerMinerRuntimeManager(MinerRuntimeManager):
             "-e", f"MINER_MODEL={getattr(inference, 'model', 'gpt-4.1-mini')}",
             "-e", f"PROVIDER_PROXY_URL={provider_proxy_url}",
             "-e", f"PROVIDER_PROXY_TOKEN={provider_proxy_token}",
-            "-e", f"RESEARCH_TOOL_URL={research_tool_url}",
-            "-e", f"EIREL_RESEARCH_TOOL_URL={research_tool_url}",
-            "-e", f"RESEARCH_TOOL_TOKEN={research_tool_token}",
-            "-e", f"EIREL_RESEARCH_TOOL_TOKEN={research_tool_token}",
-            "-e", f"EIREL_RESEARCH_TOOL_JOB_ID=miner-{submission_id}",
             "-e", f"INTERNAL_SERVICE_TOKEN={internal_service_token}",
             "-e", f"MINER_SUBMISSION_ID={submission_id}",
             self._base_image_tag,
