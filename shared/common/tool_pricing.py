@@ -18,8 +18,12 @@ class ToolPrice:
 # general_chat 4D scorer to compute the cost dimension.
 TOOL_PRICING: dict[str, ToolPrice] = {
     "web_search": ToolPrice(per_call_usd=0.001),
-    "x_api": ToolPrice(per_call_usd=0.050),
     "sandbox": ToolPrice(per_call_usd=0.002),
+    "url_fetch": ToolPrice(per_call_usd=0.0005),
+    # text-embedding-3-small averages ~$0.0002 per query (one
+    # ~600-token query embed + amortized index cost). Indexing is
+    # operator-paid, retrieval is the per-call cost the miner sees.
+    "rag.retrieve": ToolPrice(per_call_usd=0.0002),
 }
 
 
