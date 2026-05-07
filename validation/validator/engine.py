@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -14,14 +16,257 @@ from shared.common.bittensor_signing import load_signer
 from shared.common.security import sha256_hex
 from eirel.groups import ensure_active_family_id
 from shared.core.evaluation_models import MinerBenchmarkTarget
+from shared.scoring.multi_metric import (
+    applicable_metrics as _multi_metric_applicable,
+    assemble_task_score as _multi_metric_assemble,
+    derive_task_type as _multi_metric_derive_task_type,
+    score_latency_cost as _multi_metric_latency_cost,
+    score_tool_routing as _multi_metric_tool_routing,
+)
 # C4: judge runs server-side via owner-api judge proxy — no direct
 # JudgeServiceClient import needed here anymore.
 from shared.contracts.models import MinerRegistryEntry
 from validation.validator import metrics as _metrics
+from validation.validator.eval_config import (
+    gemini_oracle_config,
+    grok_oracle_config,
+    openai_oracle_config,
+    reconciler_config,
+)
+from validation.validator.oracles import (
+    GeminiOracle,
+    GrokOracle,
+    OpenAIOracle,
+    OracleClient,
+    OracleContext,
+    OracleFanout,
+)
+from validation.validator.providers.gemini import GeminiClient
+from validation.validator.providers.openai_compatible import (
+    OpenAICompatibleClient,
+)
+from validation.validator.reconciler import ReconciledOracle, Reconciler
 
 
 def _owner_api_url() -> str:
     return os.getenv("OWNER_API_URL", "http://owner-api:8000").rstrip("/")
+
+
+# One-shot guard so the comparator-choice banner only logs at startup,
+# not on every poll iteration of ``run_distributed_benchmarks``.
+_PAIRWISE_BANNER_LOGGED: dict[str, bool] = {"done": False}
+
+
+@dataclass(frozen=True)
+class _SyntheticBaselineResponse:
+    """Pairwise-comparator reference, sourced from the chosen oracle's
+    cached answer. ``source_vendor`` is preserved for telemetry +
+    ``baseline_response_json``; cost/latency stay on the dataclass to
+    keep ``baseline_response_json`` schema-stable for older readers.
+    """
+
+    response_text: str
+    citations: list[dict[str, Any]]
+    cost_usd: float
+    latency_seconds: float
+    source_vendor: str
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode  # parity with Pydantic BaseModel.model_dump signature
+        return {
+            "response_text": self.response_text,
+            "citations": list(self.citations),
+            "cost_usd": self.cost_usd,
+            "latency_seconds": self.latency_seconds,
+            "source_vendor": self.source_vendor,
+        }
+
+
+def _select_pairwise_reference(
+    *, reconciled: "ReconciledOracle", preferred_vendor: str,
+) -> tuple[str, str]:
+    """Pick the comparator text + tag where it came from.
+
+    Order:
+      1. ``preferred_vendor`` (env-configured oracle, default openai)
+      2. Any other vendor's raw answer (round-robin among the 3)
+      3. ``expected_claims[0]`` (consensus / majority / deterministic gold)
+      4. Empty string with source ``"none"``
+    """
+    answers = reconciled.vendor_answers or {}
+    text = (answers.get(preferred_vendor) or "").strip()
+    if text:
+        return text, preferred_vendor
+    for vendor, raw in answers.items():
+        if raw and raw.strip():
+            return raw.strip(), f"{vendor}_fallback"
+    if reconciled.expected_claims:
+        first = (reconciled.expected_claims[0] or "").strip()
+        if first:
+            tag = (
+                "deterministic"
+                if reconciled.oracle_status == "deterministic"
+                else "consensus_claim"
+            )
+            return first, tag
+    return "", "none"
+
+
+def _build_oracle_layer() -> tuple[OracleFanout | None, Reconciler | None]:
+    """Lazy-init the 3-oracle fanout + Chutes reconciler.
+
+    Each provider config is checked independently; missing creds for a
+    given vendor mean that oracle is skipped (Grok-down precedent —
+    fanout degrades gracefully). If fewer than 2 oracles are
+    configured OR the reconciler is missing, the fanout returns None
+    and the validator falls back to deterministic-only scoring for
+    every task (regardless of oracle_source tag).
+
+    Reconciler config defaults to ``zai-org/GLM-5.1-TEE`` via Chutes
+    — same model used by the eiretes judge roles for TEE attestation.
+    """
+    oracle_clients: list[OracleClient] = []
+    openai_cfg = openai_oracle_config()
+    if openai_cfg.configured:
+        oracle_clients.append(
+            OpenAIOracle(client=OpenAICompatibleClient(openai_cfg)),
+        )
+    gemini_cfg = gemini_oracle_config()
+    if gemini_cfg.configured:
+        oracle_clients.append(
+            GeminiOracle(client=GeminiClient(gemini_cfg)),
+        )
+    grok_cfg = grok_oracle_config()
+    if grok_cfg.configured:
+        oracle_clients.append(
+            GrokOracle(client=OpenAICompatibleClient(grok_cfg)),
+        )
+
+    rec_cfg = reconciler_config()
+    if len(oracle_clients) < 2 or not rec_cfg.configured:
+        # Not enough vendors for plurality voting OR reconciler not
+        # available. Three_oracle items will fall back to deterministic
+        # paths (or surface as ``oracle_status="disputed"`` with empty
+        # expected_claims).
+        if oracle_clients:
+            for client in oracle_clients:
+                # Tear down half-built oracle clients so we don't leak
+                # httpx sessions when the layer is not actually used.
+                # Synchronous close not available; leak is bounded
+                # because clients are lazy-init only when called.
+                pass
+        return None, None
+
+    fanout = OracleFanout(oracle_clients)
+    reconciler = Reconciler(
+        client=OpenAICompatibleClient(rec_cfg),
+    )
+    return fanout, reconciler
+
+
+async def _enrich_task_oracle(
+    task_obj: Any,
+    *,
+    fanout: OracleFanout | None,
+    reconciler: Reconciler | None,
+) -> ReconciledOracle:
+    """Produce a ``ReconciledOracle`` for one task.
+
+    For ``oracle_source="three_oracle"``: runs the configured oracle
+    fanout in parallel + Chutes reconciler. Falls back to disputed
+    when fanout/reconciler aren't configured.
+
+    For ``oracle_source="deterministic"`` or unset: builds a minimal
+    ``ReconciledOracle`` from the task's pre-baked
+    ``expected_output.answer`` and ``expected_output.must_not_claim``.
+    No LLM calls.
+    """
+    expected_output = getattr(task_obj, "expected_output", None) or {}
+    answer = str(expected_output.get("answer") or "").strip()
+    must_not_claim_floor = list(expected_output.get("must_not_claim") or [])
+    oracle_source = getattr(task_obj, "oracle_source", None)
+
+    # Deterministic path: pool's grader produced the gold; no oracle
+    # call needed.
+    if oracle_source != "three_oracle":
+        return ReconciledOracle.from_deterministic(
+            answer=answer, must_not_claim_floor=must_not_claim_floor,
+        )
+
+    # Three-oracle path: degrade to disputed if the layer isn't wired.
+    if fanout is None or reconciler is None:
+        logger.warning(
+            "three_oracle task %s but oracle layer not configured; "
+            "falling back to disputed with template floor",
+            getattr(task_obj, "task_id", "?"),
+        )
+        return ReconciledOracle(
+            expected_claims=[],
+            must_not_claim=must_not_claim_floor,
+            oracle_status="disputed",
+            disagreement_note="oracle_layer_not_configured",
+        )
+
+    context = OracleContext(
+        task_id=str(getattr(task_obj, "task_id", "")),
+        prompt=str(getattr(task_obj, "prompt", "") or ""),
+        conversation_recent=list(getattr(task_obj, "turns", None) or []),
+        attached_document=str(expected_output.get("attached_document") or "") or None,
+        category=str(getattr(task_obj, "category", "") or "") or None,
+    )
+    groundings = await fanout.run(context)
+    return await reconciler.reconcile(
+        prompt=context.prompt,
+        groundings=groundings,
+        must_not_claim_floor=must_not_claim_floor,
+    )
+
+
+async def _fetch_ledger_tools(
+    job_id: str, *, owner_url: str, signer,
+) -> list[str]:
+    """Fetch tool names invoked under ``job_id`` from the orchestrator
+    ledger. Returns the deduped list in arrival order.
+
+    Authenticates with the validator's hotkey signature — the owner-api
+    gates ``/v1/internal/eval/job_ledger`` on ``validator_dependency``,
+    so any registered active validator can read the ledger for any job
+    they're scoring. Missing job_id → empty list. Network errors also
+    return [] (fail-safe: composite's tool_attestation factor will be 0
+    for required_tool tasks if the ledger is unreachable).
+    """
+    if not job_id:
+        return []
+    path = f"/v1/internal/eval/job_ledger?job_id={job_id}"
+    url = f"{owner_url}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                url,
+                headers=_signed_headers(
+                    signer=signer, method="GET", path=path, body=b"",
+                ),
+            )
+        if resp.status_code != 200:
+            logger.warning(
+                "ledger fetch returned %d for job_id=%s: %s",
+                resp.status_code, job_id, (resp.text or "")[:200],
+            )
+            return []
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning(
+            "ledger fetch failed for job_id=%s: %s", job_id, exc,
+        )
+        return []
+    tool_names: list[str] = []
+    seen: set[str] = set()
+    for row in payload.get("tool_calls") or []:
+        name = str((row or {}).get("tool_name") or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            tool_names.append(name)
+    return tool_names
 
 
 def _hydrate_agent_inputs(task_payload: dict[str, Any]) -> dict[str, Any]:
@@ -93,141 +338,157 @@ def _signed_headers(*, signer, method: str, path: str, body: bytes) -> dict[str,
     return signer.signed_headers(method, path, sha256_hex(body))
 
 
+def _pairwise_miner_score(*, winner: str, miner_position: str) -> float:
+    """Map a single pairwise call's winner to a miner-perspective score.
+
+    ``miner_position`` is whichever of "A"/"B" the miner's answer was
+    placed in for that call. The two-call swap ensures each call sees
+    the miner in a different position; averaging the two miner-perspective
+    scores cancels position bias.
+    """
+    w = (winner or "").strip().lower()
+    if w == "tie":
+        return 0.5
+    if (w == "a" and miner_position == "A") or (w == "b" and miner_position == "B"):
+        return 1.0
+    return 0.0
+
+
+def _build_pairwise_prompt(task_obj: Any) -> str:
+    """Render the user prompt for the pairwise judge.
+
+    Single-turn tasks use ``task_obj.prompt`` directly. Multi-turn
+    fixtures fold the conversation into a chronological transcript so
+    the judge sees the same context the candidates saw.
+    """
+    prompt = getattr(task_obj, "prompt", "") or ""
+    turns = getattr(task_obj, "turns", None) or []
+    if not turns:
+        return prompt
+    rendered: list[str] = []
+    for turn in turns:
+        if isinstance(turn, dict):
+            user_msg = turn.get("user")
+            asst_msg = turn.get("assistant")
+        else:
+            user_msg = getattr(turn, "user", None)
+            asst_msg = getattr(turn, "assistant", None)
+        if user_msg:
+            rendered.append(f"USER: {user_msg}")
+        if asst_msg:
+            rendered.append(f"ASSISTANT: {asst_msg}")
+    if prompt:
+        rendered.append(f"USER: {prompt}")
+    return "\n".join(rendered) if rendered else prompt
+
+
 def _extract_answer_text(run) -> str:
     """Pull the miner's final-answer text out of a BenchmarkTaskRun.
 
-    The agreement judge sees ONLY the final answer — no tool_calls, no
-    citations, no trace. Most miner SDKs put the answer at
-    ``response.output.content`` (dict) or ``response.output.text``.
-    Fall back to str(response) when structure is unknown.
+    The pairwise judge sees ONLY the final answer — no tool_calls, no
+    citations, no trace, no envelope metadata. Returning a dict-repr
+    string here is a critical failure: it lets the judge identify which
+    side is the miner from formatting alone (the OpenAI baseline returns
+    clean prose), which collapses the swap defense.
+
+    The current graph SDK puts the answer at ``response.output.answer``.
+    Older shapes used ``output.content`` / ``output.text`` / a list of
+    text blocks. We try them in order and DO NOT fall through to a
+    repr — if no shape matches, return empty string and let the row
+    surface as a miner-side defect.
     """
     resp = getattr(run, "response", None) or {}
-    if isinstance(resp, dict):
-        output = resp.get("output") or {}
-        if isinstance(output, dict):
-            content = output.get("content") or output.get("text")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                # some SDKs emit content as a list of text blocks
-                return "\n\n".join(
-                    (b.get("text") if isinstance(b, dict) else str(b))
-                    for b in content if b
-                )
-        # Fallback: flatten the whole response dict as text without URLs.
-        text = resp.get("text") or resp.get("content") or ""
-        if isinstance(text, str) and text:
-            return text
-    return str(resp) if resp else ""
+    if not isinstance(resp, dict):
+        return ""
+    output = resp.get("output")
+    if isinstance(output, dict):
+        # Current shape — eirel.graph runtime emits {output: {answer: "..."}}
+        for key in ("answer", "content", "text"):
+            value = output.get(key)
+            if isinstance(value, str) and value:
+                return value
+        # Some agents stream content as a list of {text: "..."} blocks
+        content = output.get("content")
+        if isinstance(content, list):
+            parts = [
+                (b.get("text") if isinstance(b, dict) else str(b))
+                for b in content
+                if b
+            ]
+            joined = "\n\n".join(p for p in parts if isinstance(p, str) and p)
+            if joined:
+                return joined
+    elif isinstance(output, str) and output:
+        return output
+    # Last-resort fallbacks — top-level fields some BaseAgent miners use.
+    for key in ("output_text", "response_text", "text", "content"):
+        value = resp.get(key)
+        if isinstance(value, str) and value:
+            return value
+    # Intentionally NOT falling through to str(resp): leaking the full
+    # envelope dict as the candidate string lets the judge identify the
+    # miner by its formatting and breaks the pairwise defense.
+    return ""
 
 
 def _extract_miner_citations(run) -> list[dict[str, Any]]:
     """Pull the miner's cited URLs out of a BenchmarkTaskRun for dashboard
     display only. These do NOT participate in scoring.
 
-    Looks in two likely locations:
-      * ``response.output.citations`` — structured list of citation dicts
-      * ``response.output.tool_calls`` of type ``web_search`` — URL results
-    Returns an empty list when no citations are present.
+    The agent invocation helper surfaces citations and tool_calls at the
+    *top* of ``response`` (alongside ``output``, ``status``, ``metadata``),
+    not nested under ``output``. This extractor checks the top-level
+    keys first, then falls back to ``response.output.*`` for older
+    miner SDKs that emit there.
     """
     resp = getattr(run, "response", None) or {}
     if not isinstance(resp, dict):
         return []
-    output = resp.get("output") or {}
-    if not isinstance(output, dict):
-        return []
+    output = resp.get("output") if isinstance(resp.get("output"), dict) else {}
+
     citations: list[dict[str, Any]] = []
-    structured = output.get("citations")
-    if isinstance(structured, list):
-        for c in structured:
-            if isinstance(c, dict):
-                citations.append({
-                    "url": str(c.get("url") or ""),
-                    "title": str(c.get("title") or ""),
-                })
-    tool_calls = output.get("tool_calls")
-    if isinstance(tool_calls, list):
-        for tc in tool_calls:
-            if not isinstance(tc, dict) or tc.get("tool_name") != "web_search":
+    seen: set[str] = set()
+
+    def _add(url: str, title: str) -> None:
+        url = (url or "").strip()
+        if not url or url in seen:
+            return
+        seen.add(url)
+        citations.append({"url": url, "title": (title or "").strip()})
+
+    # Structured citations — top-level (current SDK shape) or nested
+    # under ``output`` (legacy fallback). The SDK envelope emits
+    # citations as either bare URL strings (``["https://...", ...]``)
+    # OR dicts with ``url``/``title`` keys; handle both.
+    for source in (resp.get("citations"), output.get("citations")):
+        if isinstance(source, list):
+            for c in source:
+                if isinstance(c, str):
+                    _add(c, "")
+                elif isinstance(c, dict):
+                    _add(str(c.get("url") or ""), str(c.get("title") or ""))
+
+    # Tool-call results — same dual location as above. ``tool_name`` is
+    # the canonical key; older shapes used ``tool``.
+    for source in (resp.get("tool_calls"), output.get("tool_calls")):
+        if not isinstance(source, list):
+            continue
+        for tc in source:
+            if not isinstance(tc, dict):
                 continue
-            for result in (tc.get("result") or {}).get("results", []) or []:
-                if isinstance(result, dict) and result.get("url"):
-                    citations.append({
-                        "url": str(result.get("url") or ""),
-                        "title": str(result.get("title") or ""),
-                    })
+            kind = str(tc.get("tool_name") or tc.get("tool") or "").strip()
+            if kind not in ("web_search", "url_fetch"):
+                continue
+            result_block = tc.get("result") or {}
+            if not isinstance(result_block, dict):
+                continue
+            results = result_block.get("results") or []
+            if not isinstance(results, list):
+                continue
+            for r in results:
+                if isinstance(r, dict) and r.get("url"):
+                    _add(str(r.get("url") or ""), str(r.get("title") or ""))
     return citations
-
-
-async def _resolve_targets(
-    *,
-    run_id: str,
-    family_id: str,
-    miners: list[MinerRegistryEntry],
-    rubric_version: str,
-    judge_model: str,
-) -> tuple[list[MinerRegistryEntry], dict[str, object], str, dict[str, object] | None, dict[str, object] | None, str | None]:
-    del miners
-    family_id = ensure_active_family_id(family_id)
-    signer = _load_validator_signer()
-    path = f"/v1/families/{family_id}/targets"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{_owner_api_url()}{path}",
-            params={
-                "run_id": run_id,
-                "benchmark_version": "family_benchmark_v2",
-                "rubric_version": rubric_version,
-                "judge_model": judge_model,
-            },
-            headers=_signed_headers(signer=signer, method="GET", path=path, body=b""),
-        )
-        response.raise_for_status()
-        payload = response.json()
-    evaluation_bundle = (
-        payload.get("evaluation_bundle") if isinstance(payload.get("evaluation_bundle"), dict) else None
-    )
-    if evaluation_bundle is None:
-        raise ValueError(f"owner target response missing evaluation_bundle for family {family_id}")
-    benchmark_version = str(payload.get("benchmark_version") or "family_benchmark_v2")
-    if evaluation_bundle.get("benchmark_version"):
-        benchmark_version = str(evaluation_bundle.get("benchmark_version"))
-    retrieval_environment = payload.get("retrieval_environment")
-    if not isinstance(retrieval_environment, dict):
-        retrieval_environment = (
-            evaluation_bundle.get("retrieval_environment")
-            if isinstance(evaluation_bundle.get("retrieval_environment"), dict)
-            else None
-        )
-    judge_config = payload.get("judge_config")
-    if not isinstance(judge_config, dict):
-        judge_config = (
-            evaluation_bundle.get("judge_config")
-            if isinstance(evaluation_bundle.get("judge_config"), dict)
-            else None
-        )
-    policy_version = payload.get("policy_version")
-    if policy_version is None and evaluation_bundle.get("policy_version") is not None:
-        policy_version = str(evaluation_bundle.get("policy_version"))
-    elif policy_version is not None:
-        policy_version = str(policy_version)
-    return (
-        [
-            MinerRegistryEntry.model_validate(
-                {
-                    **item,
-                    "endpoint": _rewrite_benchmark_endpoint_for_host(str(item.get("endpoint") or "")),
-                }
-            )
-            for item in list(payload.get("members") or [])
-            if isinstance(item, dict)
-        ],
-        evaluation_bundle,
-        benchmark_version,
-        retrieval_environment,
-        judge_config,
-        policy_version,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +538,7 @@ async def run_validator_loop() -> None:
 
     signer = _load_validator_signer()
     owner_url = _owner_api_url()
-    judge_model = os.getenv("EIREL_JUDGE_MODEL", "local-rubric-judge")
+    judge_model = os.getenv("EIREL_EVAL_JUDGE_MODEL", "local-rubric-judge")
     rubric_version = os.getenv("EIREL_VALIDATOR_RUBRIC_VERSION", "family_rubric_v2")
 
     logger.info(
@@ -676,18 +937,34 @@ async def run_distributed_benchmarks(
     from shared.benchmark._judge import build_judge_excerpt
     from shared.core.evaluation_models import BenchmarkTaskRun
     from shared.core.judge_client import JudgeServiceClient
-    from validation.validator.openai_baseline import (
-        OpenAIBaselineClient,
-        OpenAIBaselineError,
-    )
+    from validation.validator.eval_config import pairwise_reference_vendor
 
     family_id = ensure_active_family_id(family_id)
     signer = _load_validator_signer()
     owner_url = _owner_api_url()
 
-    # Pairwise judge + OpenAI baseline clients are reused across tasks.
+    # Pairwise judge client reused across tasks. The pairwise
+    # comparator reads the chosen oracle's cached answer (no separate
+    # baseline call); ``pairwise_reference_vendor()`` is the env knob.
     judge_client = JudgeServiceClient()
-    baseline_client = OpenAIBaselineClient()
+    pairwise_vendor = pairwise_reference_vendor()
+    # Log the comparator choice once per process lifetime — this
+    # function runs every poll cycle (default 30s) and the banner is
+    # otherwise pure log noise. Per-task ``baseline=ok source=...``
+    # lines surface the per-call vendor afterwards.
+    if not _PAIRWISE_BANNER_LOGGED["done"]:
+        logger.info(
+            "pairwise comparator: oracle vendor=%s (baseline call disabled)",
+            pairwise_vendor,
+        )
+        _PAIRWISE_BANNER_LOGGED["done"] = True
+
+    # Oracle enrichment layer — runs at task-claim time, produces
+    # ``ReconciledOracle`` per task with ``expected_claims`` +
+    # ``must_not_claim`` for the EvalJudge to score against. Wired
+    # only when the validator has API keys for ≥2 oracles + Chutes
+    # reconciler; otherwise three_oracle items fall back to disputed.
+    oracle_fanout, reconciler = _build_oracle_layer()
 
     total_claimed = 0
     total_submitted = 0
@@ -707,78 +984,6 @@ async def run_distributed_benchmarks(
     _FAN_OUT_TIMEOUT_SECONDS = float(
         os.getenv("EIREL_FAN_OUT_TIMEOUT_SECONDS", "1500")
     )
-
-    async def _baseline_replay(
-        *,
-        client: OpenAIBaselineClient,
-        task: Any,
-        use_web_search: bool,
-    ) -> Any:
-        """Replay a multi-turn fixture against the OpenAI baseline.
-
-        Single-turn fixtures (``turns`` empty or None) → one call, history
-        empty. Multi-turn → call once per *live* user turn, accumulating
-        the baseline's own assistant replies as history between turns.
-        Scripted-assistant turns are inserted into history without a
-        baseline call so both miner and baseline see the identical canned
-        exchange when probe scenarios require it.
-
-        Returns the BaselineResponse from the **last live turn** — that's
-        the answer the pairwise judge scores.
-        """
-        raw_turns = list(getattr(task, "turns", None) or [])
-        if not raw_turns:
-            raw_turns = [{"user": task.prompt, "assistant": None}]
-
-        history: list[dict[str, Any]] = []
-        last_response = None
-        for idx, raw in enumerate(raw_turns):
-            is_last = (idx == len(raw_turns) - 1)
-            if hasattr(raw, "user"):
-                user_text = raw.user
-                scripted = raw.assistant
-            elif isinstance(raw, dict):
-                user_text = str(raw.get("user") or "")
-                scripted = raw.get("assistant")
-            else:
-                continue
-            if not isinstance(user_text, str) or not user_text:
-                continue
-
-            if scripted is not None and not is_last:
-                history.append({"role": "user", "content": user_text})
-                history.append({"role": "assistant", "content": str(scripted)})
-                continue
-
-            last_response = await client.generate(
-                prompt=user_text,
-                use_web_search=use_web_search,
-                history=history,
-            )
-            # Per-turn cost log helps explain a high run-total cost on
-            # multi-turn fixtures (3 turns × $0.05 each ≠ a $0.05 task).
-            if len(raw_turns) > 1:
-                logger.info(
-                    "baseline turn=%d/%d latency=%.2fs cost=$%.4f run_total=$%.4f",
-                    idx + 1, len(raw_turns),
-                    float(getattr(last_response, "latency_seconds", 0.0) or 0.0),
-                    float(getattr(last_response, "cost_usd", 0.0) or 0.0),
-                    float(getattr(client, "spent_usd", 0.0) or 0.0),
-                )
-            history.append({"role": "user", "content": user_text})
-            history.append({
-                "role": "assistant",
-                "content": last_response.response_text or "",
-            })
-
-        if last_response is None:
-            # Defensive fallback — degenerate fixture (no live turns).
-            last_response = await client.generate(
-                prompt=task.prompt,
-                use_web_search=use_web_search,
-                history=[],
-            )
-        return last_response
 
     async def _invoke_one_miner(
         miner: dict[str, Any], task_obj: Any, task_id: str,
@@ -827,6 +1032,12 @@ async def run_distributed_benchmarks(
         # both single-turn and multi-turn cases). Single-turn tasks have
         # turns=None and use ``prompt``.
         task_obj.turns = task_payload.get("turns")
+        # ``category`` drives multi-metric task-type derivation
+        # (web_required / rag_required / sandbox_required / etc).
+        # ``allowed_tools`` is a fallback signal for tool_routing when
+        # ``category`` is missing.
+        task_obj.category = str(task_payload.get("category") or "")
+        task_obj.allowed_tools = list(task_payload.get("allowed_tools") or [])
         task_mode = str(task_obj.inputs.get("mode") or "instant")
         # Per-task web-search flag, mirroring the end-user toggle in the chat
         # UI. Missing field defaults to False so a baseline never silently
@@ -855,13 +1066,22 @@ async def run_distributed_benchmarks(
         # We then replay against the baseline turn-by-turn and let it
         # build its own assistant history, which is what gets compared
         # at the final live turn.
-        baseline_task = asyncio.create_task(
-            _baseline_replay(
-                client=baseline_client,
-                task=task_obj,
-                use_web_search=web_search_flag,
+        # Augment task_obj with the bundle's ``oracle_source`` tag so
+        # the enrichment helper can branch correctly. Not all bundles
+        # carry this field; default to None (= deterministic).
+        task_obj.oracle_source = task_payload.get("oracle_source")
+
+        # Oracle enrichment runs in parallel with miner dispatch — it
+        # makes 3 frontier-LLM calls + 1 reconciler call (only for
+        # three_oracle items), and the result is consumed by every
+        # ``_judge_miner`` call for this task. Cache lifetime = this
+        # task evaluation.
+        reconciled_task = asyncio.create_task(
+            _enrich_task_oracle(
+                task_obj, fanout=oracle_fanout, reconciler=reconciler,
             )
         )
+
         miner_tasks = [
             asyncio.create_task(_invoke_one_miner(m, task_obj, task_id)) for m in miners
         ]
@@ -869,38 +1089,55 @@ async def run_distributed_benchmarks(
         try:
             async with asyncio.timeout(_FAN_OUT_TIMEOUT_SECONDS):
                 miner_runs = await asyncio.gather(*miner_tasks, return_exceptions=True)
-                baseline = await baseline_task
-        except OpenAIBaselineError as exc:
-            logger.warning(
-                "baseline failed for task_eval=%s: %s; releasing task",
-                task_evaluation_id, exc,
-            )
-            for t in miner_tasks:
-                t.cancel()
-            await _release_baseline_failed(
-                task_evaluation_id=task_evaluation_id, signer=signer, owner_url=owner_url,
-            )
-            return "baseline_failed"
         except TimeoutError:
             logger.warning(
                 "fan-out exceeded %.0fs for task_eval=%s",
                 _FAN_OUT_TIMEOUT_SECONDS, task_evaluation_id,
             )
-            for t in (*miner_tasks, baseline_task):
+            for t in miner_tasks:
                 if not t.done():
                     t.cancel()
             return "submit_failed"
 
-        baseline_text = baseline.response_text
-        # Surface OpenAI baseline cost — per-call (this task) and the
-        # cumulative spend across the validator's lifetime so operators
-        # can see the budget burn without scraping metrics.
+        # Pairwise comparator: pick the chosen oracle's answer as the
+        # reference instead of paying for a separate OpenAI baseline
+        # call. Fallback chain handles vendors that errored or
+        # ``deterministic`` items where no oracle ran.
+        try:
+            reconciled_for_baseline = await reconciled_task
+        except Exception as enrich_exc:
+            logger.warning(
+                "oracle enrichment crashed for task=%s: %s; "
+                "falling back to disputed (no comparator text available)",
+                task_id, enrich_exc,
+            )
+            reconciled_for_baseline = ReconciledOracle(
+                expected_claims=[],
+                must_not_claim=list(
+                    (task_obj.expected_output or {}).get("must_not_claim") or []
+                ),
+                oracle_status="disputed",
+                disagreement_note=f"enrichment_crashed: {enrich_exc!r}",
+            )
+        baseline_text, baseline_source = _select_pairwise_reference(
+            reconciled=reconciled_for_baseline,
+            preferred_vendor=pairwise_vendor,
+        )
+        # Synthetic ``baseline`` shim that still satisfies the rest of
+        # the engine's expected fields (cost, latency, citations).
+        # ``cost_usd=0.0`` because reusing the cached oracle answer
+        # adds no incremental spend.
+        baseline = _SyntheticBaselineResponse(
+            response_text=baseline_text,
+            citations=[],
+            cost_usd=0.0,
+            latency_seconds=0.0,
+            source_vendor=baseline_source,
+        )
         logger.info(
-            "task_eval=%s baseline=ok latency=%.2fs cost=$%.4f run_total=$%.4f",
+            "task_eval=%s baseline=ok source=%s",
             task_evaluation_id[:8],
-            float(getattr(baseline, "latency_seconds", 0.0) or 0.0),
-            float(getattr(baseline, "cost_usd", 0.0) or 0.0),
-            float(getattr(baseline_client, "spent_usd", 0.0) or 0.0),
+            baseline_source,
         )
 
         # Per-miner fan-out outcome. miner_runs is a list of either
@@ -969,6 +1206,12 @@ async def run_distributed_benchmarks(
         else:
             latency_budget = None
 
+        # Oracle enrichment was awaited above (during pairwise
+        # reference selection). Reuse that resolved value here so the
+        # judge layer has the same ``ReconciledOracle`` the comparator
+        # was derived from.
+        reconciled_for_task = reconciled_for_baseline
+
         # Agreement-judge each miner concurrently with position randomization.
         # The judge sees only the final answer text — citations are stripped.
         async def _judge_miner(miner_run: tuple[str, BenchmarkTaskRun]) -> dict[str, Any]:
@@ -1008,32 +1251,374 @@ async def run_distributed_benchmarks(
                 }
             try:
                 miner_answer = _extract_answer_text(run)
-                swap = bool(secrets.randbits(1))
+                # Pairwise preference judge against the OpenAI baseline.
+                # Single call per task with a *random* A/B assignment:
+                # the miner's answer goes into slot A or slot B with
+                # 50/50 probability, decided fresh per task. The judge
+                # cannot tell which side is the miner (so long as the
+                # candidate text doesn't itself reveal it — see
+                # ``_extract_answer_text``, which strips the envelope).
+                # Score ∈ {1.0 win, 0.5 tie, 0.0 loss} from the miner's
+                # perspective after position remap.
+                #
+                # We deliberately do NOT run a second swapped call and
+                # average — opposite-call disagreement (judge picks the
+                # same slot regardless of who's there) gets averaged
+                # into 0.5 and conflates real ties with positional drift.
+                # One call with random assignment forces the judge to
+                # commit to one verdict per task and keeps the defense
+                # auditable from the persisted ``miner_position`` field.
                 judge_started = time.perf_counter()
-                judge_result = await asyncio.to_thread(
-                    judge_client.judge_agreement,
-                    family_id=family_id,
-                    prompt=judge_prompt,
-                    response_a=miner_answer,
-                    response_b=baseline_text,
-                    task_mode=task_mode,
-                    task_category=task_category,
-                    swap=swap,
+                pairwise_prompt = _build_pairwise_prompt(task_obj)
+                miner_position = "A" if secrets.randbelow(2) == 0 else "B"
+                if miner_position == "A":
+                    answer_a, answer_b = miner_answer, baseline_text
+                else:
+                    answer_a, answer_b = baseline_text, miner_answer
+                pairwise_bundle = {
+                    "question": pairwise_prompt,
+                    "answers": [answer_a, answer_b],
+                }
+                # Anchor the pairwise judge on the consensus /
+                # deterministic gold so it can reward correctness +
+                # style instead of style alone. Empty for runs where
+                # the reconciler couldn't produce expected_claims
+                # (e.g. all 3 oracles errored) — judge falls back to
+                # legacy "no factuality assumed" mode.
+                pairwise_expected_answer: str | None = None
+                if reconciled_for_task.expected_claims:
+                    first_claim = (
+                        reconciled_for_task.expected_claims[0] or ""
+                    ).strip()
+                    if first_claim:
+                        pairwise_expected_answer = first_claim
+                pw_call = await asyncio.to_thread(
+                    judge_client.judge_pairwise,
+                    bundle=pairwise_bundle,
+                    expected_answer=pairwise_expected_answer,
                 )
+                preference_score = _pairwise_miner_score(
+                    winner=str(pw_call.get("winner") or ""),
+                    miner_position=miner_position,
+                )
+                # Map score to the legacy verdict bucket the existing DB
+                # column / dashboard expects.
+                if preference_score >= 0.999:
+                    verdict = "matches"
+                elif preference_score <= 0.001:
+                    verdict = "contradicts"
+                else:
+                    verdict = "partially_matches"
+                agreement_score = preference_score
+                judge_meta: dict[str, Any] = {
+                    "pairwise_preference_score": preference_score,
+                    "miner_position": miner_position,
+                    "winner": pw_call.get("winner"),
+                    "confidence": pw_call.get("confidence"),
+                    "reason": pw_call.get("reason"),
+                    "category_scores": pw_call.get("category_scores"),
+                }
+                # ── Multi-metric outer-dimension scoring ────────────
+                # Pairwise gives the dominant 0.40-weight signal. The
+                # remaining ~0.60 weight is split across grounded /
+                # retrieval / safety (LLM-judged in one /v1/judge/multi
+                # call) plus tool_routing / latency_cost / (sandbox-only)
+                # computation_correctness (deterministic, validator-local).
+                # Non-applicable dimensions for this task type re-normalize
+                # out of the final task_score.
+                task_category = str(getattr(task_obj, "category", "") or "")
+                task_type = _multi_metric_derive_task_type(task_category)
+                applicable = _multi_metric_applicable(task_type)
+                expected_output = (
+                    getattr(task_obj, "expected_output", {}) or {}
+                )
+                expected_answer = str(expected_output.get("answer") or "").strip()
+                must_not_claim_text = (
+                    "; ".join(str(x) for x in (expected_output.get("must_not_claim") or []))
+                )
+                constraints = must_not_claim_text or None
+
+                # Deterministic dimensions
+                miner_response_payload = run.response or {}
+                tool_calls_emitted = miner_response_payload.get("tool_calls") or []
+                tools_called = [
+                    str((t.get("tool") or t.get("name") or "")).strip()
+                    for t in tool_calls_emitted
+                    if isinstance(t, dict)
+                ]
+                tool_routing_score = (
+                    _multi_metric_tool_routing(
+                        task_type=task_type,
+                        tools_called=tools_called,
+                        has_citations=bool(miner_citations),
+                    )
+                    if "tool_routing" in applicable else None
+                )
+                latency_cost_score = (
+                    _multi_metric_latency_cost(
+                        miner_latency_seconds=miner_latency,
+                        mode_budget_seconds=latency_budget,
+                        proxy_cost_usd=proxy_cost_usd,
+                        cost_budget_usd=None,  # per-task cost cap not
+                                                # yet wired; latency leg
+                                                # alone is informative.
+                    )
+                    if "latency_cost" in applicable else None
+                )
+
+                # Sandbox tasks: simple deterministic exact-match for
+                # computation_correctness when the bundle ships an
+                # ``expected_output.answer``. Substring match against
+                # the candidate response keeps it forgiving for
+                # whitespace / formatting drift.
+                computation_correctness_score: float | None = None
+                if "computation_correctness" in applicable:
+                    if expected_answer:
+                        ans_norm = expected_answer.strip().lower()
+                        cand_norm = (miner_answer or "").strip().lower()
+                        computation_correctness_score = (
+                            1.0 if ans_norm and ans_norm in cand_norm else 0.0
+                        )
+                    else:
+                        computation_correctness_score = None  # N/A
+
+                # LLM-judged outer dimensions in one call
+                outer_dims = sorted(
+                    {"grounded_correctness", "retrieval_quality", "instruction_safety"}
+                    & applicable
+                )
+                multi_resp: dict[str, Any] = {}
+                if outer_dims:
+                    citations_list = [
+                        str(c.get("url") or c.get("href") or "").strip()
+                        for c in (miner_citations or [])
+                        if isinstance(c, dict)
+                    ]
+                    citations_list = [c for c in citations_list if c]
+                    multi_bundle: dict[str, Any] = {
+                        "question": pairwise_prompt,
+                        "answers": [miner_answer],
+                    }
+                    if constraints:
+                        multi_bundle["constraints"] = constraints
+                    try:
+                        multi_resp = await asyncio.to_thread(
+                            judge_client.judge_multi,
+                            bundle=multi_bundle,
+                            expected_answer=expected_answer or None,
+                            candidate_citations=citations_list,
+                            applicable_metrics=outer_dims,
+                        )
+                    except Exception as multi_exc:
+                        logger.warning(
+                            "multi judge failed for miner=%s task_eval=%s: %s",
+                            miner_hotkey[:16], task_evaluation_id, multi_exc,
+                        )
+                        multi_resp = {}
+
+                def _multi_score(name: str) -> float | None:
+                    payload = multi_resp.get(name) if isinstance(multi_resp, dict) else None
+                    if not isinstance(payload, dict):
+                        return None
+                    score = payload.get("score")
+                    try:
+                        return float(score) if score is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                grounded_score = _multi_score("grounded_correctness")
+                retrieval_score = _multi_score("retrieval_quality")
+                safety_score = _multi_score("instruction_safety")
+
+                breakdown = _multi_metric_assemble(
+                    task_type=task_type,
+                    raw_scores={
+                        "pairwise_preference_score": preference_score,
+                        "grounded_correctness": grounded_score,
+                        "retrieval_quality": retrieval_score,
+                        "computation_correctness": computation_correctness_score,
+                        "tool_routing": tool_routing_score,
+                        "instruction_safety": safety_score,
+                        "latency_cost": latency_cost_score,
+                    },
+                )
+
+                # ── EvalJudge + composite (the new ranking signal) ─────
+                # Use the cached reconciled-oracle output (expected
+                # claims + must_not_claim) as the judge's reference.
+                # For three_oracle tasks: validator-side reconciler
+                # produced the expected_claims at task-claim time; for
+                # deterministic tasks: from_deterministic wrapped the
+                # pool's pre-baked answer.
+                #
+                # The composite multiplicatively combines outcome
+                # (correct/partial/wrong/...) × tool_attestation ×
+                # efficiency × hallucination_knockout ×
+                # cost_attestation_knockout. final_task_score is the
+                # composite, replacing the legacy weighted-sum.
+                expected_claims_text = "\n".join(
+                    reconciled_for_task.expected_claims
+                )
+                must_not_claim_for_judge = list(
+                    reconciled_for_task.must_not_claim
+                )
+                eval_required_tool = (
+                    str(expected_output.get("required_tool") or "").strip()
+                    or None
+                )
+                oracle_source_for_judge = (
+                    "three_oracle"
+                    if reconciled_for_task.oracle_status == "consensus"
+                    or reconciled_for_task.oracle_status == "majority"
+                    else "deterministic"
+                    if reconciled_for_task.oracle_status == "deterministic"
+                    else "three_oracle"  # disputed → still treat as oracle path
+                )
+                eval_bundle = {
+                    "question": judge_prompt,
+                    "answers": [miner_answer],
+                }
+                if must_not_claim_for_judge:
+                    eval_bundle["constraints"] = "; ".join(
+                        must_not_claim_for_judge
+                    )
+
+                eval_outcome_str: str = "wrong"
+                eval_failure_mode: str | None = None
+                eval_guidance: str = ""
+                try:
+                    eval_resp = await asyncio.to_thread(
+                        judge_client.judge_eval,
+                        bundle=eval_bundle,
+                        expected_answer=expected_claims_text or expected_answer or "(no expected answer)",
+                        must_not_claim=must_not_claim_for_judge,
+                        required_tool=eval_required_tool,
+                        oracle_source=oracle_source_for_judge,
+                    )
+                    eval_outcome_str = str(eval_resp.get("outcome") or "wrong")
+                    eval_failure_mode = eval_resp.get("failure_mode")
+                    eval_guidance = str(eval_resp.get("guidance") or "")
+                except Exception as eval_exc:
+                    logger.warning(
+                        "eval judge failed for miner=%s task_eval=%s: %s",
+                        miner_hotkey[:16], task_evaluation_id, eval_exc,
+                    )
+
+                # Server-attested ledger: which tools did this miner
+                # actually invoke under its job_id? Composite's
+                # tool_attestation_factor uses this — fabricated
+                # tool_call frames in the miner's response don't
+                # count, only what the orchestrator's tool services
+                # actually executed.
+                miner_job_id = str(
+                    response_meta.get("job_id")
+                    or run_meta.get("job_id")
+                    or ""
+                )
+                ledger_tools = await _fetch_ledger_tools(
+                    miner_job_id,
+                    owner_url=owner_url,
+                    signer=signer,
+                )
+
+                composite_resp: dict[str, Any] = {}
+                try:
+                    composite_resp = await asyncio.to_thread(
+                        judge_client.judge_eval_composite,
+                        outcome=eval_outcome_str,
+                        failure_mode=eval_failure_mode,
+                        candidate_response=miner_answer,
+                        must_not_claim=must_not_claim_for_judge,
+                        required_tool=eval_required_tool,
+                        ledger_tools=ledger_tools,
+                        latency_ms=int(max(0.0, miner_latency) * 1000),
+                        cost_usd=proxy_cost_usd,
+                        latency_budget_ms=(
+                            int(latency_budget * 1000)
+                            if latency_budget else None
+                        ),
+                        cost_budget_usd=None,
+                        cost_floor_usd=None,
+                        # Outer-dimension gates: ``grounded`` ≥ 0.60,
+                        # ``safety`` ≥ 0.80. ``None`` for tasks where
+                        # the multi-judge call didn't run or that
+                        # dimension is N/A — gate bypassed in either
+                        # case so missing data never zeros the score.
+                        grounded_correctness_score=grounded_score,
+                        instruction_safety_score=safety_score,
+                        # Pairwise win-rate vs the OpenAI baseline —
+                        # ±0.10 bonus on top of outcome_score. Becomes
+                        # the tiebreaker between equally-correct miners.
+                        pairwise_preference_score=preference_score,
+                    )
+                except Exception as comp_exc:
+                    logger.warning(
+                        "composite judge failed for miner=%s task_eval=%s: %s",
+                        miner_hotkey[:16], task_evaluation_id, comp_exc,
+                    )
+                composite_score = float(
+                    composite_resp.get("composite") or 0.0
+                )
+                composite_knockout_reason = composite_resp.get("knockout_reason")
+                knockout_reasons_list: list[str] = (
+                    [str(composite_knockout_reason)]
+                    if composite_knockout_reason else []
+                )
+
+                # Excerpts persisted alongside the EvalJudge outcome —
+                # owner-api derives the durable EvalFeedback row from
+                # this metadata when it accepts the task-result POST.
+                eval_prompt_excerpt = str(judge_prompt or "")[:200]
+                eval_response_excerpt = str(miner_answer or "")[:500]
+
+                judge_result_payload: dict[str, Any] = {
+                    "verdict": verdict,
+                    "agreement_score": agreement_score,
+                    "rationale": str(pw_call.get("reason") or ""),
+                    "swap_applied": True,
+                    "model": "eiretes_pairwise_judge",
+                    "rubric_name": "pairwise_v1",
+                    "metadata": {
+                        **judge_meta,
+                        "task_type": task_type,
+                        "multi_judge_response": multi_resp or {},
+                        # Legacy weighted-sum value, retained for parity
+                        # comparison during shadow-mode rollout. The new
+                        # ``composite_score`` (below) is what populates
+                        # ``final_task_score`` going forward.
+                        "weighted_sum_score": breakdown.final_task_score,
+                        "final_task_score": composite_score,
+                        "applied_weights": breakdown.applied_weights,
+                        "applicable_metrics": breakdown.applicable_metrics,
+                        # EvalJudge + composite fields. Owner-api reads
+                        # these on receipt of the task-result POST and
+                        # upserts an EvalFeedback row server-side.
+                        "eval_outcome": eval_outcome_str,
+                        "eval_failure_mode": eval_failure_mode,
+                        "eval_guidance": eval_guidance,
+                        "eval_prompt_excerpt": eval_prompt_excerpt,
+                        "eval_response_excerpt": eval_response_excerpt,
+                        "eval_knockout_reasons": knockout_reasons_list,
+                        "composite_score": composite_score,
+                        "composite_knockout_reason": composite_resp.get(
+                            "knockout_reason"
+                        ),
+                        "oracle_status": reconciled_for_task.oracle_status,
+                        "oracle_disagreement_note": (
+                            reconciled_for_task.disagreement_note
+                        ),
+                        "vendor_status": reconciled_for_task.vendor_status,
+                        "vendor_citations": reconciled_for_task.vendor_citations,
+                        "ledger_tools": ledger_tools,
+                    },
+                }
                 judge_latency = max(0.0, time.perf_counter() - judge_started)
-                verdict = judge_result.verdict
-                agreement_score = float(judge_result.agreement_score or 0.0)
-                # Phase 2c: eiretes-judge surfaces ``cost_usd`` per
-                # judgment in its response metadata. Pull it through
-                # so ``TaskMinerResult.judge_cost_usd`` reflects what
-                # this validator paid Chutes for this single
-                # judgment. Falls back to 0.0 on older judge versions
-                # that don't include the field.
-                judge_meta = (
-                    getattr(judge_result, "metadata", None) or {}
-                ) if hasattr(judge_result, "metadata") else {}
-                if not isinstance(judge_meta, dict):
-                    judge_meta = {}
+                # eiretes-judge surfaces ``cost_usd`` per judgment in
+                # its response metadata. Pull it through so
+                # ``TaskMinerResult.judge_cost_usd`` reflects what this
+                # validator paid Chutes for this single judgment.
+                # Falls back to 0.0 on older judge versions that don't
+                # include the field.
                 judge_cost_usd = float(
                     judge_meta.get("cost_usd")
                     or judge_meta.get("usd_cost")
@@ -1056,13 +1641,50 @@ async def run_distributed_benchmarks(
                     "miner_hotkey": miner_hotkey,
                     "miner_response": run.model_dump(mode="json"),
                     "miner_citations": miner_citations,
-                    "judge_output": judge_result.model_dump(mode="json"),
+                    "judge_output": judge_result_payload,
                     "agreement_score": agreement_score,
                     "verdict": verdict,
                     "miner_latency_seconds": miner_latency,
                     "latency_seconds": judge_latency,
                     "proxy_cost_usd": proxy_cost_usd,
                     "judge_cost_usd": judge_cost_usd,
+                    # Multi-metric per-task scoring.
+                    "task_type": task_type,
+                    "pairwise_preference_score": breakdown.dimension_scores.get(
+                        "pairwise_preference_score",
+                    ),
+                    "grounded_correctness": breakdown.dimension_scores.get(
+                        "grounded_correctness",
+                    ),
+                    "retrieval_quality": breakdown.dimension_scores.get(
+                        "retrieval_quality",
+                    ),
+                    "tool_routing": breakdown.dimension_scores.get("tool_routing"),
+                    "instruction_safety": breakdown.dimension_scores.get(
+                        "instruction_safety",
+                    ),
+                    "latency_cost": breakdown.dimension_scores.get("latency_cost"),
+                    "computation_correctness": breakdown.dimension_scores.get(
+                        "computation_correctness",
+                    ),
+                    # final_task_score is the new multiplicative
+                    # composite — not the legacy weighted-sum. The
+                    # weighted-sum value still surfaces as
+                    # ``judge_output.metadata.weighted_sum_score`` for
+                    # parity comparison during rollout.
+                    "final_task_score": composite_score,
+                    "applied_weights": breakdown.applied_weights,
+                    "applicable_metrics": breakdown.applicable_metrics,
+                    # Fields surfacing the EvalJudge + composite + oracle
+                    # status path. ``oracle_status`` is the validator-side
+                    # reconciler's verdict on the 3 oracles
+                    # (consensus / majority / disputed) or
+                    # "deterministic" for non-three_oracle items.
+                    "composite_score": composite_score,
+                    "eval_outcome": eval_outcome_str,
+                    "eval_failure_mode": eval_failure_mode,
+                    "eval_guidance": eval_guidance,
+                    "oracle_status": reconciled_for_task.oracle_status,
                 }
             except Exception as exc:
                 logger.warning(
@@ -1211,7 +1833,6 @@ async def run_distributed_benchmarks(
                     total_failed += 1
     finally:
         judge_client.close()
-        await baseline_client.aclose()
 
     if total_claimed > 0 and (total_failed + total_baseline_failed) == total_claimed:
         _benchmark_outcome = "failed"
