@@ -25,19 +25,19 @@ def test_settings_accepts_filesystem_mode(
 
     reset_settings()
     datasets = tmp_path / "owner_datasets"
-    (datasets / "families").mkdir(parents=True)
+    (datasets / "families").mkdir(parents=True, exist_ok=True)
     calibration = tmp_path / "calibration"
     calibration.mkdir()
     workflow_corpus = tmp_path / "workflow_corpus"
     workflow_corpus.mkdir()
-    research_catalog = tmp_path / "research_tool_catalog.json"
-    research_catalog.write_text("{}", encoding="utf-8")
+    web_search_catalog = tmp_path / "web_search_tool_catalog.json"
+    web_search_catalog.write_text("{}", encoding="utf-8")
     retrieval_snapshot = tmp_path / "snapshot.json"
     retrieval_snapshot.write_text("{}", encoding="utf-8")
     monkeypatch.setenv("EIREL_OWNER_DATASET_ROOT_PATH", str(datasets / "families"))
     monkeypatch.setenv("EIREL_CALIBRATION_FIXTURES_ROOT_PATH", str(calibration))
     monkeypatch.setenv("EIREL_WORKFLOW_CORPUS_ROOT_PATH", str(workflow_corpus))
-    monkeypatch.setenv("EIREL_RESEARCH_TOOL_CATALOG_PATH", str(research_catalog))
+    monkeypatch.setenv("EIREL_WEB_SEARCH_TOOL_CATALOG_PATH", str(web_search_catalog))
     monkeypatch.setenv("EIREL_RETRIEVAL_SNAPSHOT_PATH", str(retrieval_snapshot))
     monkeypatch.setenv("EIREL_OWNER_DATASET_SOURCE_TYPE", "filesystem")
 

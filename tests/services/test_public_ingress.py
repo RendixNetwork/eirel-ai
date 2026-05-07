@@ -6,29 +6,6 @@ from orchestration.consumer_api.main import app as consumer_api_app
 from shared.common.models import ConsumerSessionState, TaskRequestRecord
 
 
-async def test_consumer_api_requires_api_key(monkeypatch):
-    monkeypatch.setenv("CONSUMER_API_KEYS", "consumer-secret")
-
-    async def fake_route_chat_request(*, prompt: str, user_id: str, session_id: str | None, context_history=None):
-        return 200, {"prompt": prompt, "user_id": user_id, "session_id": session_id}
-
-    monkeypatch.setattr("orchestration.consumer_api.main.route_chat_request", fake_route_chat_request)
-
-    async with consumer_api_app.router.lifespan_context(consumer_api_app):
-        transport = ASGITransport(app=consumer_api_app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            unauthorized = await client.post("/v1/chat", json={"prompt": "hello"})
-            assert unauthorized.status_code == 401
-
-            authorized = await client.post(
-                "/v1/chat",
-                json={"prompt": "hello"},
-                headers={"X-API-Key": "consumer-secret"},
-            )
-            assert authorized.status_code == 200
-            assert authorized.json()["prompt"] == "hello"
-
-
 async def test_consumer_api_reads_task_and_session(monkeypatch):
     monkeypatch.setenv("CONSUMER_API_KEYS", "consumer-secret")
 

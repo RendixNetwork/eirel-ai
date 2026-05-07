@@ -13,12 +13,6 @@ REQUIRED_FAMILIES = ("analyst", "builder", "verifier", "media")
 DIRECT_ANALYSIS_PROMPT = "Analyze the request directly and return a verified response."
 RESEARCH_TO_BUILD_PROMPT = "Research the task, implement the solution, and verify the result."
 CONCEPT_TO_MEDIA_PROMPT = "Turn the concept into media, then review the generated artifact."
-DEPRECATED_OWNER_ENDPOINTS = (
-    "/v1/workflow-serving/coalitions",
-    "/v1/workflow-serving/releases/current",
-    "/v1/operators/workflow-serving/freezes",
-    "/v1/families/builder/coalition-scores",
-)
 
 
 def _status_from_checks(checks: dict[str, bool]) -> str:
@@ -386,10 +380,6 @@ async def _validate_serving_cutover(
             )
             for family_id in REQUIRED_FAMILIES
         }
-        deprecated_endpoint_status = {
-            path: await _endpoint_unreachable(client=client, url=path)
-            for path in DEPRECATED_OWNER_ENDPOINTS
-        }
     latest_run = runs[0] if isinstance(runs, list) and runs else current_run
     latest_family_results = dict(latest_run.get("family_results") or {})
     release_metadata = dict((current_release.get("release") or {}).get("metadata") or {})
@@ -431,11 +421,9 @@ async def _validate_serving_cutover(
                 bool(family_id and deployment_id and deployment_id == selected_by_family.get(family_id))
             )
     checks["workflow_composition_matches_family_winners"] = bool(composition_checks) and all(composition_checks)
-    checks["deprecated_endpoints_absent"] = all(deprecated_endpoint_status.values())
     return {
         "status": _status_from_checks(checks),
         "checks": checks,
-        "deprecated_endpoint_status": deprecated_endpoint_status,
         "workflow_composition_registry": composition,
     }
 

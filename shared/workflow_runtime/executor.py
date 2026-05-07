@@ -8,7 +8,6 @@ from shared.common.exceptions import WorkflowEpisodeAbortedError
 from shared.common.security import sha256_hex
 from shared.common.miner_client import invoke_miner
 from eirel.schemas import AgentInvocationResponse
-from shared.benchmark.run import evaluate_multimodal_artifacts, score_media_generation_payload
 from shared.contracts.models import NodeTrace, WorkflowEpisode
 from shared.contracts.specialist_contracts import FAMILY_REQUIRED_OUTPUT_FIELDS
 
@@ -408,46 +407,6 @@ async def execute_workflow_episode_node(
         )
     metadata = normalized_runtime_metadata(last_response)
     quality_score = node_quality_score(metadata, status=last_response.status)
-    if node.family_id == "media" and last_response.status == "completed":
-        workflow_slice_metadata = dict(episode.metadata.get("workflow_slice_metadata", {}) or {})
-        task_inputs = {
-            **dict(episode.initial_context or {}),
-            **workflow_slice_metadata,
-        }
-        expected_output = {
-            **dict(node.artifact_requirements or {}),
-            "required_artifact_kind": str(
-                workflow_slice_metadata.get("required_artifact_kind")
-                or workflow_slice_metadata.get("output_modality")
-                or ""
-            ).strip()
-            or dict(node.artifact_requirements or {}).get("required_artifact_kind"),
-        }
-        artifact_evaluation_summary = await evaluate_multimodal_artifacts(
-            family_id="media",
-            payload=last_response.model_dump(mode="json"),
-            task_inputs=task_inputs,
-            expected_output=expected_output,
-            timeout_seconds=30.0,
-        )
-        media_scores = score_media_generation_payload(
-            miner_hotkey=node.miner_hotkey or "unknown-media-miner",
-            prompt=task_prompt,
-            payload=last_response.model_dump(mode="json"),
-            task_inputs=task_inputs,
-            expected_output=expected_output,
-            artifact_evaluation_summary=artifact_evaluation_summary,
-        )
-        metadata = {
-            **metadata,
-            "artifact_evaluation_summary": artifact_evaluation_summary,
-            "family_diagnostics": dict(media_scores.get("family_diagnostics", {}) or {}),
-            "failure_taxonomy": dict(media_scores.get("failure_taxonomy", {}) or {}),
-        }
-        quality_score = max(
-            0.0,
-            min(1.0, float(media_scores.get("overall_score", quality_score) or quality_score)),
-        )
     trace = NodeTrace(
         episode_id=episode.episode_id,
         node_id=node.node_id,

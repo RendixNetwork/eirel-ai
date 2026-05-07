@@ -89,7 +89,7 @@ def test_resolve_fixture_path_raises_clear_value_error_for_missing_candidates(
 
 def test_settings_honors_explicit_fixture_root_envs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     datasets = tmp_path / "owner_datasets"
-    datasets.mkdir()
+    datasets.mkdir(exist_ok=True)
 
     monkeypatch.setenv("EIREL_OWNER_DATASET_ROOT_PATH", str(datasets))
 

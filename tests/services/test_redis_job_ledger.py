@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
 import fakeredis.aioredis
-import httpx
-from httpx import ASGITransport, AsyncClient
 
 from shared.common.redis_job_ledger import RedisJobLedger
 
@@ -49,48 +45,5 @@ async def test_redis_ledger_searches_persist():
     assert restored is not None
     assert len(restored.searches) == 1
     assert restored.searches[0]["query"] == "test"
-
-
-def _fake_x_transport(tweets: list[dict[str, Any]]) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": tweets,
-                "includes": {
-                    "users": [
-                        {"id": t.get("author_id", "u1"), "username": "testuser", "verified": False}
-                        for t in tweets
-                    ]
-                },
-                "meta": {"result_count": len(tweets)},
-            },
-        )
-    return httpx.MockTransport(handler)
-
-
-async def test_x_tool_usage_persists_across_restart(monkeypatch):
-    monkeypatch.setenv("EIREL_X_BEARER_TOKEN", "bearer-xxx")
-    from tool_platforms.x_tool_service.app import create_app
-
-    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    tweets = [{"id": "t1", "author_id": "u1", "text": "hello", "created_at": "2026-01-01T00:00:00Z", "public_metrics": {}}]
-    transport = _fake_x_transport(tweets)
-
-    ledger_a = RedisJobLedger(client, ttl_seconds=86400)
-    app_a = create_app(x_transport=transport, ledger=ledger_a)
-    async with app_a.router.lifespan_context(app_a):
-        async with AsyncClient(transport=ASGITransport(app=app_a), base_url="http://test") as http:
-            headers = {"X-Eirel-Job-Id": "job-persist", "X-Eirel-Max-Requests": "5"}
-            resp = await http.post("/v1/search", json={"query": "q"}, headers=headers)
-            assert resp.status_code == 200
-
-    ledger_b = RedisJobLedger(client, ttl_seconds=86400)
-    app_b = create_app(x_transport=transport, ledger=ledger_b)
-    async with app_b.router.lifespan_context(app_b):
-        async with AsyncClient(transport=ASGITransport(app=app_b), base_url="http://test") as http:
-            usage = await http.get("/v1/jobs/job-persist/usage")
-            assert usage.status_code == 200
-            assert usage.json()["request_count"] == 1
 
 

@@ -32,7 +32,7 @@ def test_family_evaluation_task_accepts_multi_turn_dict_form():
 
     multi = FamilyEvaluationTask.model_validate({
         "task_id": "m-1", "family_id": "general_chat",
-        "prompt": "first user turn",  # legacy mirror for older readers
+        "prompt": "first user turn",
         "mode": "thinking",
         "turns": [
             {"user": "first user turn"},
@@ -255,3 +255,102 @@ async def test_failure_at_intermediate_turn_aborts_replay(_patch_client):
     sent_prompts = [b.get("prompt") for b in t.bodies]
     assert "third — must never be sent" not in sent_prompts
     assert run.metadata.get("failed_at_turn") == 1
+
+
+# -- Dispatch: turns + inputs preservation -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_passes_structured_turns_through(_patch_client):
+    """When task.turns is set, body['turns'] mirrors the structural
+    fixture verbatim. Miners with retrieval / summarization
+    infrastructure use this signal directly; naive miners can keep
+    reading body['history'].
+    """
+    transport = _ScriptedTransport([_ndjson_body("final-answer")])
+    _patch_client(transport)
+
+    task = _Task(turns=[
+        {"user": "I work in Lisbon as a backend engineer.",
+         "assistant": "Got it."},
+        {"user": "Tell me about jazz.",
+         "assistant": "Jazz originated in New Orleans..."},
+        {"user": "Where did I say I work?", "assistant": None},
+    ])
+    await _invoke_task(miner=_miner(), task=task, timeout_seconds=5.0)
+
+    # Only the final live turn calls the miner — that body MUST carry
+    # the full ``turns`` array structurally, not just history.
+    assert len(transport.bodies) == 1
+    body = transport.bodies[0]
+    assert "turns" in body
+    assert len(body["turns"]) == 3
+    assert body["turns"][0]["user"] == "I work in Lisbon as a backend engineer."
+    assert body["turns"][0]["assistant"] == "Got it."
+    assert body["turns"][-1]["user"] == "Where did I say I work?"
+    assert body["turns"][-1]["assistant"] is None
+    # And history is also populated — miners reading slim history keep
+    # working.
+    assert "history" in body
+    assert len(body["history"]) == 4  # 2 scripted user/assistant pairs
+
+
+@pytest.mark.asyncio
+async def test_dispatch_preserves_inputs_document_text(_patch_client):
+    """Tasks with ``inputs.document_text`` MUST forward the document
+    to the miner. Pre-fix, ``_build_body`` overwrote ``inputs`` with
+    ``{mode, web_search}`` only, dropping document_text on the floor."""
+    transport = _ScriptedTransport([_ndjson_body("doc-answer")])
+    _patch_client(transport)
+
+    task = _Task(turns=[{"user": "What does the doc say?", "assistant": None}])
+    task.inputs = {
+        "mode": "instant",
+        "web_search": False,
+        "document_text": "The witness saw the suspect at 3:47 AM.",
+        "attached_documents": ["additional context here"],
+    }
+    await _invoke_task(miner=_miner(), task=task, timeout_seconds=5.0)
+
+    body = transport.bodies[0]
+    inputs = body.get("inputs") or {}
+    assert inputs.get("document_text") == "The witness saw the suspect at 3:47 AM."
+    assert inputs.get("attached_documents") == ["additional context here"]
+    assert inputs.get("mode") == "instant"
+    assert inputs.get("web_search") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fills_missing_mode_web_search_defaults(_patch_client):
+    """Tasks where inputs lacks mode/web_search get defaults; tasks
+    where inputs has them keep them."""
+    transport = _ScriptedTransport([_ndjson_body("ok")])
+    _patch_client(transport)
+
+    task = _Task(turns=[{"user": "hi", "assistant": None}])
+    task.inputs = {"document_text": "doc"}  # NO mode / web_search
+    await _invoke_task(miner=_miner(), task=task, timeout_seconds=5.0)
+
+    body = transport.bodies[0]
+    inputs = body.get("inputs") or {}
+    assert inputs.get("document_text") == "doc"  # preserved
+    assert inputs.get("mode") == "instant"        # default filled
+    assert inputs.get("web_search") is False      # default filled
+
+
+@pytest.mark.asyncio
+async def test_dispatch_single_turn_has_no_turns_field(_patch_client):
+    """Single-turn tasks (no fixture turns array) emit body WITHOUT a
+    `turns` key. Miners distinguish single-turn from multi-turn by
+    presence/absence of this field."""
+    transport = _ScriptedTransport([_ndjson_body("ok")])
+    _patch_client(transport)
+
+    task = _Task(turns=[{"user": "single shot", "assistant": None}])
+    # Single-turn fixtures use task.turns=[] OR task.turns=None
+    task.turns = None
+    task.prompt = "single shot"
+    await _invoke_task(miner=_miner(), task=task, timeout_seconds=5.0)
+
+    body = transport.bodies[0]
+    assert "turns" not in body  # absent — single-turn dispatch
