@@ -54,8 +54,9 @@ metagraph-listener = "validation.metagraph_listener.main:main"
 
 # Supporting services
 web-search-tool-service = "tool_platforms.web_search_tool_service.app:main"
-x-tool-service = "tool_platforms.x_tool_service.app:main"
 sandbox-tool-service = "tool_platforms.sandbox_tool_service.app:main"
+url-fetch-tool-service = "tool_platforms.url_fetch_tool_service.app:main"
+rag-tool-service = "tool_platforms.rag_tool_service.app:main"
 eirel-provider-proxy = "tool_platforms.provider_proxy.main:main"
 
 # Operator CLI — unified: `eirel-ai migrate`, `eirel-ai admin …`
