@@ -1180,13 +1180,23 @@ async def run_distributed_benchmarks(
             reconciled=reconciled_for_baseline,
             preferred_vendor=pairwise_vendor,
         )
+        # Carry the source vendor's web-search citations through onto the
+        # baseline so the dashboard can render the reference answer's URLs
+        # alongside the miner's. Non-vendor sources (deterministic,
+        # consensus_claim, none) have no per-vendor citations to copy.
+        vendor_key = baseline_source.removesuffix("_fallback")
+        baseline_citations = [
+            {"url": str(u), "title": ""}
+            for u in (reconciled_for_baseline.vendor_citations or {}).get(vendor_key, [])
+            if u
+        ]
         # Synthetic ``baseline`` shim that still satisfies the rest of
         # the engine's expected fields (cost, latency, citations).
         # ``cost_usd=0.0`` because reusing the cached oracle answer
         # adds no incremental spend.
         baseline = _SyntheticBaselineResponse(
             response_text=baseline_text,
-            citations=[],
+            citations=baseline_citations,
             cost_usd=0.0,
             latency_seconds=0.0,
             source_vendor=baseline_source,
