@@ -208,6 +208,32 @@ def _migration_eval_feedback_table(engine: Engine) -> None:
         )
 
 
+def _migration_validator_cost_tracking(engine: Engine) -> None:
+    """Add ``oracle_cost_usd`` to ``task_evaluations`` so the validator-
+    cost dashboard can roll up per-validator per-run spend.
+
+    Skipped on fresh databases — there ``Base.metadata.create_all``
+    runs after migrations and creates the column from the SQLAlchemy
+    model. Only does work on pre-existing DBs.
+    """
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if "task_evaluations" not in inspector.get_table_names():
+        return
+    existing_columns = {
+        col["name"] for col in inspector.get_columns("task_evaluations")
+    }
+    if "oracle_cost_usd" in existing_columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE task_evaluations "
+                "ADD COLUMN oracle_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0.0"
+            )
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="initial_schema",
@@ -236,5 +262,15 @@ MIGRATIONS: tuple[Migration, ...] = (
             "operator dashboard cross-miner drill-in."
         ),
         apply=_migration_eval_feedback_table,
+    ),
+    Migration(
+        version="validator_cost_tracking",
+        description=(
+            "Add task_evaluations.oracle_cost_usd — validator's "
+            "grounding-layer spend (oracle fanout + reconciler) per "
+            "task. Combined with task_miner_results.judge_cost_usd in "
+            "the validator-costs dashboard endpoint."
+        ),
+        apply=_migration_validator_cost_tracking,
     ),
 )

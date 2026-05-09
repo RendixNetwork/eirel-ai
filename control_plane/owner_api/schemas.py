@@ -226,6 +226,13 @@ class TaskResultSubmission(BaseModel):
     miner_results: list[dict[str, Any]] = Field(default_factory=list)
     validator_hotkey: str | None = None
     judge_model: str | None = None
+    # Validator-paid grounding-layer spend for this task (oracle
+    # fanout + reconciler). Trusted as the validator's own bill —
+    # owner-api has no independent view of the validator's
+    # OpenAI / Gemini / Grok / Chutes API keys. Used by the
+    # validator-costs dashboard endpoint to roll up per-validator
+    # per-run spend. Default 0 covers legacy submitters.
+    oracle_cost_usd: float = Field(default=0.0, ge=0.0)
 
 
 class TaskResultResponse(BaseModel):

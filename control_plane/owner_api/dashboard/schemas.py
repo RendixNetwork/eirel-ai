@@ -346,3 +346,30 @@ class SubmissionFile(BaseModel):
 
 class SubmissionFilesResponse(BaseModel):
     files: list[SubmissionFile] = Field(default_factory=list)
+
+
+class ValidatorRunCost(BaseModel):
+    """Per-validator cost breakdown for one run.
+
+    Costs are validator-paid components only (oracle layer +
+    eiretes-judge). Miner-paid ``proxy_cost_usd`` is NOT included —
+    that's the miner's bill against the subnet provider-proxy and
+    showing it under "validator cost" would conflate two payers.
+    """
+
+    validator_hotkey: str
+    tasks_claimed: int
+    tasks_evaluated: int
+    oracle_cost_usd: float
+    judge_cost_usd: float
+    total_cost_usd: float
+
+
+class ValidatorRunCostsResponse(BaseModel):
+    run_id: str
+    validators: list[ValidatorRunCost] = Field(default_factory=list)
+    # Run-wide totals for quick "what did this run cost the validator
+    # fleet" readouts on the dashboard.
+    total_oracle_cost_usd: float = 0.0
+    total_judge_cost_usd: float = 0.0
+    total_cost_usd: float = 0.0

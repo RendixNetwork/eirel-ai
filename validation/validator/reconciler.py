@@ -72,6 +72,13 @@ class ReconciledOracle:
     vendor_status: dict[str, str] = field(default_factory=dict)
     reconciler_latency_ms: int = 0
     reconciler_cost_usd: float | None = None
+    # Per-vendor oracle USD cost, copied from each
+    # ``OracleGrounding.cost_usd``. The engine sums these plus
+    # ``reconciler_cost_usd`` to produce ``oracle_cost_usd`` for the
+    # validator-cost dashboard. Missing entries are treated as $0
+    # (vendor errored before metering). Empty for ``deterministic``
+    # items.
+    vendor_costs: dict[str, float] = field(default_factory=dict)
     # URLs each vendor cited during their grounded call. Persisted
     # alongside ``vendor_status`` so the dashboard can show "where did
     # the oracle get this answer." Empty for ``deterministic`` items
@@ -246,6 +253,15 @@ class Reconciler:
             for g in ok
             if g.raw_text
         }
+        # Costs from EVERY grounding (success or failure) — the
+        # validator paid for the call regardless of whether the
+        # vendor's answer made it past parsing. ``cost_usd is None``
+        # is treated as $0 here (call wasn't metered).
+        vendor_costs = {
+            g.vendor: float(g.cost_usd or 0.0)
+            for g in groundings
+            if g.cost_usd is not None
+        }
 
         if len(ok) < 2:
             # 0-1 oracle survived: not enough signal for plurality
@@ -259,6 +275,7 @@ class Reconciler:
                     f"returned usable answers"
                 ),
                 vendor_status=statuses,
+                vendor_costs=vendor_costs,
                 vendor_citations=vendor_citations,
                 vendor_answers=vendor_answers,
             )
@@ -281,6 +298,7 @@ class Reconciler:
                 oracle_status="disputed",
                 disagreement_note=f"reconciler_error: {exc}",
                 vendor_status=statuses,
+                vendor_costs=vendor_costs,
                 vendor_citations=vendor_citations,
                 vendor_answers=vendor_answers,
             )
@@ -298,6 +316,7 @@ class Reconciler:
                 oracle_status="disputed",
                 disagreement_note=f"reconciler_malformed_json: {exc}",
                 vendor_status=statuses,
+                vendor_costs=vendor_costs,
                 vendor_citations=vendor_citations,
                 vendor_answers=vendor_answers,
                 reconciler_latency_ms=resp.latency_ms,
@@ -343,6 +362,7 @@ class Reconciler:
             majority_claims=majority,
             minority_claims=minority,
             vendor_status=statuses,
+            vendor_costs=vendor_costs,
             vendor_citations=vendor_citations,
             vendor_answers=vendor_answers,
             reconciler_latency_ms=resp.latency_ms,

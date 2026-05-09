@@ -147,6 +147,9 @@ async def metrics(request: Request) -> Response:
         # ── Per-task live-run rows (bounded to the current open run) ─────
         live_run_rows = _collect_live_run_rows(session)
 
+        # ── Per-validator cost rows for the open run ─────────────────────
+        validator_cost_rows = _collect_validator_cost_rows(session)
+
     submission_labeled = _format_submission_metrics(submission_by_status_family)
     deployment_labeled = _format_deployment_metrics(deployment_by_status_health_family)
     node_deployment_lines = _format_node_deployment_metrics(deployment_by_node)
@@ -154,6 +157,7 @@ async def metrics(request: Request) -> Response:
     node_lines = _format_node_metrics(runtime_nodes)
     scorecard_lines = _format_scorecard_metrics(scorecard_rows)
     live_run_lines = _format_live_run_metrics(live_run_rows)
+    validator_cost_lines = _format_validator_cost_metrics(validator_cost_rows)
 
     body = (
         # ── Service up marker ────────────────────────────────────────
@@ -227,6 +231,8 @@ async def metrics(request: Request) -> Response:
         + scorecard_lines
         # ── Per-task live progress for the current open run ──────────
         + live_run_lines
+        # ── Per-validator validator-paid cost (open run + most-recent) ─
+        + validator_cost_lines
     )
     _metrics_cache["body"] = body
     _metrics_cache["expires_at"] = time.monotonic() + _METRICS_CACHE_TTL
@@ -688,3 +694,124 @@ def _format_live_run_metrics(data: dict[str, Any]) -> str:
 
     lines.append("")
     return "\n".join(lines) + "\n"
+
+
+# -- Validator cost roll-up ---------------------------------------------------
+
+
+_VALIDATOR_COST_RUNS = 2  # current open + 1 most-recent closed
+
+
+def _collect_validator_cost_rows(session) -> list[dict[str, Any]]:
+    """Per-(run, validator) cost roll-up bounded to the latest 2 runs.
+
+    Series cardinality = ``|validators| × 2 runs``, which keeps the
+    Prometheus footprint constant even as runs accumulate. Each row
+    covers ``oracle_cost_usd`` (validator's grounding spend) and
+    ``judge_cost_usd`` (validator's eiretes-judge spend) — the two
+    components a validator actually pays out of pocket.
+    """
+    runs = (
+        session.query(EvaluationRun.id, EvaluationRun.sequence)
+        .order_by(EvaluationRun.sequence.desc())
+        .limit(_VALIDATOR_COST_RUNS)
+        .all()
+    )
+    if not runs:
+        return []
+    run_ids = [run_id for run_id, _seq in runs]
+
+    # Oracle cost + claim counts grouped by (run, validator).
+    oracle_rows = (
+        session.query(
+            TaskEvaluation.run_id,
+            TaskEvaluation.claimed_by_validator,
+            func.count(TaskEvaluation.id),
+            func.coalesce(func.sum(TaskEvaluation.oracle_cost_usd), 0.0),
+        )
+        .filter(
+            TaskEvaluation.run_id.in_(run_ids),
+            TaskEvaluation.claimed_by_validator.is_not(None),
+        )
+        .group_by(TaskEvaluation.run_id, TaskEvaluation.claimed_by_validator)
+        .all()
+    )
+
+    # Judge cost grouped by (run, validator) — joined through
+    # ``task_evaluations`` to attribute each miner-result row to the
+    # claiming validator.
+    judge_rows = (
+        session.query(
+            TaskEvaluation.run_id,
+            TaskEvaluation.claimed_by_validator,
+            func.coalesce(func.sum(TaskMinerResult.judge_cost_usd), 0.0),
+        )
+        .join(
+            TaskMinerResult,
+            TaskMinerResult.task_evaluation_id == TaskEvaluation.id,
+        )
+        .filter(
+            TaskEvaluation.run_id.in_(run_ids),
+            TaskEvaluation.claimed_by_validator.is_not(None),
+        )
+        .group_by(TaskEvaluation.run_id, TaskEvaluation.claimed_by_validator)
+        .all()
+    )
+    judge_by_pair: dict[tuple[str, str], float] = {
+        (run_id, hotkey): float(judge_cost or 0.0)
+        for run_id, hotkey, judge_cost in judge_rows
+    }
+
+    rows: list[dict[str, Any]] = []
+    for run_id, hotkey, tasks_claimed, oracle_cost in oracle_rows:
+        oracle = float(oracle_cost or 0.0)
+        judge = judge_by_pair.get((run_id, hotkey), 0.0)
+        rows.append({
+            "run_id": run_id,
+            "hotkey": hotkey,
+            "tasks_claimed": int(tasks_claimed or 0),
+            "oracle_cost_usd": oracle,
+            "judge_cost_usd": judge,
+            "total_cost_usd": oracle + judge,
+        })
+    return rows
+
+
+def _format_validator_cost_metrics(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    lines: list[str] = []
+    metric_defs = [
+        (
+            "eirel_owner_validator_run_oracle_cost_usd",
+            "Validator-paid oracle/reconciler spend (USD) per run.",
+            "oracle_cost_usd",
+        ),
+        (
+            "eirel_owner_validator_run_judge_cost_usd",
+            "Validator-paid eiretes-judge spend (USD) per run.",
+            "judge_cost_usd",
+        ),
+        (
+            "eirel_owner_validator_run_total_cost_usd",
+            "Validator-paid total (oracle + judge) spend (USD) per run.",
+            "total_cost_usd",
+        ),
+        (
+            "eirel_owner_validator_run_tasks_claimed",
+            "Tasks claimed by this validator in the run.",
+            "tasks_claimed",
+        ),
+    ]
+    for metric_name, help_text, row_key in metric_defs:
+        lines.append(f"# HELP {metric_name} {help_text}")
+        lines.append(f"# TYPE {metric_name} gauge")
+        for row in rows:
+            value = row[row_key]
+            formatted = f"{value:.6f}" if isinstance(value, float) else str(value)
+            lines.append(
+                f'{metric_name}{{run_id="{row["run_id"]}",'
+                f'hotkey="{row["hotkey"]}"}} {formatted}'
+            )
+    lines.append("")
+    return "\n".join(lines)

@@ -33,8 +33,12 @@ pytestmark = pytest.mark.asyncio
 
 
 def _openai_cfg() -> ProviderConfig:
+    # Use the production host so vendor detection in
+    # ``cost_calc.vendor_from_base_url`` picks the OpenAI extractor.
+    # The httpx MockTransport in each test intercepts the request
+    # regardless of the real host.
     return ProviderConfig(
-        base_url="http://openai.test",
+        base_url="https://api.openai.com/v1",
         api_key="tok",
         model="gpt-5.4",
         timeout_seconds=5.0,
@@ -44,7 +48,7 @@ def _openai_cfg() -> ProviderConfig:
 
 def _grok_cfg() -> ProviderConfig:
     return ProviderConfig(
-        base_url="http://grok.test",
+        base_url="https://api.x.ai/v1",
         api_key="tok",
         model="grok-4.3",
         timeout_seconds=5.0,
@@ -69,6 +73,11 @@ def _ok_openai(answer: str) -> httpx.Response:
     ``output`` array of ``{type: message, status, content: [...]}``
     items, where each content part of type ``output_text`` carries the
     text. See ``openai_compatible.py:_parse_responses_api_response``.
+
+    The ``usage`` block uses Responses-API token-count keys
+    (``input_tokens`` / ``output_tokens``) — cost extraction
+    multiplies by the gpt-5.4 rate card (5/Mtok input, 30/Mtok
+    output) for a deterministic value the tests can assert on.
     """
     return httpx.Response(
         200,
@@ -86,7 +95,7 @@ def _ok_openai(answer: str) -> httpx.Response:
                     ],
                 }
             ],
-            "usage": {"total_cost_usd": 0.001},
+            "usage": {"input_tokens": 100, "output_tokens": 50},
         },
     )
 
@@ -124,6 +133,8 @@ async def test_openai_oracle_ok():
     assert g.vendor == "openai"
     assert g.status == "ok"
     assert g.raw_text == "Paris"
+    # gpt-5.4 short tier: 100 input × $2.5/Mtok + 50 output × $15/Mtok
+    # = 0.00025 + 0.00075 = 0.001
     assert g.cost_usd == pytest.approx(0.001)
     assert g.finish_reason == "stop"
 

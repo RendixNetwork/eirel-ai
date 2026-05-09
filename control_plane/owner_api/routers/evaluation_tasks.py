@@ -104,6 +104,7 @@ async def submit_task_result(
             validator_hotkey=validator_hotkey,
             baseline_response=payload.baseline_response,
             miner_results=payload.miner_results,
+            oracle_cost_usd=float(payload.oracle_cost_usd or 0.0),
         )
         session.commit()
 

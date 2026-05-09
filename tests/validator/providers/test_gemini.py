@@ -87,7 +87,9 @@ async def test_complete_structured_request_shape():
     assert isinstance(resp, ProviderResponse)
     assert json.loads(resp.text) == {"answer": "42"}
     assert resp.finish_reason == "STOP"
-    assert resp.usage_usd is None  # Google doesn't surface USD
+    # gemini-3.1-pro-preview: 100 prompt × $2/Mtok + 50 output × $12/Mtok
+    # = 0.0002 + 0.0006 = 0.0008 (computed client-side from rate card).
+    assert resp.usage_usd == pytest.approx(0.0008)
 
     # URL: ?key=... + :generateContent suffix
     assert "/models/gemini-3.1-pro-preview:generateContent" in captured["url"]

@@ -26,6 +26,7 @@ from control_plane.owner_api.dashboard.schemas import (
     RunListResponse,
     SubmissionFile,
     SubmissionFilesResponse,
+    ValidatorRunCostsResponse,
 )
 from control_plane.owner_api.managed import ManagedOwnerServices
 
@@ -195,6 +196,32 @@ async def get_miner_runs(
             offset=offset,
         )
     _CACHE.set(key, result, ttl=_CLOSED_RUN_TTL)
+    return result
+
+
+@router.get(
+    "/runs/{run_id}/validator-costs",
+    response_model=ValidatorRunCostsResponse,
+)
+async def get_validator_costs_for_run(
+    request: Request, run_id: str,
+) -> ValidatorRunCostsResponse:
+    """Per-validator validator-paid cost breakdown for one run.
+
+    Aggregates ``task_evaluations.oracle_cost_usd`` (oracle layer) +
+    ``task_miner_results.judge_cost_usd`` (eiretes-judge) joined on
+    ``claimed_by_validator``. Returned validators are sorted by
+    total descending. Public endpoint — no auth, same policy as
+    other ``/api/v1/dashboard`` reads.
+    """
+    services: ManagedOwnerServices = request.app.state.services
+    key = ("validator_costs", run_id)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+    with services.db.sessionmaker() as session:
+        result = queries.validator_run_costs(session, run_id=run_id)
+    _CACHE.set(key, result, ttl=_OPEN_RUN_TTL)
     return result
 
 

@@ -1486,6 +1486,7 @@ async def run_distributed_benchmarks(
                 eval_outcome_str: str = "wrong"
                 eval_failure_mode: str | None = None
                 eval_guidance: str = ""
+                eval_resp: dict[str, Any] = {}
                 try:
                     eval_resp = await asyncio.to_thread(
                         judge_client.judge_eval,
@@ -1613,16 +1614,25 @@ async def run_distributed_benchmarks(
                     },
                 }
                 judge_latency = max(0.0, time.perf_counter() - judge_started)
-                # eiretes-judge surfaces ``cost_usd`` per judgment in
-                # its response metadata. Pull it through so
-                # ``TaskMinerResult.judge_cost_usd`` reflects what this
-                # validator paid Chutes for this single judgment.
-                # Falls back to 0.0 on older judge versions that don't
-                # include the field.
-                judge_cost_usd = float(
-                    judge_meta.get("cost_usd")
-                    or judge_meta.get("usd_cost")
-                    or 0.0
+                # eiretes-judge surfaces ``cost_usd`` at the response
+                # root of each /v1/judge/{pairwise,multi,eval} endpoint
+                # (eiretes ≥ 0.2.1). One miner-judgment runs ALL THREE
+                # endpoints, so per-miner judge cost = pairwise + multi
+                # + eval. ``None`` on any endpoint means the upstream
+                # didn't surface token counts (older payload shape) —
+                # treated as $0 in the sum so we don't crash.
+                def _cost_usd(payload: dict[str, Any] | None) -> float:
+                    if not isinstance(payload, dict):
+                        return 0.0
+                    raw = payload.get("cost_usd")
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        return float(raw)
+                    return 0.0
+
+                judge_cost_usd = (
+                    _cost_usd(pw_call)
+                    + _cost_usd(multi_resp)
+                    + _cost_usd(eval_resp)
                 )
                 # Mode-specific completion-time SLA: any *single turn*
                 # exceeding the budget counts as a violation. We gate on
@@ -1736,13 +1746,23 @@ async def run_distributed_benchmarks(
             task_evaluation_id[:8], verdict_summary or "(none)",
         )
 
-        # Per-task cost roll-up. Three components, all server-side
-        # sourced: (1) baseline = OpenAI Responses API spend for this
-        # task (sums all turns); (2) miners = sum of provider-proxy
-        # ledger lookups for each miner under this task's job_id;
-        # (3) judge = sum of eiretes-judge-reported per-judgment
-        # ``cost_usd`` across the miners we judged for this task.
+        # Per-task cost roll-up. Four components:
+        #   (1) oracle layer = per-vendor oracle costs + reconciler.
+        #       Validator-paid; reused across every miner judged for
+        #       this task. Submitted to owner-api as
+        #       ``oracle_cost_usd`` for the validator-cost dashboard.
+        #   (2) miners = sum of provider-proxy ledger lookups
+        #       (miner-paid; informational here).
+        #   (3) judge = sum of eiretes-judge per-judgment costs across
+        #       miners (validator-paid; persisted per (task, miner)).
+        #   (4) baseline = legacy ``_SyntheticBaselineResponse.cost_usd``
+        #       shim — always 0 since the comparator is reused from
+        #       a cached oracle answer.
         baseline_cost = float(getattr(baseline, "cost_usd", 0.0) or 0.0)
+        oracle_layer_cost = sum(
+            float(c or 0.0)
+            for c in (reconciled_for_baseline.vendor_costs or {}).values()
+        ) + float(reconciled_for_baseline.reconciler_cost_usd or 0.0)
         miners_cost = sum(
             float(r.get("proxy_cost_usd") or 0.0) for r in judge_results
         )
@@ -1750,10 +1770,11 @@ async def run_distributed_benchmarks(
             float(r.get("judge_cost_usd") or 0.0) for r in judge_results
         )
         logger.info(
-            "task_eval=%s cost: baseline=$%.4f miners=$%.4f judge=$%.4f total=$%.4f",
+            "task_eval=%s cost: oracle=$%.4f baseline=$%.4f miners=$%.4f "
+            "judge=$%.4f validator_paid=$%.4f",
             task_evaluation_id[:8],
-            baseline_cost, miners_cost, judge_cost,
-            baseline_cost + miners_cost + judge_cost,
+            oracle_layer_cost, baseline_cost, miners_cost, judge_cost,
+            oracle_layer_cost + judge_cost,
         )
 
         # Submit the batch
@@ -1763,6 +1784,7 @@ async def run_distributed_benchmarks(
             "miner_results": judge_results,
             "validator_hotkey": signer.hotkey,
             "judge_model": judge_model,
+            "oracle_cost_usd": oracle_layer_cost,
         }
         result_body_bytes = _json.dumps(result_body).encode()
         try:

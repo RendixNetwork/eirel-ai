@@ -31,6 +31,14 @@ from typing import Any, Callable
 import httpx
 
 from validation.validator.eval_config import ProviderConfig
+from validation.validator.providers.cost_calc import (
+    VENDOR_OPENAI,
+    VENDOR_XAI,
+    extract_grok_responses_cost,
+    extract_openai_compatible_chat_cost,
+    extract_openai_responses_cost,
+    vendor_from_base_url,
+)
 from validation.validator.providers.types import (
     ProviderError,
     ProviderResponse,
@@ -249,7 +257,9 @@ class OpenAICompatibleClient:
                     f"HTTP {response.status_code}: "
                     f"{(response.text or '')[:512]}"
                 )
-            return parser(response, latency_ms)
+            parsed = parser(response, latency_ms)
+            self._log_call_cost(parsed, latency_ms=latency_ms)
+            return parsed
         # Unreachable: the loop either returns or raises.
         raise ProviderError(  # pragma: no cover
             f"unreachable after {attempt} attempts; last_exc={last_exc!r}"
@@ -258,6 +268,21 @@ class OpenAICompatibleClient:
     async def _sleep_backoff(self, attempt: int) -> None:
         delay = self._backoff_base * (2 ** (attempt - 1))
         await asyncio.sleep(delay)
+
+    def _log_call_cost(self, parsed: ProviderResponse, *, latency_ms: int) -> None:
+        """Single-line per-call telemetry. Emitted at INFO so an
+        operator grepping the validator log can correlate spend with
+        a specific request without needing to scrape Prometheus.
+        """
+        cost = parsed.usage_usd
+        cost_str = "?" if cost is None else f"${cost:.6f}"
+        _logger.info(
+            "validator_provider_call: vendor=%s model=%s latency_ms=%d cost_usd=%s",
+            vendor_from_base_url(self._cfg.base_url),
+            self._cfg.model,
+            latency_ms,
+            cost_str,
+        )
 
     def _parse_response(
         self, response: httpx.Response, latency_ms: int,
@@ -286,7 +311,7 @@ class OpenAICompatibleClient:
         else:
             text = str(raw_content or "")
         finish_reason = choice.get("finish_reason")
-        usage_usd = self._extract_usage_usd(payload)
+        usage_usd = self._chat_completion_cost(payload)
         return ProviderResponse(
             text=text,
             latency_ms=latency_ms,
@@ -294,14 +319,31 @@ class OpenAICompatibleClient:
             finish_reason=finish_reason,
         )
 
-    @staticmethod
-    def _extract_usage_usd(payload: dict[str, Any]) -> float | None:
-        usage = payload.get("usage")
-        if not isinstance(usage, dict):
-            return None
-        total_usd = usage.get("total_cost_usd")
-        if isinstance(total_usd, (int, float)):
-            return float(total_usd)
+    def _chat_completion_cost(self, payload: dict[str, Any]) -> float | None:
+        """Vendor-aware exact USD cost for ``/chat/completions`` shape.
+
+        Dispatched off ``base_url``: OpenAI uses token rates (no web
+        search on this endpoint), xAI uses ``cost_in_usd_ticks``,
+        Chutes uses dynamic-overlay token rates. Unknown hosts read
+        ``usage.total_cost_usd`` if upstream surfaced one, else
+        ``None`` (preserves the prior behavior for forward-compat).
+        """
+        return extract_openai_compatible_chat_cost(
+            payload, base_url=self._cfg.base_url, model=self._cfg.model,
+        )
+
+    def _responses_api_cost(self, payload: dict[str, Any]) -> float | None:
+        """Vendor-aware exact USD cost for the Responses API.
+
+        OpenAI: token rates + count(web_search_call) × $10/1k.
+        xAI Grok: ``cost_in_usd_ticks / 10^10`` (already includes
+        web search and reasoning). Other hosts return ``None``.
+        """
+        vendor = vendor_from_base_url(self._cfg.base_url)
+        if vendor == VENDOR_OPENAI:
+            return extract_openai_responses_cost(payload, self._cfg.model)
+        if vendor == VENDOR_XAI:
+            return extract_grok_responses_cost(payload, self._cfg.model)
         return None
 
     def _parse_responses_api_response(
@@ -366,7 +408,7 @@ class OpenAICompatibleClient:
         return ProviderResponse(
             text="".join(text_pieces),
             latency_ms=latency_ms,
-            usage_usd=self._extract_usage_usd(payload),
+            usage_usd=self._responses_api_cost(payload),
             finish_reason=finish_reason,
             citations=tuple(citation_urls),
         )

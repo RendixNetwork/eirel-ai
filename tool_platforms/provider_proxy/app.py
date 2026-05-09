@@ -383,6 +383,7 @@ def create_app() -> FastAPI:
             prompt_tokens=actual_usage["prompt_tokens"],
             completion_tokens=actual_usage["completion_tokens"],
             reasoning_tokens=actual_usage.get("reasoning_tokens", 0),
+            cached_prompt_tokens=actual_usage.get("cached_prompt_tokens", 0),
         )
         await store.reconcile_actual_cost(
             job_id=x_eirel_job_id,
@@ -660,10 +661,22 @@ def _anthropic_response_to_openai(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_upstream_usage(provider: str, response: dict[str, Any]) -> dict[str, int]:
-    """Extract actual token counts from the (already-normalized) upstream response."""
+    """Extract actual token counts from the (already-normalized) upstream response.
+
+    Returns ``cached_prompt_tokens`` (from
+    ``usage.prompt_tokens_details.cached_tokens``) so the cost
+    calculator can apply the vendor's cached-input discount. Defaults
+    to ``0`` when the upstream doesn't surface a cache-hit count.
+    """
     usage = response.get("usage", {})
     if not isinstance(usage, dict):
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cached_prompt_tokens": 0,
+        }
     prompt = int(usage.get("prompt_tokens", 0))
     completion = int(usage.get("completion_tokens", 0))
     total = int(usage.get("total_tokens", 0)) or (prompt + completion)
@@ -671,11 +684,16 @@ def _extract_upstream_usage(provider: str, response: dict[str, Any]) -> dict[str
     details = usage.get("completion_tokens_details")
     if isinstance(details, dict):
         reasoning = int(details.get("reasoning_tokens", 0))
+    cached = 0
+    prompt_details = usage.get("prompt_tokens_details")
+    if isinstance(prompt_details, dict):
+        cached = int(prompt_details.get("cached_tokens", 0))
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total,
         "reasoning_tokens": reasoning,
+        "cached_prompt_tokens": cached,
     }
 
 

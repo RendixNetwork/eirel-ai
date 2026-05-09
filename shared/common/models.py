@@ -657,6 +657,14 @@ class TaskEvaluation(Base):
     # Baseline response populated by validator from OpenAI Responses API
     baseline_response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
+    # Validator's grounding-layer spend for this task: sum of per-vendor
+    # oracle costs + the Chutes reconciler. Computed once when the
+    # validator enriches the task and reused across every miner judged
+    # for it; sub-totals live in ``baseline_response_json.vendor_costs``.
+    # Reported by the validator at submission time and trusted as ground
+    # truth — it's the validator's own bill against its own keys.
+    oracle_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)

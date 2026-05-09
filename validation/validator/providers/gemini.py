@@ -9,10 +9,13 @@ Google's API uses a different request shape from OpenAI's:
     JSON Schema, with camelCase keys per Google's spec).
   * Auth via ``?key={api_key}`` query param (not bearer header).
 
-Usage budget is best-effort: Google returns ``usageMetadata`` with
-token counts but no USD; the validator's telemetry treats this as
-"unknown" without scoring impact. ``finish_reason`` maps from
-Google's ``finishReason`` field directly.
+Usage cost is computed client-side: Google returns ``usageMetadata``
+with token counts (and an optional ``cachedContentTokenCount`` for
+context caching) but no USD figure, so the client multiplies by the
+configured rate card and adds search-grounding billing per
+``candidates[0].groundingMetadata.webSearchQueries``. See
+``cost_calc.extract_gemini_generate_cost`` for the policy.
+``finish_reason`` maps from Google's ``finishReason`` field directly.
 
 We do NOT wrap this in an OpenAI-compatible adapter — Google's
 schema/tool/finish-reason shapes drift enough that a leaky adapter is
@@ -29,6 +32,9 @@ from typing import Any
 import httpx
 
 from validation.validator.eval_config import ProviderConfig
+from validation.validator.providers.cost_calc import (
+    extract_gemini_generate_cost,
+)
 from validation.validator.providers.types import (
     ProviderError,
     ProviderResponse,
@@ -213,7 +219,14 @@ class GeminiClient:
                     f"HTTP {response.status_code}: "
                     f"{(response.text or '')[:512]}"
                 )
-            return self._parse_response(response, latency_ms)
+            parsed = self._parse_response(response, latency_ms)
+            cost = parsed.usage_usd
+            cost_str = "?" if cost is None else f"${cost:.6f}"
+            _logger.info(
+                "validator_provider_call: vendor=gemini model=%s latency_ms=%d cost_usd=%s",
+                self._cfg.model, latency_ms, cost_str,
+            )
+            return parsed
         raise ProviderError(  # pragma: no cover
             f"unreachable after {attempt} attempts; last_exc={last_exc!r}"
         )
@@ -273,7 +286,7 @@ class GeminiClient:
         return ProviderResponse(
             text=text,
             latency_ms=latency_ms,
-            usage_usd=None,
+            usage_usd=extract_gemini_generate_cost(payload, self._cfg.model),
             finish_reason=finish_reason,
             citations=tuple(citations),
         )

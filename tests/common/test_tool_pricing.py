@@ -172,3 +172,103 @@ def test_llm_cost_for_chutes_unknown_model_uses_fallback():
     )
     # ``chutes:*`` fallback is $0.50/M input.  Not Kimi's rate.
     assert cost == pytest.approx(0.50)
+
+
+# -- Long-context tier behaviour ---------------------------------------------
+
+
+def test_short_tier_at_threshold_uses_short_rates_openai():
+    """gpt-5.4 threshold is 272K, strict-greater. Exactly 272K → short
+    rate ($2.50/Mtok input)."""
+    cost = llm_cost_for(
+        provider="openai", model="gpt-5.4",
+        prompt_tokens=272_000, completion_tokens=0,
+    )
+    # 272K * $2.50/Mtok = 0.68
+    assert cost == pytest.approx(0.68)
+
+
+def test_long_tier_above_threshold_uses_long_rates_openai():
+    """One token above 272K → long rates: input $5/Mtok, output $22.50/Mtok."""
+    cost = llm_cost_for(
+        provider="openai", model="gpt-5.4",
+        prompt_tokens=272_001, completion_tokens=10_000,
+    )
+    # 272001 * 5 / 1M + 10K * 22.5 / 1M = 1.360005 + 0.225 = 1.585005
+    assert cost == pytest.approx(1.585005)
+
+
+def test_long_tier_grok_doubles_rates():
+    """grok-4.3 threshold is 200K. Above: $1.25→$2.50 input,
+    $2.50→$5 output."""
+    cost = llm_cost_for(
+        provider="xai", model="grok-4.3",
+        prompt_tokens=200_001, completion_tokens=10_000,
+    )
+    # 200001 * 2.5 / 1M + 10K * 5 / 1M = 0.500003 + 0.05 = 0.550003
+    assert cost == pytest.approx(0.550003)
+
+
+def test_long_tier_gemini_doubles_rates():
+    """gemini-3.1-pro-preview threshold is 200K. Above:
+    input $2→$4, output $12→$18."""
+    cost = llm_cost_for(
+        provider="gemini", model="gemini-3.1-pro-preview",
+        prompt_tokens=300_000, completion_tokens=5_000,
+    )
+    # 300K * 4 / 1M + 5K * 18 / 1M = 1.2 + 0.09 = 1.29
+    assert cost == pytest.approx(1.29)
+
+
+def test_long_tier_applies_long_cached_rate():
+    """Cached-input rate also tiers: gpt-5.4 cached
+    short $0.25 → long $0.50 /Mtok."""
+    cost = llm_cost_for(
+        provider="openai", model="gpt-5.4",
+        prompt_tokens=300_000, completion_tokens=0,
+        cached_prompt_tokens=100_000,
+    )
+    # uncached 200K × $5/Mtok + cached 100K × $0.50/Mtok
+    # = 1.00 + 0.05 = 1.05
+    assert cost == pytest.approx(1.05)
+
+
+def test_long_tier_falls_back_to_scaled_cached_rate_when_long_unset():
+    """Operator overrides via EIREL_LLM_PRICING_JSON may set
+    ``long_input`` / ``long_output`` but skip ``long_cached_input``.
+    The cost calc scales the short cached rate by the input ratio to
+    preserve the discount proportion rather than charging the full
+    long-input rate for cached tokens."""
+    from shared.common.tool_pricing import LLM_PRICING
+    LLM_PRICING["test_vendor:test_model"] = LLMPrice(
+        input_per_mtok_usd=2.0,
+        output_per_mtok_usd=10.0,
+        cached_input_per_mtok_usd=0.20,  # 0.1× input
+        long_context_threshold_tokens=100_000,
+        long_input_per_mtok_usd=4.0,
+        long_output_per_mtok_usd=20.0,
+        # long_cached_input_per_mtok_usd intentionally unset (0).
+    )
+    try:
+        cost = llm_cost_for(
+            provider="test_vendor", model="test_model",
+            prompt_tokens=200_000, completion_tokens=0,
+            cached_prompt_tokens=200_000,
+        )
+        # Long tier triggers (200K > 100K threshold).
+        # Scaled cached_rate = 0.20 × (4.0 / 2.0) = 0.40
+        # 200K × $0.40/Mtok = 0.08
+        assert cost == pytest.approx(0.08)
+    finally:
+        del LLM_PRICING["test_vendor:test_model"]
+
+
+def test_chutes_no_long_tier_threshold_zero():
+    """Chutes models have ``long_context_threshold_tokens=0`` — they
+    always bill at the single rate regardless of prompt size."""
+    cost = llm_cost_for(
+        provider="chutes", model="zai-org/GLM-5.1-TEE",
+        prompt_tokens=10_000_000, completion_tokens=0,
+    )
+    # 10M × $0.50/Mtok = 5.0 (no long-tier kick-in)
+    assert cost == pytest.approx(5.0)

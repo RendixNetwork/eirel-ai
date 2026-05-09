@@ -334,7 +334,13 @@ def test_extract_usage_openai_format():
         "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
     }
     usage = _extract_upstream_usage("openai", response)
-    assert usage == {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150, "reasoning_tokens": 0}
+    assert usage == {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "reasoning_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
 
 
 def test_extract_usage_anthropic_already_normalized():
@@ -343,17 +349,50 @@ def test_extract_usage_anthropic_already_normalized():
         "usage": {"prompt_tokens": 80, "completion_tokens": 30, "total_tokens": 110}
     }
     usage = _extract_upstream_usage("anthropic", response)
-    assert usage == {"prompt_tokens": 80, "completion_tokens": 30, "total_tokens": 110, "reasoning_tokens": 0}
+    assert usage == {
+        "prompt_tokens": 80,
+        "completion_tokens": 30,
+        "total_tokens": 110,
+        "reasoning_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
+
+
+def test_extract_usage_with_cached_prompt_tokens():
+    """OpenAI surfaces cache hits in ``prompt_tokens_details.cached_tokens``;
+    the proxy reads this so the cached-input rate applies downstream."""
+    response = {
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "prompt_tokens_details": {"cached_tokens": 30},
+        },
+    }
+    usage = _extract_upstream_usage("openai", response)
+    assert usage["cached_prompt_tokens"] == 30
 
 
 def test_extract_usage_missing_usage_key():
     usage = _extract_upstream_usage("openai", {})
-    assert usage == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
+    assert usage == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
 
 
 def test_extract_usage_non_dict_usage():
     usage = _extract_upstream_usage("openai", {"usage": "not-a-dict"})
-    assert usage == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}
+    assert usage == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
 
 
 def test_extract_usage_computes_total_if_zero():

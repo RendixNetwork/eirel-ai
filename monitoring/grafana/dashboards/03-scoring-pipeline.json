@@ -201,6 +201,67 @@
       ],
       "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Validator economics (per-run cost)",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 50},
+      "panels": []
+    },
+    {
+      "id": 201,
+      "type": "barchart",
+      "title": "Validator-paid spend by run (oracle + judge)",
+      "description": "Per-validator stacked bar of validator-paid spend per run. Two segments per validator: oracle (3-oracle layer + Chutes reconciler) and judge (eiretes pairwise/multi/eval). Source: eirel_owner_validator_run_oracle_cost_usd + eirel_owner_validator_run_judge_cost_usd.",
+      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 51},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "eirel_owner_validator_run_oracle_cost_usd", "legendFormat": "{{hotkey}} oracle (run {{run_id}})", "instant": true},
+        {"refId": "B", "expr": "eirel_owner_validator_run_judge_cost_usd", "legendFormat": "{{hotkey}} judge (run {{run_id}})", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "custom": {"lineWidth": 1, "fillOpacity": 80}}, "overrides": []},
+      "options": {"orientation": "horizontal", "stacking": "normal", "legend": {"displayMode": "table", "placement": "right"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 202,
+      "type": "stat",
+      "title": "Total validator-paid spend (latest run)",
+      "description": "Sum across all validators of oracle+judge spend in the most recent run scraped.",
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 51},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(eirel_owner_validator_run_total_cost_usd * on(run_id) group_left() topk(1, max by (run_id) (eirel_owner_validator_run_total_cost_usd)))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 25}, {"color": "red", "value": 100}]}, "color": {"mode": "thresholds"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area", "textMode": "auto"}
+    },
+    {
+      "id": 203,
+      "type": "stat",
+      "title": "Avg cost per claimed task (fleet, latest run)",
+      "description": "fleet total / fleet tasks_claimed in the most recent run.",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 55},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(eirel_owner_validator_run_total_cost_usd * on(run_id) group_left() topk(1, max by (run_id) (eirel_owner_validator_run_total_cost_usd))) / clamp_min(sum(eirel_owner_validator_run_tasks_claimed * on(run_id) group_left() topk(1, max by (run_id) (eirel_owner_validator_run_total_cost_usd))), 1)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+    },
+    {
+      "id": 204,
+      "type": "timeseries",
+      "title": "Per-validator total cost trend (latest open run)",
+      "description": "Validator-paid spend over time per hotkey. The owner-api scrapes the DB roll-up at 5s; steps reflect new task-evaluation submissions.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 60},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "eirel_owner_validator_run_total_cost_usd * on(run_id) group_left() topk(1, max by (run_id) (eirel_owner_validator_run_total_cost_usd))", "legendFormat": "{{hotkey}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 15}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}}
     }
   ]
 }

@@ -327,6 +327,7 @@ class EvaluationTaskManager:
         validator_hotkey: str,
         baseline_response: dict[str, Any] | None,
         miner_results: list[dict[str, Any]],
+        oracle_cost_usd: float = 0.0,
     ) -> dict[str, Any]:
         """Record all per-miner agreement results for a claimed task.
 
@@ -336,6 +337,11 @@ class EvaluationTaskManager:
           "contradicts"|"not_applicable"|"error"|"latency_violation"),
           miner_latency_seconds (miner wall-clock), latency_seconds (judge
           wall-clock — kept under the legacy key for back-compat).
+
+        ``oracle_cost_usd`` is the validator-reported grounding-layer
+        spend for this task (oracle fanout + reconciler) — used by
+        the validator-cost dashboard. Trusted as the validator's own
+        bill since owner-api can't independently measure it.
 
         Citations are preserved on the row for dashboard display but do
         not participate in scoring. Returns status info (accepted/rejected
@@ -373,6 +379,7 @@ class EvaluationTaskManager:
             }
 
         task.baseline_response_json = baseline_response
+        task.oracle_cost_usd = max(0.0, float(oracle_cost_usd or 0.0))
         task.status = "evaluated"
         task.evaluated_at = now
         task.updated_at = now

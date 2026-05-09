@@ -52,15 +52,13 @@ services:
     image: ${DOCKERHUB_NAMESPACE:-rendixnetwork}/eiretes:${EIRETES_IMAGE_TAG:-latest}
     container_name: eiretes-judge
     env_file: .env.validator
+    # Eiretes' three judge roles (pairwise / multi / eval) all read
+    # from EIREL_EVAL_JUDGE_* — set in .env.validator. Don't restate
+    # those keys via ``${VAR}`` here: compose substitutes from the
+    # project .env / shell (NOT from env_file), so an unset shell var
+    # blanks them and clobbers the env_file value at container start.
+    # ``environment:`` is reserved for service-local constants only.
     environment:
-      # Eiretes' three judge roles (pairwise / multi / eval) all read
-      # from this EIREL_EVAL_JUDGE_* block — one Chutes-hosted
-      # GLM-5.1-TEE deployment serves them all.
-      EIREL_EVAL_JUDGE_MODEL: ${EIREL_EVAL_JUDGE_MODEL:-zai-org/GLM-5.1-TEE}
-      EIREL_EVAL_JUDGE_BASE_URL: ${EIREL_EVAL_JUDGE_BASE_URL:-https://llm.chutes.ai/v1}
-      EIREL_EVAL_JUDGE_API_KEY: ${EIREL_EVAL_JUDGE_API_KEY:-}
-      # EIREL_EVAL_JUDGE_TIMEOUT_SECONDS is read from env_file (.env.validator).
-      # Reasoning models commonly need >30s per judgement.
       EIRETES_JUDGE_PORT: "8095"
     ports:
       - "${EIRETES_JUDGE_HOST_PORT:-18095}:8095"

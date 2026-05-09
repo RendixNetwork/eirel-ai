@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from eirel.groups import LAUNCH_FAMILIES, ensure_family_id
@@ -40,6 +40,8 @@ from .schemas import (
     RunSummary,
     TaskEvaluation,
     TrendLiteral,
+    ValidatorRunCost,
+    ValidatorRunCostsResponse,
 )
 
 
@@ -1155,4 +1157,102 @@ def fetch_run_detail(
         total_tasks=len(tasks_by_id) or len(tasks),
         submission_id=submission_id_for_run,
         tasks=tasks,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validator-cost aggregation
+# ---------------------------------------------------------------------------
+
+
+def validator_run_costs(
+    session: Session, *, run_id: str,
+) -> ValidatorRunCostsResponse:
+    """Aggregate validator-paid spend per (run, validator).
+
+    Two SQL aggregates joined in Python:
+      * ``task_evaluations`` grouped by ``claimed_by_validator`` →
+        oracle_cost_usd sum + tasks_claimed / tasks_evaluated counts.
+      * ``task_miner_results`` joined to ``task_evaluations`` and
+        grouped by ``claimed_by_validator`` → judge_cost_usd sum.
+
+    Validators that haven't claimed anything yet are absent from the
+    response. Result rows are sorted by total_cost descending so the
+    highest-spend validator is first — useful when piping to a
+    dashboard table that truncates.
+    """
+    from shared.common.models import TaskEvaluation as TaskEvaluationRow
+
+    # Per-validator task counts + oracle cost sum.
+    eval_rows = session.execute(
+        select(
+            TaskEvaluationRow.claimed_by_validator,
+            func.count(TaskEvaluationRow.id).label("tasks_claimed"),
+            func.coalesce(
+                func.sum(case(
+                    (TaskEvaluationRow.status == "evaluated", 1),
+                    else_=0,
+                )),
+                0,
+            ).label("tasks_evaluated"),
+            func.coalesce(
+                func.sum(TaskEvaluationRow.oracle_cost_usd), 0.0,
+            ).label("oracle_cost_usd"),
+        ).where(
+            TaskEvaluationRow.run_id == run_id,
+            TaskEvaluationRow.claimed_by_validator.is_not(None),
+        ).group_by(TaskEvaluationRow.claimed_by_validator)
+    ).all()
+
+    # Per-validator judge cost: sum across miner-result rows whose
+    # parent task was claimed by V. Filter to evaluated tasks only —
+    # judge cost is meaningless for tasks that errored before
+    # judging. The join collapses to a single sum per validator.
+    judge_rows = session.execute(
+        select(
+            TaskEvaluationRow.claimed_by_validator,
+            func.coalesce(
+                func.sum(TaskMinerResult.judge_cost_usd), 0.0,
+            ).label("judge_cost_usd"),
+        )
+        .join(
+            TaskMinerResult,
+            TaskMinerResult.task_evaluation_id == TaskEvaluationRow.id,
+        )
+        .where(
+            TaskEvaluationRow.run_id == run_id,
+            TaskEvaluationRow.claimed_by_validator.is_not(None),
+        )
+        .group_by(TaskEvaluationRow.claimed_by_validator)
+    ).all()
+    judge_by_validator: dict[str, float] = {
+        row.claimed_by_validator: float(row.judge_cost_usd or 0.0)
+        for row in judge_rows
+    }
+
+    validators: list[ValidatorRunCost] = []
+    total_oracle = 0.0
+    total_judge = 0.0
+    for row in eval_rows:
+        hotkey = row.claimed_by_validator
+        oracle = float(row.oracle_cost_usd or 0.0)
+        judge = judge_by_validator.get(hotkey, 0.0)
+        validators.append(ValidatorRunCost(
+            validator_hotkey=hotkey,
+            tasks_claimed=int(row.tasks_claimed or 0),
+            tasks_evaluated=int(row.tasks_evaluated or 0),
+            oracle_cost_usd=round(oracle, 6),
+            judge_cost_usd=round(judge, 6),
+            total_cost_usd=round(oracle + judge, 6),
+        ))
+        total_oracle += oracle
+        total_judge += judge
+
+    validators.sort(key=lambda v: v.total_cost_usd, reverse=True)
+    return ValidatorRunCostsResponse(
+        run_id=run_id,
+        validators=validators,
+        total_oracle_cost_usd=round(total_oracle, 6),
+        total_judge_cost_usd=round(total_judge, 6),
+        total_cost_usd=round(total_oracle + total_judge, 6),
     )
