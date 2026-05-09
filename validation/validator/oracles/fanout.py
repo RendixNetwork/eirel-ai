@@ -47,6 +47,21 @@ class OracleFanout:
     def vendors(self) -> list[str]:
         return [c.vendor for c in self._clients]
 
+    async def run_single(
+        self, vendor: str, context: OracleContext,
+    ) -> OracleGrounding | None:
+        """Call ONE oracle by vendor tag — used as the pairwise-reference
+        fetch on deterministic tasks (no fanout needed).
+
+        Returns ``None`` when ``vendor`` isn't a configured client.
+        Provider errors come back as ``OracleGrounding(status="error")``
+        same as :meth:`run`.
+        """
+        for client in self._clients:
+            if client.vendor == vendor:
+                return await self._safe_call(client, context)
+        return None
+
     async def run(self, context: OracleContext) -> list[OracleGrounding]:
         """Produce one ``OracleGrounding`` per configured client.
 

@@ -91,6 +91,8 @@ async def test_three_oracle_with_mocked_layer_runs_fanout_and_reconciler():
     consensus claims; expected_claims surface on the result."""
 
     class _StubFanout:
+        vendors = ["openai", "gemini", "grok"]
+
         async def run(self, ctx):
             return [
                 OracleGrounding(vendor="openai", status="ok", raw_text="Paris"),
@@ -114,6 +116,151 @@ async def test_three_oracle_with_mocked_layer_runs_fanout_and_reconciler():
     assert rec.oracle_status == "consensus"
     assert rec.expected_claims == ["Paris is the capital"]
     assert rec.must_not_claim == ["never London"]
+
+
+async def test_three_oracle_passes_web_search_flag_to_context():
+    """The OracleContext built by ``_enrich_task_oracle`` must carry
+    ``web_search`` so each oracle's produce_grounding picks the right
+    transport (Responses API vs chat-completions). Without this the
+    deterministic-task pairwise reference would always pay the
+    $10/1k web-search adder."""
+    captured: dict = {}
+
+    class _CaptureFanout:
+        vendors = ["openai", "gemini", "grok"]
+
+        async def run(self, ctx):
+            captured["web_search"] = ctx.web_search
+            return [
+                OracleGrounding(vendor="openai", status="ok", raw_text="x"),
+                OracleGrounding(vendor="gemini", status="ok", raw_text="x"),
+            ]
+
+    class _PassThroughReconciler:
+        async def reconcile(self, *, prompt, groundings, must_not_claim_floor):
+            return ReconciledOracle(
+                expected_claims=["x"],
+                must_not_claim=list(must_not_claim_floor),
+                oracle_status="consensus",
+            )
+
+    task = _task(oracle_source="three_oracle")
+    await _enrich_task_oracle(
+        task, fanout=_CaptureFanout(), reconciler=_PassThroughReconciler(),
+        web_search=False,
+    )
+    assert captured["web_search"] is False
+
+
+# -- Deterministic path with single-vendor pairwise reference --------------
+
+
+async def test_deterministic_with_pairwise_vendor_attaches_llm_reference():
+    """For deterministic tasks, _enrich_task_oracle now calls ONE
+    oracle (the configured pairwise vendor) so the pairwise judge has
+    a frontier-LLM reference to compare miner against — not just the
+    bare pool gold token."""
+    captured: dict = {}
+
+    class _SingleVendorFanout:
+        vendors = ["openai", "gemini", "grok"]
+
+        async def run_single(self, vendor: str, ctx):
+            captured["vendor"] = vendor
+            captured["web_search"] = ctx.web_search
+            return OracleGrounding(
+                vendor=vendor, status="ok",
+                raw_text="Paris is the capital, located in northern France.",
+                cost_usd=0.0123,
+                citations=("https://example.org/france",),
+            )
+
+    task = _task(oracle_source="deterministic", answer="Paris")
+    rec = await _enrich_task_oracle(
+        task,
+        fanout=_SingleVendorFanout(),
+        reconciler=None,  # not consulted for deterministic tasks
+        pairwise_vendor="gemini",
+        web_search=True,
+    )
+    assert captured["vendor"] == "gemini"
+    assert captured["web_search"] is True
+    # Status stays "deterministic" — the pool gold IS still the truth
+    # for outcome scoring; the LLM ref is solely for pairwise.
+    assert rec.oracle_status == "deterministic"
+    # Gold preserved.
+    assert rec.expected_claims == ["Paris"]
+    # LLM reference + cost stamped on for the pairwise selector.
+    assert rec.vendor_answers == {
+        "gemini": "Paris is the capital, located in northern France.",
+    }
+    assert rec.vendor_costs == {"gemini": 0.0123}
+    assert rec.vendor_citations == {
+        "gemini": ["https://example.org/france"],
+    }
+
+
+async def test_deterministic_when_pairwise_vendor_errors_falls_through():
+    """Pairwise-reference call errors (rate limit, timeout, bad key)
+    → fall back to the bare pool gold. No raise, no missing data."""
+    class _ErroringFanout:
+        vendors = ["openai", "gemini", "grok"]
+
+        async def run_single(self, vendor: str, ctx):
+            return OracleGrounding(
+                vendor=vendor, status="error",
+                error_msg="rate limited",
+            )
+
+    task = _task(oracle_source="deterministic", answer="Paris")
+    rec = await _enrich_task_oracle(
+        task,
+        fanout=_ErroringFanout(),
+        reconciler=None,
+        pairwise_vendor="openai",
+    )
+    # Bare deterministic ReconciledOracle — no vendor_answers stamped.
+    assert rec.oracle_status == "deterministic"
+    assert rec.expected_claims == ["Paris"]
+    assert rec.vendor_answers == {}
+
+
+async def test_deterministic_when_oracle_layer_unconfigured_returns_bare():
+    """Operator hasn't wired the 3-oracle layer at all — deterministic
+    tasks still work, just without the LLM pairwise reference. No
+    extra cost, no crash."""
+    task = _task(oracle_source="deterministic", answer="Paris")
+    rec = await _enrich_task_oracle(
+        task,
+        fanout=None,
+        reconciler=None,
+        pairwise_vendor="openai",
+    )
+    assert rec.oracle_status == "deterministic"
+    assert rec.expected_claims == ["Paris"]
+    assert rec.vendor_answers == {}
+
+
+async def test_deterministic_when_pairwise_vendor_not_configured():
+    """Operator only configured 2 of 3 oracles AND the pairwise
+    reference vendor isn't one of them. Falls through cleanly to
+    the bare deterministic gold (no fallback to a different vendor —
+    pairwise selection is explicit operator config)."""
+    class _PartialFanout:
+        vendors = ["openai", "gemini"]  # no grok configured
+
+        async def run_single(self, vendor: str, ctx):
+            raise AssertionError("should not be called")
+
+    task = _task(oracle_source="deterministic", answer="Paris")
+    rec = await _enrich_task_oracle(
+        task,
+        fanout=_PartialFanout(),
+        reconciler=None,
+        pairwise_vendor="grok",
+    )
+    assert rec.oracle_status == "deterministic"
+    assert rec.vendor_answers == {}
 
 
 # -- _fetch_ledger_tools --------------------------------------------------

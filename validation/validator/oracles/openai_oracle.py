@@ -49,16 +49,25 @@ class OpenAIOracle(OracleClient):
     ) -> OracleGrounding:
         system, user = build_oracle_messages(context)
         try:
-            # OpenAI exposes the server-side ``web_search`` tool only on
-            # the Responses API. Live-lookup / current-events items
-            # require it; static items still benefit (model double-
-            # checks recall against fresh web results).
-            resp = await self._client.complete_responses_with_web_search(
-                system=system,
-                user=user,
-                response_schema=response_schema(),
-                schema_name="oracle_answer",
-            )
+            if context.web_search:
+                # OpenAI exposes the server-side ``web_search`` tool
+                # only on the Responses API.
+                resp = await self._client.complete_responses_with_web_search(
+                    system=system,
+                    user=user,
+                    response_schema=response_schema(),
+                    schema_name="oracle_answer",
+                )
+            else:
+                # Self-contained task — match the miner's web_search=False
+                # by using chat-completions with structured output. Saves
+                # the $10/1k web-search adder.
+                resp = await self._client.complete_structured(
+                    system=system,
+                    user=user,
+                    response_schema=response_schema(),
+                    schema_name="oracle_answer",
+                )
         except ProviderTimeout as exc:
             return OracleGrounding(
                 vendor=self.vendor, status="error",

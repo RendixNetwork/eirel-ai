@@ -55,12 +55,22 @@ class GrokOracle(OracleClient):
     ) -> OracleGrounding:
         system, user = build_oracle_messages(context)
         try:
-            resp = await self._client.complete_responses_with_web_search(
-                system=system,
-                user=user,
-                response_schema=response_schema(),
-                schema_name="oracle_answer",
-            )
+            if context.web_search:
+                resp = await self._client.complete_responses_with_web_search(
+                    system=system,
+                    user=user,
+                    response_schema=response_schema(),
+                    schema_name="oracle_answer",
+                )
+            else:
+                # Self-contained task — chat-completions, no web_search
+                # adder. Mirrors the miner's tooling for that task.
+                resp = await self._client.complete_structured(
+                    system=system,
+                    user=user,
+                    response_schema=response_schema(),
+                    schema_name="oracle_answer",
+                )
         except ProviderTimeout as exc:
             return OracleGrounding(
                 vendor=self.vendor, status="error",

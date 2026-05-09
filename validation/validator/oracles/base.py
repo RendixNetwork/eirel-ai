@@ -24,6 +24,12 @@ class OracleContext:
     request shape (system + user prompt). ``conversation_recent``
     carries multi-turn fixtures verbatim; ``attached_document``
     carries any document the miner had access to.
+
+    ``web_search`` mirrors the task's ``web_search`` flag — the same
+    flag the miner respects. Apples-to-apples: if the miner had web
+    search available, the oracle reference does too; if the miner ran
+    self-contained, the oracle does too. Avoids paying the $10/1k
+    web-search adder on tasks that don't need live grounding.
     """
 
     task_id: str
@@ -31,6 +37,7 @@ class OracleContext:
     conversation_recent: list[dict[str, str]] = field(default_factory=list)
     attached_document: str | None = None
     category: str | None = None
+    web_search: bool = True
 
 
 @dataclass(frozen=True)

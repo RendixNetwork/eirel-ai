@@ -53,7 +53,7 @@ class GeminiOracle(OracleClient):
                 user=user,
                 response_schema=response_schema(),
                 schema_name="oracle_answer",
-                enable_web_search=True,
+                enable_web_search=context.web_search,
             )
         except ProviderTimeout as exc:
             return OracleGrounding(

@@ -198,3 +198,65 @@ async def test_parallel_mode_runs_concurrently():
 async def test_empty_clients_rejected():
     with pytest.raises(ValueError):
         OracleFanout([])
+
+
+# -- run_single ------------------------------------------------------------
+
+
+async def test_run_single_calls_only_named_vendor():
+    """``run_single`` invokes ONE client by tag; other clients
+    untouched. Used as the pairwise-reference fetch on deterministic
+    tasks where calling all 3 oracles would be wasted spend."""
+    openai = _StubOracle("openai", OracleGrounding(
+        vendor="openai", status="ok", raw_text="Paris is the capital",
+        cost_usd=0.012,
+    ))
+    gemini = _StubOracle("gemini", OracleGrounding(
+        vendor="gemini", status="ok", raw_text="Should not be called",
+    ))
+    grok = _StubOracle("grok", OracleGrounding(
+        vendor="grok", status="ok", raw_text="Also should not",
+    ))
+    fanout = OracleFanout([openai, gemini, grok])
+
+    grounding = await fanout.run_single(
+        "openai", OracleContext(task_id="t", prompt="capital of France?"),
+    )
+
+    assert grounding is not None
+    assert grounding.vendor == "openai"
+    assert grounding.raw_text == "Paris is the capital"
+    assert grounding.cost_usd == 0.012
+    assert openai.calls == 1
+    assert gemini.calls == 0
+    assert grok.calls == 0
+
+
+async def test_run_single_unknown_vendor_returns_none():
+    """No-op when the requested vendor isn't a configured client.
+    Caller falls through to ``expected_claims[0]`` rather than crash."""
+    fanout = OracleFanout([
+        _StubOracle("openai", OracleGrounding(vendor="openai", status="ok")),
+    ])
+
+    grounding = await fanout.run_single(
+        "grok", OracleContext(task_id="t", prompt="?"),
+    )
+    assert grounding is None
+
+
+async def test_run_single_propagates_oracle_error_status():
+    """Provider error inside the oracle still produces a grounding
+    object — caller checks status/raw_text and falls through if not
+    usable, rather than hitting a network exception."""
+    fanout = OracleFanout([
+        _StubOracle("openai", OracleGrounding(
+            vendor="openai", status="error", error_msg="rate limited",
+        )),
+    ])
+    grounding = await fanout.run_single(
+        "openai", OracleContext(task_id="t", prompt="?"),
+    )
+    assert grounding is not None
+    assert grounding.status == "error"
+    assert grounding.raw_text == ""

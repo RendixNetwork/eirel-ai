@@ -169,28 +169,73 @@ async def _enrich_task_oracle(
     *,
     fanout: OracleFanout | None,
     reconciler: Reconciler | None,
+    pairwise_vendor: str = "openai",
+    web_search: bool = True,
 ) -> ReconciledOracle:
     """Produce a ``ReconciledOracle`` for one task.
 
     For ``oracle_source="three_oracle"``: runs the configured oracle
     fanout in parallel + Chutes reconciler. Falls back to disputed
-    when fanout/reconciler aren't configured.
+    when fanout/reconciler aren't configured. ``web_search`` is
+    forwarded to each oracle so vendor calls match what the miner
+    had access to (no $10/1k web-search adder on self-contained
+    tasks).
 
-    For ``oracle_source="deterministic"`` or unset: builds a minimal
-    ``ReconciledOracle`` from the task's pre-baked
-    ``expected_output.answer`` and ``expected_output.must_not_claim``.
-    No LLM calls.
+    For ``oracle_source="deterministic"`` or unset: pool's grader
+    produced the gold (used for outcome scoring), but the pairwise
+    judge needs a frontier-LLM reference to score *style* and
+    *reasoning* against — not just the bare gold token. So we make
+    ONE call to the configured pairwise vendor and stamp its answer
+    onto the reconciled object's ``vendor_answers`` / ``vendor_costs``
+    / ``vendor_citations``. The pairwise selector then prefers that
+    LLM reference; if the call errors or the layer isn't configured,
+    falls through to ``expected_claims[0]`` (legacy behaviour).
     """
     expected_output = getattr(task_obj, "expected_output", None) or {}
     answer = str(expected_output.get("answer") or "").strip()
     must_not_claim_floor = list(expected_output.get("must_not_claim") or [])
     oracle_source = getattr(task_obj, "oracle_source", None)
 
-    # Deterministic path: pool's grader produced the gold; no oracle
-    # call needed.
     if oracle_source != "three_oracle":
-        return ReconciledOracle.from_deterministic(
+        # Deterministic path. Optionally fetch a single-vendor LLM
+        # reference for the pairwise judge.
+        base = ReconciledOracle.from_deterministic(
             answer=answer, must_not_claim_floor=must_not_claim_floor,
+        )
+        if fanout is None or pairwise_vendor not in fanout.vendors:
+            return base
+        context = OracleContext(
+            task_id=str(getattr(task_obj, "task_id", "")),
+            prompt=str(getattr(task_obj, "prompt", "") or ""),
+            conversation_recent=list(getattr(task_obj, "turns", None) or []),
+            attached_document=str(expected_output.get("attached_document") or "") or None,
+            category=str(getattr(task_obj, "category", "") or "") or None,
+            web_search=web_search,
+        )
+        grounding = await fanout.run_single(pairwise_vendor, context)
+        if (
+            grounding is None
+            or grounding.status != "ok"
+            or not (grounding.raw_text or "").strip()
+        ):
+            return base
+        # Stamp the LLM reference onto the (frozen) reconciled. We
+        # build a new instance because ReconciledOracle is frozen.
+        return ReconciledOracle(
+            expected_claims=base.expected_claims,
+            must_not_claim=base.must_not_claim,
+            oracle_status="deterministic",
+            disagreement_note=base.disagreement_note,
+            consensus_claims=base.consensus_claims,
+            vendor_status={grounding.vendor: grounding.status},
+            vendor_costs={
+                grounding.vendor: float(grounding.cost_usd or 0.0),
+            },
+            vendor_citations=(
+                {grounding.vendor: list(grounding.citations)}
+                if grounding.citations else {}
+            ),
+            vendor_answers={grounding.vendor: grounding.raw_text},
         )
 
     # Three-oracle path: degrade to disputed if the layer isn't wired.
@@ -213,6 +258,7 @@ async def _enrich_task_oracle(
         conversation_recent=list(getattr(task_obj, "turns", None) or []),
         attached_document=str(expected_output.get("attached_document") or "") or None,
         category=str(getattr(task_obj, "category", "") or "") or None,
+        web_search=web_search,
     )
     groundings = await fanout.run(context)
     return await reconciler.reconcile(
@@ -1071,14 +1117,25 @@ async def run_distributed_benchmarks(
         # carry this field; default to None (= deterministic).
         task_obj.oracle_source = task_payload.get("oracle_source")
 
-        # Oracle enrichment runs in parallel with miner dispatch — it
-        # makes 3 frontier-LLM calls + 1 reconciler call (only for
-        # three_oracle items), and the result is consumed by every
-        # ``_judge_miner`` call for this task. Cache lifetime = this
-        # task evaluation.
+        # Oracle enrichment runs in parallel with miner dispatch.
+        #   three_oracle items  → 3 frontier-LLM calls + 1 reconciler.
+        #   deterministic items → 1 frontier-LLM call (the configured
+        #     pairwise-reference vendor only) so the pairwise judge
+        #     scores miner against an LLM-quality reference, not the
+        #     bare pool gold token.
+        # ``web_search`` matches the miner's tooling: if the task
+        # needed live grounding, the reference uses web search too;
+        # if not, neither does — apples-to-apples and avoids the
+        # $10/1k web-search adder on self-contained tasks.
+        # Result is consumed by every ``_judge_miner`` call for this
+        # task. Cache lifetime = this task evaluation.
         reconciled_task = asyncio.create_task(
             _enrich_task_oracle(
-                task_obj, fanout=oracle_fanout, reconciler=reconciler,
+                task_obj,
+                fanout=oracle_fanout,
+                reconciler=reconciler,
+                pairwise_vendor=pairwise_vendor,
+                web_search=web_search_flag,
             )
         )
 
