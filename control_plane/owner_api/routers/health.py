@@ -699,27 +699,34 @@ def _format_live_run_metrics(data: dict[str, Any]) -> str:
 # -- Validator cost roll-up ---------------------------------------------------
 
 
-_VALIDATOR_COST_RUNS = 2  # current open + 1 most-recent closed
+_VALIDATOR_COST_RUNS = 50  # newest N runs by sequence, status-agnostic
 
 
 def _collect_validator_cost_rows(session) -> list[dict[str, Any]]:
-    """Per-(run, validator) cost roll-up bounded to the latest 2 runs.
+    """Per-(run, validator) cost roll-up over the newest ``N`` runs.
 
-    Series cardinality = ``|validators| × 2 runs``, which keeps the
-    Prometheus footprint constant even as runs accumulate. Each row
-    covers ``oracle_cost_usd`` (validator's grounding spend) and
-    ``judge_cost_usd`` (validator's eiretes-judge spend) — the two
-    components a validator actually pays out of pocket.
+    Series cardinality = ``|validators| × N runs × 4 metrics``. With
+    N=50 and a typical fleet that's a few thousand series — well under
+    Prometheus' default capacity. Each row carries ``run_status``
+    (``open`` / ``completed`` / ``scheduled``) and ``run_sequence``
+    so dashboards can filter the open run, sort by run order, or
+    show all runs side-by-side.
     """
     runs = (
-        session.query(EvaluationRun.id, EvaluationRun.sequence)
+        session.query(
+            EvaluationRun.id, EvaluationRun.sequence, EvaluationRun.status,
+        )
         .order_by(EvaluationRun.sequence.desc())
         .limit(_VALIDATOR_COST_RUNS)
         .all()
     )
     if not runs:
         return []
-    run_ids = [run_id for run_id, _seq in runs]
+    run_ids = [run_id for run_id, _seq, _status in runs]
+    run_meta: dict[str, tuple[int, str]] = {
+        run_id: (int(seq), str(status))
+        for run_id, seq, status in runs
+    }
 
     # Oracle cost + claim counts grouped by (run, validator).
     oracle_rows = (
@@ -766,8 +773,11 @@ def _collect_validator_cost_rows(session) -> list[dict[str, Any]]:
     for run_id, hotkey, tasks_claimed, oracle_cost in oracle_rows:
         oracle = float(oracle_cost or 0.0)
         judge = judge_by_pair.get((run_id, hotkey), 0.0)
+        sequence, status = run_meta.get(run_id, (0, "unknown"))
         rows.append({
             "run_id": run_id,
+            "run_sequence": sequence,
+            "run_status": status,
             "hotkey": hotkey,
             "tasks_claimed": int(tasks_claimed or 0),
             "oracle_cost_usd": oracle,
@@ -811,6 +821,8 @@ def _format_validator_cost_metrics(rows: list[dict[str, Any]]) -> str:
             formatted = f"{value:.6f}" if isinstance(value, float) else str(value)
             lines.append(
                 f'{metric_name}{{run_id="{row["run_id"]}",'
+                f'run_sequence="{row["run_sequence"]}",'
+                f'run_status="{row["run_status"]}",'
                 f'hotkey="{row["hotkey"]}"}} {formatted}'
             )
     lines.append("")
