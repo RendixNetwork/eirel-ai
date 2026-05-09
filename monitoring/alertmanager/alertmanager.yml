@@ -20,11 +20,11 @@ route:
 receivers:
   - name: default-webhook
     webhook_configs:
-      - url: http://localhost:9999/default-noop
+      - url: http://discord-bridge:8080/default
         send_resolved: true
   - name: critical-webhook
     webhook_configs:
-      - url: http://localhost:9999/critical-noop
+      - url: http://discord-bridge:8080/critical
         send_resolved: true
 inhibit_rules:
   - source_matchers: [alertname="EirelOwnerApiDown"]

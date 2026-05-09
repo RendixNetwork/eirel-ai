@@ -330,23 +330,32 @@ services:
   alertmanager:
     profiles: ["monitoring"]
     image: prom/alertmanager:v0.27.0
-    command:
-      - /bin/sh
-      - -c
-      - |
-        sed \
-          -e "s|http://localhost:9999/default-noop|$$ALERTMANAGER_DEFAULT_WEBHOOK_URL|g" \
-          -e "s|http://localhost:9999/critical-noop|$$ALERTMANAGER_CRITICAL_WEBHOOK_URL|g" \
-          /etc/alertmanager/alertmanager.yml.tmpl > /tmp/alertmanager.yml
-        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
     volumes:
-      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager_data:/alertmanager
-    environment:
-      ALERTMANAGER_DEFAULT_WEBHOOK_URL: ${ALERTMANAGER_DEFAULT_WEBHOOK_URL:-http://localhost:9999/default-noop}
-      ALERTMANAGER_CRITICAL_WEBHOOK_URL: ${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://localhost:9999/critical-noop}
+    depends_on:
+      - discord-bridge
     ports:
       - "127.0.0.1:${ALERTMANAGER_HOST_PORT:-19093}:9093"
+
+  # Translates Alertmanager's webhook payload into Discord embeds and
+  # forwards to two Discord webhook URLs (one per severity tier).
+  discord-bridge:
+    profiles: ["monitoring"]
+    build:
+      context: ./monitoring/discord-bridge
+    environment:
+      ALERTMANAGER_DEFAULT_WEBHOOK_URL: ${ALERTMANAGER_DEFAULT_WEBHOOK_URL:-}
+      ALERTMANAGER_CRITICAL_WEBHOOK_URL: ${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-}
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
 
   grafana:
     profiles: ["monitoring"]
