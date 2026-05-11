@@ -548,3 +548,106 @@ def test_e2e_error_rate_cap_fires_above_threshold(services):
         assert summary.protocol_gate_passed is False
         assert summary.family_capability_score == pytest.approx(1.0)
         assert summary.official_family_score == pytest.approx(0.5)
+
+
+def test_e2e_official_score_uses_multi_metric_final_task_score(services):
+    """When the validator stamps Phase-2 ``final_task_score`` per task,
+    the summary's ``official_family_score`` must mirror the open-run
+    leaderboard formula (mean of ``final_task_score``) — not the legacy
+    ``agreement_score`` mean. This is the regression test that locks in
+    the alignment between the rank page and the miner detail page.
+    """
+    validator_hk = "validator-multimetric"
+
+    with services.db.sessionmaker() as session:
+        bundle = {
+            **_BUNDLE,
+            "tasks": [
+                {"task_id": f"mm-{i}", "family_id": "general_chat",
+                 "prompt": f"q{i}", "mode": "instant", "expected_output": {}}
+                for i in range(1, 5)
+            ],
+        }
+        now = _utcnow()
+        session.add(EvaluationRun(
+            id="run-mm-1", sequence=1, status="open",
+            benchmark_version="test_v1", rubric_version="agreement_general_chat_v1",
+            judge_model="test-judge", min_scores_json={},
+            started_at=now, ends_at=now + timedelta(days=7),
+            metadata_json={"evaluation_bundles": {"general_chat": bundle}},
+        ))
+        session.flush()
+        if session.get(RegisteredNeuron, "hk-mm") is None:
+            session.add(RegisteredNeuron(hotkey="hk-mm", uid=0))
+            session.flush()
+        _seed_deployment(session, run_id="run-mm-1", hotkey="hk-mm")
+
+        snap = EpochTargetSnapshot(
+            run_id="run-mm-1", family_id="general_chat",
+            rubric_version="agreement_general_chat_v1",
+            benchmark_version="test_v1", judge_model="test-judge",
+            members_json=[{"hotkey": "hk-mm", "endpoint": "x", "metadata": {}}],
+            status="open",
+        )
+        session.add(snap)
+        session.flush()
+        snap_obj = session.get(EpochTargetSnapshot, snap.id)
+        services.evaluation_tasks.initialize_evaluation_tasks(
+            session, run_id="run-mm-1", family_id="general_chat", snapshot=snap_obj,
+        )
+        session.commit()
+
+    with services.db.sessionmaker() as session:
+        claimed = services.evaluation_tasks.claim_tasks(
+            session, run_id="run-mm-1", family_id="general_chat",
+            validator_hotkey=validator_hk, batch_size=10,
+        )
+        items = services.evaluation_tasks.build_claim_items(
+            session, claimed_tasks=claimed, run_id="run-mm-1",
+            family_id="general_chat",
+        )
+        session.commit()
+
+    # Verdict is "matches" on every task (agreement_score=1.0) — i.e. the
+    # legacy formula would yield official_family_score=1.0. The Phase-2
+    # multi-metric mean is much lower because two tasks were knocked out
+    # by composite gates. The test asserts the summary tracks the
+    # multi-metric value, not the legacy one.
+    final_task_scores = [1.0, 0.8, 0.0, 0.0]
+    for item, final_score in zip(items, final_task_scores):
+        miner_results = [{
+            "miner_hotkey": "hk-mm",
+            "miner_response": _miner_response("ok"),
+            "miner_citations": [],
+            "judge_output": _judge_output("matches", agreement_score=1.0),
+            "agreement_score": 1.0,
+            "verdict": "matches",
+            "latency_seconds": 1.0,
+            "final_task_score": final_score,
+        }]
+        with services.db.sessionmaker() as session:
+            services.evaluation_tasks.submit_task_result(
+                session,
+                task_evaluation_id=item["task_evaluation_id"],
+                validator_hotkey=validator_hk,
+                baseline_response=_fabricated_baseline(),
+                miner_results=miner_results,
+            )
+            session.commit()
+
+    with services.db.sessionmaker() as session:
+        summary = session.query(MinerEvaluationSummary).filter_by(
+            run_id="run-mm-1", miner_hotkey="hk-mm",
+        ).one()
+        # Legacy mean_agreement is still 1.0 (all verdicts are matches).
+        assert summary.family_capability_score == pytest.approx(1.0)
+        # New official_family_score = mean(final_task_score)
+        #   = (1.0 + 0.8 + 0.0 + 0.0) / 4 = 0.45 — the multi-metric mean.
+        assert summary.official_family_score == pytest.approx(0.45)
+        # Rollout metadata records the formula so dashboard / debugging
+        # can tell which path produced the number.
+        assert summary.rollout_metadata_json["multi_metric_mean"] == pytest.approx(0.45)
+        assert (
+            summary.rollout_metadata_json["official_score_formula"]
+            == "mean(coalesce(final_task_score, agreement_score))"
+        )

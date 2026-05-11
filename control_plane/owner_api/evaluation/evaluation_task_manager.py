@@ -599,11 +599,19 @@ class EvaluationTaskManager:
     ) -> None:
         """Compute MinerEvaluationSummary from TaskMinerResult rows.
 
-        Primary score is the mean of per-task ``agreement_score`` values
-        across non-error rows. Miners with error_rate > 30% are capped
-        at 0.5 (see MinerRollup).
+        ``official_family_score`` mirrors the open-run leaderboard SQL
+        (``shared/scoring`` Phase-2 multi-metric) so the miner page and
+        the leaderboard rank page can't disagree mid-run: mean of
+        ``COALESCE(final_task_score, agreement_score)`` over non-error
+        rows. Miners with error_rate > 30% are still capped at 0.5.
+
+        ``family_capability_score`` keeps the legacy ``mean_agreement``
+        (verdict-bucket scalars) so the metadata + verdict breakdowns
+        stay populated for the dashboard's coverage panels.
         """
         from control_plane.owner_api.evaluation.general_chat_scoring import (
+            _ERROR_RATE_CAP_THRESHOLD,
+            _UNRELIABLE_SCORE_CAP,
             aggregate_miner_score,
         )
 
@@ -625,18 +633,42 @@ class EvaluationTaskManager:
         ).scalars())
 
         rollup = aggregate_miner_score(results)
+
+        # Multi-metric mean — same formula as ``_collect_single_run_rows``
+        # in the dashboard so the open-run leaderboard and the miner-
+        # detail "Official score" land on the same number. Non-error
+        # rows only, falling back to the legacy ``agreement_score``
+        # column when Phase-2 ``final_task_score`` is NULL (older rows
+        # judged before multi-metric scoring shipped).
+        scored_rows = [r for r in results if r.agreement_verdict != "error"]
+        if scored_rows:
+            multi_metric_mean = sum(
+                float(r.final_task_score if r.final_task_score is not None
+                      else r.agreement_score or 0.0)
+                for r in scored_rows
+            ) / len(scored_rows)
+        else:
+            multi_metric_mean = 0.0
+        official_score = (
+            multi_metric_mean if rollup.reliable
+            else min(multi_metric_mean, _UNRELIABLE_SCORE_CAP)
+        )
+
         summary.completed_tasks = rollup.completed
         summary.failed_tasks = rollup.errored
-        # The mean agreement is the authoritative capability signal.
         summary.family_capability_score = rollup.mean_agreement
         # robustness_score / anti_gaming_score columns are legacy — retained
         # on the summary row for backward compat but set to None since we
         # no longer have dimension breakdowns or trace-gate metrics.
         summary.robustness_score = None
         summary.anti_gaming_score = None
-        summary.official_family_score = rollup.final_score
+        summary.official_family_score = official_score
         summary.protocol_gate_passed = rollup.reliable
-        summary.rollout_metadata_json = rollup.to_metadata()
+        summary.rollout_metadata_json = {
+            **rollup.to_metadata(),
+            "multi_metric_mean": multi_metric_mean,
+            "official_score_formula": "mean(coalesce(final_task_score, agreement_score))",
+        }
         summary.status = "scored"
         summary.updated_at = utcnow()
         session.flush()
