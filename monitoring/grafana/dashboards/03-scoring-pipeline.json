@@ -1,5 +1,7 @@
 {
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -8,12 +10,21 @@
   "liveNow": false,
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["eirel", "scoring", "validator"],
-  "templating": {"list": []},
-  "time": {"from": "now-6h", "to": "now"},
+  "tags": [
+    "eirel",
+    "scoring",
+    "validator"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
-  "title": "EIREL — Scoring Pipeline",
+  "title": "EIREL \u2014 Scoring Pipeline",
   "uid": "eirel-scoring-pipeline",
   "version": 1,
   "weekStart": "",
@@ -23,191 +34,610 @@
       "type": "row",
       "title": "Epoch snapshots",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "panels": []
     },
     {
       "id": 1,
       "type": "timeseries",
       "title": "Open / pending snapshots",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "eirel_owner_open_run_snapshots", "legendFormat": "open run"},
-        {"refId": "B", "expr": "eirel_owner_pending_aggregate_snapshots", "legendFormat": "pending aggregate"}
+        {
+          "refId": "A",
+          "expr": "eirel_owner_open_run_snapshots",
+          "legendFormat": "open run"
+        },
+        {
+          "refId": "B",
+          "expr": "eirel_owner_pending_aggregate_snapshots",
+          "legendFormat": "pending aggregate"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "none", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 15}}, "overrides": []},
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 2,
       "type": "timeseries",
       "title": "Validator score submissions (rate)",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "rate(eirel_owner_validator_score_submissions_total[5m])", "legendFormat": "submissions/s"}
+        {
+          "refId": "A",
+          "expr": "rate(eirel_owner_validator_score_submissions_total[5m])",
+          "legendFormat": "submissions/s"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 15}}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
     },
     {
       "id": 200,
       "type": "row",
       "title": "Benchmark runs",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
       "panels": []
     },
     {
       "id": 3,
       "type": "timeseries",
       "title": "Benchmark starts by family (rate)",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (family) (rate(eirel_validator_benchmark_runs_started_total[5m]))", "legendFormat": "{{family}}"}
+        {
+          "refId": "A",
+          "expr": "sum by (family) (rate(eirel_validator_benchmark_runs_started_total[5m]))",
+          "legendFormat": "{{family}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 4,
       "type": "heatmap",
       "title": "Benchmark run duration",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (le) (rate(eirel_validator_benchmark_run_duration_seconds_bucket[15m]))", "format": "heatmap", "legendFormat": "{{le}}"}
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(eirel_validator_benchmark_run_duration_seconds_bucket[15m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"custom": {"hideFrom": {"legend": false, "tooltip": false, "viz": false}}, "unit": "s"}, "overrides": []},
-      "options": {"calculate": false, "yAxis": {"unit": "s"}, "color": {"mode": "scheme", "scheme": "Oranges", "steps": 64, "exponent": 0.5}, "legend": {"show": true}, "tooltip": {"show": true}}
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "unit": "s"
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64,
+          "exponent": 0.5
+        },
+        "legend": {
+          "show": true
+        },
+        "tooltip": {
+          "show": true
+        }
+      }
     },
     {
       "id": 5,
       "type": "table",
       "title": "Completed benchmark outcomes by family",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 18},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (family, outcome) (increase(eirel_validator_benchmark_runs_completed_total[1h]))", "instant": true, "format": "table"}
+        {
+          "refId": "A",
+          "expr": "sum by (family, outcome) (increase(eirel_validator_benchmark_runs_completed_total[1h]))",
+          "instant": true,
+          "format": "table"
+        }
       ],
-      "fieldConfig": {"defaults": {"custom": {"align": "left"}}, "overrides": []},
-      "options": {"showHeader": true}
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
     },
     {
       "id": 300,
       "type": "row",
       "title": "Judges",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 26},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
       "panels": []
     },
     {
       "id": 6,
       "type": "timeseries",
       "title": "Judge invocation rate by model",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 27},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (judge_model) (rate(eirel_validator_judge_invocations_total[5m]))", "legendFormat": "{{judge_model}}"}
+        {
+          "refId": "A",
+          "expr": "sum by (judge_model) (rate(eirel_validator_judge_invocations_total[5m]))",
+          "legendFormat": "{{judge_model}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "Judge disagreement rate by family",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 27},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (family) (rate(eirel_validator_judge_disagreements_total[15m]))", "legendFormat": "{{family}}"}
+        {
+          "refId": "A",
+          "expr": "sum by (family) (rate(eirel_validator_judge_disagreements_total[15m]))",
+          "legendFormat": "{{family}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 8,
       "type": "timeseries",
       "title": "Judge p95 latency by family",
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 27},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, family) (rate(eirel_validator_judge_duration_seconds_bucket[15m])))", "legendFormat": "{{family}}"}
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, family) (rate(eirel_validator_judge_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{family}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 400,
       "type": "row",
       "title": "Weight setter",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
       "panels": []
     },
     {
       "id": 9,
       "type": "timeseries",
       "title": "Submission rate by mode/status (stacked)",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (mode, status) (rate(eirel_weight_setter_submissions_total[5m]))", "legendFormat": "{{mode}} / {{status}}"}
+        {
+          "refId": "A",
+          "expr": "sum by (mode, status) (rate(eirel_weight_setter_submissions_total[5m]))",
+          "legendFormat": "{{mode}} / {{status}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 30, "stacking": {"mode": "normal"}}}, "overrides": []},
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "lastNotNull"]}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 10,
       "type": "timeseries",
       "title": "p95 submission duration by family/mode",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, family, mode) (rate(eirel_weight_setter_submission_duration_seconds_bucket[15m])))", "legendFormat": "{{family}} / {{mode}}"}
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, family, mode) (rate(eirel_weight_setter_submission_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{family}} / {{mode}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
-      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 11,
       "type": "stat",
       "title": "Age of last successful submission (max family)",
-      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 44},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 44
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "time() - max(eirel_weight_setter_last_success_timestamp_seconds)"}
+        {
+          "refId": "A",
+          "expr": "time() - max(eirel_weight_setter_last_success_timestamp_seconds)"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1800}, {"color": "red", "value": 3600}]},
-          "color": {"mode": "thresholds"}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1800
+              },
+              {
+                "color": "red",
+                "value": 3600
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       },
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none", "textMode": "auto"}
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
     },
     {
       "id": 12,
       "type": "timeseries",
       "title": "Chain error rate",
-      "gridPos": {"h": 6, "w": 16, "x": 8, "y": 44},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 6,
+        "w": 16,
+        "x": 8,
+        "y": 44
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum by (error_type) (rate(eirel_weight_setter_chain_errors_total[5m]))", "legendFormat": "{{error_type}}"}
+        {
+          "refId": "A",
+          "expr": "sum by (error_type) (rate(eirel_weight_setter_chain_errors_total[5m]))",
+          "legendFormat": "{{error_type}}"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 200,
       "type": "row",
       "title": "Validator economics (per-run cost)",
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 50},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
       "panels": []
     },
     {
@@ -215,53 +645,369 @@
       "type": "barchart",
       "title": "Validator-paid spend by run (oracle + judge)",
       "description": "Per-validator stacked bar of validator-paid spend per run. Two segments per validator: oracle (3-oracle layer + Chutes reconciler) and judge (eiretes pairwise/multi/eval). Source: eirel_owner_validator_run_oracle_cost_usd + eirel_owner_validator_run_judge_cost_usd.",
-      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 51},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 51
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "eirel_owner_validator_run_oracle_cost_usd", "legendFormat": "{{hotkey}} oracle (run {{run_id}})", "instant": true},
-        {"refId": "B", "expr": "eirel_owner_validator_run_judge_cost_usd", "legendFormat": "{{hotkey}} judge (run {{run_id}})", "instant": true}
+        {
+          "refId": "A",
+          "expr": "eirel_owner_validator_run_oracle_cost_usd",
+          "legendFormat": "{{hotkey}} oracle (run {{run_id}})",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "eirel_owner_validator_run_judge_cost_usd",
+          "legendFormat": "{{hotkey}} judge (run {{run_id}})",
+          "instant": true
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "custom": {"lineWidth": 1, "fillOpacity": 80}}, "overrides": []},
-      "options": {"orientation": "horizontal", "stacking": "normal", "legend": {"displayMode": "table", "placement": "right"}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "stacking": "normal",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     },
     {
       "id": 202,
       "type": "stat",
       "title": "Total validator-paid spend (current open run)",
       "description": "Sum across all validators of oracle+judge spend in the run currently marked status=open. Empty when no run is open.",
-      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 51},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 51
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum(eirel_owner_validator_run_total_cost_usd{run_status=\"open\"})"}
+        {
+          "refId": "A",
+          "expr": "sum(eirel_owner_validator_run_total_cost_usd{run_status=\"open\"})"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 25}, {"color": "red", "value": 100}]}, "color": {"mode": "thresholds"}}, "overrides": []},
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area", "textMode": "auto"}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 25
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
     },
     {
       "id": 203,
       "type": "stat",
       "title": "Avg cost per claimed task (fleet, current open run)",
       "description": "fleet total / fleet tasks_claimed in the run currently marked status=open.",
-      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 55},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "sum(eirel_owner_validator_run_total_cost_usd{run_status=\"open\"}) / clamp_min(sum(eirel_owner_validator_run_tasks_claimed{run_status=\"open\"}), 1)"}
+        {
+          "refId": "A",
+          "expr": "sum(eirel_owner_validator_run_total_cost_usd{run_status=\"open\"}) / clamp_min(sum(eirel_owner_validator_run_tasks_claimed{run_status=\"open\"}), 1)"
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4}, "overrides": []},
-      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area", "textMode": "auto"}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
     },
     {
       "id": 204,
       "type": "barchart",
       "title": "Per-validator spend per run (all runs)",
       "description": "Total validator-paid spend per (validator, run) across every run currently in the gauge window (newest 50 by sequence). One bar per (validator, run); height = oracle + judge. Sort the legend by run_sequence to read trend left-to-right.",
-      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 60},
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        {"refId": "A", "expr": "eirel_owner_validator_run_total_cost_usd", "legendFormat": "{{hotkey}} run-{{run_sequence}} ({{run_status}})", "instant": true}
+        {
+          "refId": "A",
+          "expr": "eirel_owner_validator_run_total_cost_usd",
+          "legendFormat": "{{hotkey}} run-{{run_sequence}} ({{run_status}})",
+          "instant": true
+        }
       ],
-      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4, "custom": {"lineWidth": 1, "fillOpacity": 80}}, "overrides": []},
-      "options": {"orientation": "vertical", "stacking": "none", "legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "none",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Composite scoring & oracle health",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "panels": []
+    },
+    {
+      "id": 501,
+      "type": "timeseries",
+      "title": "Composite knockouts by reason (rate)",
+      "description": "Per-task composite multiplier zeroed by a gate. Reasons include tool_attestation_factor, hallucination_knockout, grounded_correctness_below_floor, instruction_safety_below_floor, cost_attestation, safety_attestation, and outcome=hallucinated. High rate on a single reason points at the specific gate to investigate (e.g. miners missing the required tool call).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 70
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(eirel_validator_composite_knockouts_total[15m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 502,
+      "type": "timeseries",
+      "title": "Reconciler disputed rate (three-oracle)",
+      "description": "Fraction of three_oracle tasks in the most recent run where OpenAI / Gemini / Grok couldn't reach consensus. Sustained >20% (red threshold) means an oracle calibration issue \u2014 investigate vendor disagreement patterns before trusting the leaderboard.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 70
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "eirel_validator_reconciler_disputed_rate",
+          "legendFormat": "{{family_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 503,
+      "type": "timeseries",
+      "title": "Judge JSON malformations (rate)",
+      "description": "Per-role judge calls returning malformed JSON before any retry. Calibration memory: rate > 2% triggers operator review; JSON-repair retry usually recovers but if recovered rate stays below 90%, the judge model should be swapped.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 78
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (role) (rate(eirel_validator_judge_json_malformations_total[15m]))",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     }
   ]
 }
