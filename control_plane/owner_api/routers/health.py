@@ -438,15 +438,20 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         (run_id, family_id): winner
         for run_id, family_id, winner in winner_rows
     }
-    # Per-(run, family, miner) counts derived from TaskMinerResult. Under
-    # the pairwise redesign every row represents a completed judgment, so
-    # total == evaluated; errored judgments are still rows with verdict=error.
+    # Per-(run, family, miner) counts + summed trace-reported LLM cost
+    # derived from TaskMinerResult. ``proxy_cost_usd`` is the per-task
+    # cost the validator stamped from the orchestrator's
+    # done-chunk metadata. Surfaced alongside DSR's via-proxy LLM cost
+    # so the dashboard can show what miners actually spent on LLM calls
+    # even when they bring their own API keys (in which case the proxy-
+    # ledger view is naturally 0).
     task_rows = (
         session.query(
             TaskMinerResult.run_id,
             TaskMinerResult.family_id,
             TaskMinerResult.miner_hotkey,
             func.count(),
+            func.coalesce(func.sum(TaskMinerResult.proxy_cost_usd), 0.0),
         )
         .filter(TaskMinerResult.run_id.in_(run_ids))
         .group_by(
@@ -456,9 +461,13 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         )
         .all()
     )
-    task_totals: dict[tuple[str, str, str], dict[str, int]] = {}
-    for run_id, family_id, hotkey, count in task_rows:
-        task_totals[(run_id, family_id, hotkey)] = {"evaluated": count, "total": count}
+    task_totals: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for run_id, family_id, hotkey, count, trace_cost in task_rows:
+        task_totals[(run_id, family_id, hotkey)] = {
+            "evaluated": count,
+            "total": count,
+            "trace_llm_cost_usd": float(trace_cost or 0.0),
+        }
 
     allowed_pairs = {
         (run_id, family_id)
@@ -477,7 +486,10 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         ordered = sorted(records, key=lambda r: r.raw_score, reverse=True)
         winner = winner_by_run_family.get((run_id, family_id))
         for rank, record in enumerate(ordered, start=1):
-            tasks = task_totals.get((run_id, family_id, record.miner_hotkey), {"evaluated": 0, "total": 0})
+            tasks = task_totals.get(
+                (run_id, family_id, record.miner_hotkey),
+                {"evaluated": 0, "total": 0, "trace_llm_cost_usd": 0.0},
+            )
             rows.append(
                 {
                     "family_id": family_id,
@@ -489,6 +501,7 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
                     "tasks_completed": tasks["evaluated"],
                     "tasks_total": tasks["total"],
                     "llm_cost_usd": float(record.llm_cost_usd or 0.0),
+                    "trace_llm_cost_usd": float(tasks.get("trace_llm_cost_usd") or 0.0),
                     "tool_cost_usd": float(record.tool_cost_usd or 0.0),
                     "is_winner": 1 if (winner and record.miner_hotkey == winner) else 0,
                 }
@@ -528,12 +541,17 @@ def _format_scorecard_metrics(rows: list[dict[str, Any]]) -> str:
         ),
         (
             "eirel_owner_scorecard_llm_cost_usd",
-            "LLM spend (USD) attributed to a miner in the given run.",
+            "LLM spend recorded against the subnet provider proxy for the miner in the given run. Zero when the miner uses self-hosted API keys.",
             "llm_cost_usd",
         ),
         (
+            "eirel_owner_scorecard_trace_llm_cost_usd",
+            "LLM spend reported by the miner's response trace (sum of task_miner_results.proxy_cost_usd). Reflects what the miner actually spent regardless of routing path.",
+            "trace_llm_cost_usd",
+        ),
+        (
             "eirel_owner_scorecard_tool_cost_usd",
-            "Tool spend (USD) attributed to a miner in the given run.",
+            "Tool-service spend (web_search / url_fetch / sandbox / rag) recorded against the subnet provider proxy for the miner in the given run.",
             "tool_cost_usd",
         ),
         (
