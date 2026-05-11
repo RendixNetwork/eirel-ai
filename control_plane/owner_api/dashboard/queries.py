@@ -788,10 +788,15 @@ def fetch_miner_runs(
         .order_by(EvaluationRun.sequence.desc())
     ).all()
 
+    # DSR rows for an open run are stale-by-construction: they're written
+    # at run-close, but partial-aggregation paths can persist them while
+    # the run is still open. The leaderboard SQL is the source of truth
+    # for any open run, so drop any open-status pairs and let the
+    # ``include_open`` branch below re-add the live entry.
+    pair_rows = [(rec, er) for (rec, er) in pair_rows if er.status != "open"]
+
     latest = _latest_run(session)
-    include_open = latest is not None and latest.status == "open" and all(
-        er.id != latest.id for (_rec, er) in pair_rows
-    )
+    include_open = latest is not None and latest.status == "open"
 
     winners_by_run = dict(
         session.execute(
