@@ -92,7 +92,7 @@
       "title": "weight-setter",
       "gridPos": {"h": 4, "w": 3, "x": 9, "y": 1},
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "targets": [{"refId": "A", "expr": "eirel_weight_setter_up or on() vector(0)"}],
+      "targets": [{"refId": "A", "expr": "(time() - eirel_weight_setter_last_success_timestamp_seconds < bool 2700) or on() vector(0)"}],
       "fieldConfig": {
         "defaults": {
           "mappings": [
