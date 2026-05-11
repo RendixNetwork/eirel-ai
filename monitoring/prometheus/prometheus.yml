@@ -66,6 +66,42 @@ scrape_configs:
       - targets:
           - execution-worker:8006
 
+  # Tool-platform sidecars: web_search / url_fetch / sandbox / rag.
+  # Each exposes counters on retrieve/execute/quota outcomes — the
+  # validator-side ledger of what tools miners actually invoked.
+  - job_name: web_search_tool_service
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - web-search-tool-service:8085
+
+  - job_name: url_fetch_tool_service
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - url-fetch-tool-service:8087
+
+  - job_name: sandbox_tool_service
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - sandbox-tool-service:8091
+
+  - job_name: rag_tool_service
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - rag-tool-service:8088
+
+  # Alertmanager self-monitoring — notification delivery success,
+  # latency, dispatcher state. If alertmanager dies or fails to relay
+  # to Discord, this scrape is what lets us notice without a meta-alert.
+  - job_name: alertmanager
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - alertmanager:9093
+
   # Baremetal runtime node OS metrics via node_exporter.
   # Targets are discovered from the owner API's runtime node inventory.
   - job_name: runtime_node
