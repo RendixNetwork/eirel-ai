@@ -227,3 +227,46 @@ groups:
         annotations:
           summary: chain interaction errors are elevated
           description: validator-engine is observing chain errors above 0.1/s over the last 15 minutes.
+
+  - name: eirel-monitoring-self
+    rules:
+      - alert: EirelDiscordBridgeDown
+        # Discord-bridge has no app-emitted ``_up`` gauge; the Prometheus-
+        # injected ``up`` from its own scrape is the canonical liveness.
+        expr: up{job="discord_bridge"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: discord-bridge
+        annotations:
+          summary: discord-bridge is unreachable
+          description: Prometheus has not been able to scrape discord-bridge for 5 minutes; alertmanager notifications may be silently dropped.
+
+      - alert: EirelDiscordBridgeRelayFailing
+        # Sustained non-ok relay outcomes (5xx, 4xx, network_error) over
+        # 15 min — the bridge is reaching Discord but failing to deliver.
+        # Use ratio > 0.2 so a transient hiccup doesn't page.
+        expr: |
+          sum(rate(discord_bridge_relay_attempts_total{outcome!="ok"}[15m]))
+            /
+          clamp_min(sum(rate(discord_bridge_relay_attempts_total[15m])), 0.001) > 0.2
+        for: 15m
+        labels:
+          severity: critical
+          service: discord-bridge
+        annotations:
+          summary: discord-bridge relay failure rate is high
+          description: ">20% of Discord webhook POSTs over the last 15 minutes were non-ok (4xx / 5xx / network_error). Alerts may not be reaching the channel."
+
+      - alert: EirelDiscordBridgeDestinationUnconfigured
+        # If a channel that USED to be configured suddenly reports 0,
+        # the env was unset between restarts — alerts to that severity
+        # tier would silently 404 on the bridge until reconfigured.
+        expr: discord_bridge_destination_configured == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: discord-bridge
+        annotations:
+          summary: discord-bridge channel {{ $labels.channel }} has no webhook URL
+          description: the {{ $labels.channel }} channel has no ALERTMANAGER_*_WEBHOOK_URL env var set; alerts routed to this channel will be dropped.

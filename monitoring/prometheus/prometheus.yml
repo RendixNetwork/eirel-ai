@@ -102,6 +102,16 @@ scrape_configs:
       - targets:
           - alertmanager:9093
 
+  # Discord-bridge self-monitoring — alertmanager delivers to bridge,
+  # bridge translates + POSTs to Discord. Both hops can fail silently;
+  # ``discord_bridge_relay_attempts_total{outcome!="ok"}`` is what
+  # surfaces those.
+  - job_name: discord_bridge
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - discord-bridge:8080
+
   # Baremetal runtime node OS metrics via node_exporter.
   # Targets are discovered from the owner API's runtime node inventory.
   - job_name: runtime_node
