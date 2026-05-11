@@ -162,6 +162,24 @@ groups:
           summary: benchmark run failure rate is high
           description: more than 25% of benchmark runs in the last 30 minutes have failed.
 
+      - alert: EirelFleetGateKnockoutRateHigh
+        # Fleet-wide ratio of composite knockouts to eval outcomes.
+        # Sustained >50% means either miners are systemically failing
+        # composite gates (tool services degraded / eval too hard) or
+        # the gates themselves are mis-tuned. Drill into the per-reason
+        # panel on the scoring-pipeline dashboard before acting.
+        expr: |
+          sum(rate(eirel_validator_composite_knockouts_total[15m]))
+            /
+          clamp_min(sum(rate(eirel_validator_eval_outcome_total[15m])), 0.001) > 0.5
+        for: 30m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: more than half the fleet's eval outcomes are being knocked out
+          description: ">50% of composite evals over 15 minutes ended in a gate knockout for 30 minutes straight. Check the Composite scoring & oracle health row on the scoring-pipeline dashboard for the dominant knockout_factor."
+
       - alert: EirelJudgeDisagreementHigh
         expr: sum(rate(eirel_validator_judge_disagreements_total[1h])) > 0.05
         for: 30m

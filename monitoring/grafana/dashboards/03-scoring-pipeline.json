@@ -870,8 +870,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (reason) (rate(eirel_validator_composite_knockouts_total[15m]))",
-          "legendFormat": "{{reason}}"
+          "expr": "sum by (knockout_factor) (rate(eirel_validator_composite_knockouts_total[15m]))",
+          "legendFormat": "{{knockout_factor}}"
         }
       ],
       "fieldConfig": {
@@ -920,7 +920,7 @@
         {
           "refId": "A",
           "expr": "eirel_validator_reconciler_disputed_rate",
-          "legendFormat": "{{family_id}}"
+          "legendFormat": "{{family}}"
         }
       ],
       "fieldConfig": {
@@ -984,8 +984,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (role) (rate(eirel_validator_judge_json_malformations_total[15m]))",
-          "legendFormat": "{{role}}"
+          "expr": "sum by (judge_role) (rate(eirel_validator_judge_json_malformations_total[15m]))",
+          "legendFormat": "{{judge_role}}"
         }
       ],
       "fieldConfig": {
@@ -1006,6 +1006,71 @@
         },
         "tooltip": {
           "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 504,
+      "type": "timeseries",
+      "title": "Fleet gate-knockout ratio",
+      "description": "Fraction of EvalJudge outcomes that were zeroed by a composite gate, across all miners and families. Healthy state: <30% \u2014 miners mostly clearing the gates. >50% sustained (orange/red thresholds) means either miners are systemically failing the gates (eval too hard / tool services degraded) or the gates themselves are misconfigured. Drill into ``Composite knockouts by reason`` (left) to see which gate is firing.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 78
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(eirel_validator_composite_knockouts_total[15m])) / clamp_min(sum(rate(eirel_validator_eval_outcome_total[15m])), 0.001)",
+          "legendFormat": "fleet"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.3
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
         }
       }
     }
