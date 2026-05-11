@@ -1013,7 +1013,7 @@
       "id": 504,
       "type": "timeseries",
       "title": "Fleet gate-knockout ratio",
-      "description": "Fraction of EvalJudge outcomes that were zeroed by a composite gate, across all miners and families. Healthy state: <30% \u2014 miners mostly clearing the gates. >50% sustained (orange/red thresholds) means either miners are systemically failing the gates (eval too hard / tool services degraded) or the gates themselves are misconfigured. Drill into ``Composite knockouts by reason`` (left) to see which gate is firing.",
+      "description": "Fraction of EvalJudge outcomes that were zeroed by a composite gate, across all miners and families. Sustained elevation past the threshold lines means either miners are systemically failing gates (tool services degraded / eval too hard) or the gates themselves are misconfigured. Drill into ``Composite knockouts by reason`` (left) to identify the dominant gate.",
       "gridPos": {
         "h": 8,
         "w": 12,

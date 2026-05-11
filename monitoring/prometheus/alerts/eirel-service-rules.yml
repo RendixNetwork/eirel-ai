@@ -246,6 +246,55 @@ groups:
           summary: chain interaction errors are elevated
           description: validator-engine is observing chain errors above 0.1/s over the last 15 minutes.
 
+  - name: eirel-validator-cost
+    rules:
+      - alert: EirelValidatorRunCostHigh
+        expr: max(eirel_owner_validator_run_total_cost_usd{run_status="open"}) > 50
+        for: 10m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: validator per-run total cost is elevated
+          description: total validator-paid cost on the current open run exceeded $50 for 10 minutes. Drill into per-component spend in the Validator economics row.
+
+      - alert: EirelValidatorRunCostCritical
+        expr: max(eirel_owner_validator_run_total_cost_usd{run_status="open"}) > 100
+        for: 5m
+        labels:
+          severity: critical
+          service: validator-engine
+        annotations:
+          summary: validator per-run total cost is critically high
+          description: total validator-paid cost on the current open run exceeded $100 for 5 minutes. Investigate immediately — likely a retry storm or vendor pricing change.
+
+      # Judge cost scales roughly linearly with submission volume; the
+      # threshold is set high so the alert fires only on true outliers
+      # (malformed-JSON retry loops, runaway retries) rather than on
+      # natural growth as the network adds miners.
+      - alert: EirelJudgeCostElevated
+        expr: max(eirel_owner_validator_run_judge_cost_usd{run_status="open"}) > 40
+        for: 10m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: judge-call spend is anomalously high
+          description: per-run judge cost exceeded $40 for 10 minutes. Check the Judge JSON malformations panel — sustained malformation rate usually drives a retry-storm cost spike.
+
+      # Oracle cost is comparatively stable run-over-run because it
+      # doesn't scale with miner count; a small multiplier on the
+      # baseline is enough to identify vendor-side anomalies.
+      - alert: EirelOracleCostElevated
+        expr: max(eirel_owner_validator_run_oracle_cost_usd{run_status="open"}) > 4
+        for: 10m
+        labels:
+          severity: warning
+          service: validator-engine
+        annotations:
+          summary: oracle-call spend is anomalously high
+          description: per-run oracle cost exceeded $4 for 10 minutes. Check per-vendor cost in the Validator economics row; one of OpenAI / Gemini / Grok may be up-charging, or a web-search adder is firing on self-contained tasks.
+
   - name: eirel-monitoring-self
     rules:
       - alert: EirelDiscordBridgeDown
