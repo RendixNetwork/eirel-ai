@@ -27,8 +27,13 @@ def verify_weights_on_chain(
     tolerance: float = _DEFAULT_WEIGHT_TOLERANCE,
     max_poll_attempts: int = 3,
     poll_interval_seconds: float = 2.0,
+    initial_metagraph=None,
 ) -> dict[str, object]:
     """Read committed weights from chain state and compare to expected values.
+
+    If ``initial_metagraph`` is provided it is used for the first poll
+    instead of issuing another full-metagraph RPC. Subsequent retries
+    still re-fetch, so verification doesn't get stuck on a stale view.
 
     Returns a dict with keys ``verified`` (bool), ``mismatches`` (list), and
     ``poll_attempts`` (int).
@@ -46,7 +51,10 @@ def verify_weights_on_chain(
             # would hit an empty array. Verification runs at most every
             # EIREL_WEIGHT_SET_INTERVAL_BLOCKS (~36 min), so the extra
             # bandwidth for the full metagraph is negligible.
-            metagraph = subtensor.metagraph(netuid=netuid, lite=False)
+            if attempt == 1 and initial_metagraph is not None:
+                metagraph = initial_metagraph
+            else:
+                metagraph = subtensor.metagraph(netuid=netuid, lite=False)
             # Find the uid of the validator hotkey.
             uid_by_hotkey = {str(hk): uid for uid, hk in enumerate(metagraph.hotkeys)}
             validator_uid = uid_by_hotkey.get(wallet_hotkey)

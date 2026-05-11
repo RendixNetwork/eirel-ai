@@ -63,12 +63,20 @@ def _sync_metagraph(
     loop from blocking forever on a dead endpoint — the failure mode the
     phase-5 E2E agent hit.
     """
-    import bittensor as bt  # imported lazily so unit tests can stub
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+    # Imported lazily so unit tests can stub ``bittensor`` via
+    # ``sys.modules`` before ``get_subtensor`` triggers the import.
+    from shared.common.subtensor import get_subtensor, reset_subtensor
 
     def _load() -> Any:
-        sub = bt.Subtensor(network=network)
-        return sub.metagraph(netuid=netuid, lite=lite)
+        try:
+            sub = get_subtensor(network)
+            return sub.metagraph(netuid=netuid, lite=lite)
+        except Exception:
+            # Drop the singleton so the next caller reconnects rather
+            # than reusing a socket the chain just refused.
+            reset_subtensor()
+            raise
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(_load)

@@ -672,6 +672,8 @@ async def run_weight_setting_loop() -> None:
     import asyncio
     import time as _time
     import bittensor as bt
+    import websockets.exceptions as _ws_exc
+    from shared.common.subtensor import get_subtensor, reset_subtensor
     from validation.validator.chain_verifier import verify_weights_on_chain
 
     signer = _load_validator_signer()
@@ -687,6 +689,13 @@ async def run_weight_setting_loop() -> None:
     _cb_recovery_timeout = 120.0
     _consecutive_failures = 0
     _circuit_opened_at: float = 0.0
+
+    # Connection-error backoff is separate from the per-cycle circuit
+    # breaker: a 429 / handshake failure means the endpoint itself is
+    # rate-limiting us, so retrying in 60s only makes it worse. Sleep
+    # proportional to the cycle interval with light growth.
+    _conn_backoff = 300.0
+    _conn_backoff_max = float(_WEIGHT_SET_INTERVAL_SECONDS)
 
     logger.info(
         "weight-setting loop starting: interval=%d blocks (~%ds) network=%s netuid=%d",
@@ -752,14 +761,21 @@ async def run_weight_setting_loop() -> None:
                 weights_by_hotkey = data.get("weights", {})
                 family_winners = data.get("family_winners", [])
 
-            # 2. Sync metagraph to resolve hotkey → UID
-            subtensor = bt.Subtensor(network=network)
+            # 2. Sync metagraph to resolve hotkey → UID.
+            #
+            # Use the singleton Subtensor so we don't reopen a WebSocket
+            # every cycle. Fetch the *full* metagraph (lite=False) once
+            # and reuse it for both UID resolution here and the post-set
+            # weight verification at step 6 — verify_weights_on_chain
+            # needs ``W`` which lite=True doesn't carry. At the 36-min
+            # cadence the extra bandwidth is negligible.
+            subtensor = get_subtensor(network)
             wallet = bt.Wallet(
                 name=os.getenv("EIREL_VALIDATOR_WALLET_NAME"),
                 hotkey=os.getenv("EIREL_VALIDATOR_HOTKEY_NAME"),
                 path=os.getenv("EIREL_VALIDATOR_WALLET_PATH"),
             )
-            metagraph = subtensor.metagraph(netuid=netuid, lite=True)
+            metagraph = subtensor.metagraph(netuid=netuid, lite=False)
             if not metagraph.hotkeys:
                 logger.error("weight-setting: metagraph returned empty hotkeys, skipping")
                 await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
@@ -922,7 +938,12 @@ async def run_weight_setting_loop() -> None:
                 loop_name="weight_setter"
             ).set_to_current_time()
 
-            # 6. Verify weights landed on-chain
+            # 6. Verify weights landed on-chain.
+            #
+            # ``metagraph`` was fetched lite=False above; pass it in so
+            # verify_weights_on_chain doesn't re-fetch on the first poll.
+            # It may still re-fetch on retries if the initial check sees
+            # stale state, which is what we want.
             try:
                 verification = verify_weights_on_chain(
                     subtensor=subtensor,
@@ -930,6 +951,7 @@ async def run_weight_setting_loop() -> None:
                     wallet_hotkey=wallet.hotkey.ss58_address,
                     expected_uids=uids,
                     expected_weights=weight_vals,
+                    initial_metagraph=metagraph,
                 )
                 if verification.get("verified"):
                     logger.info("weight-setting: chain verification passed run=%s", current_run_id)
@@ -941,12 +963,29 @@ async def run_weight_setting_loop() -> None:
             except Exception:
                 logger.warning("weight-setting: chain verification error", exc_info=True)
 
+        except (_ws_exc.InvalidStatus, _ws_exc.WebSocketException, ConnectionError, OSError) as exc:
+            # The chain endpoint refused our WebSocket (HTTP 429 from a
+            # public node is the canonical case) or the connection
+            # dropped mid-cycle. Drop the singleton so the next cycle
+            # reconnects, and back off proportional to the cycle
+            # interval — retrying in 60s would just retrip the 429.
+            logger.warning(
+                "weight-setting: chain connection error (%s); backing off %.0fs and reconnecting",
+                exc, _conn_backoff,
+            )
+            reset_subtensor()
+            await asyncio.sleep(_conn_backoff)
+            _conn_backoff = min(_conn_backoff * 2, _conn_backoff_max)
+            continue
         except Exception:
             logger.exception("weight-setting loop error")
             # Sleep shorter on transient errors (e.g. owner-api down)
             await asyncio.sleep(min(60.0, _WEIGHT_SET_INTERVAL_SECONDS))
             continue
 
+        # Cycle completed without a connection-level error — reset the
+        # connection backoff so the next outage starts from the floor.
+        _conn_backoff = 300.0
         await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
 
 

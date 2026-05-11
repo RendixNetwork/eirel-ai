@@ -20,6 +20,7 @@ if str(SDK_ROOT) not in sys.path:
 
 from eirel.schemas import AgentInvocationRequest, AgentInvocationResponse, ArtifactReference
 from shared.common.config import reset_settings
+from shared.common.subtensor import reset_subtensor
 from shared.common.security import sha256_hex
 from control_plane.owner_api.app import app
 from infra.miner_runtime.runtime_manager import MinerRuntimeHandle, RuntimeNodeInfo
@@ -31,6 +32,19 @@ def _reset_settings_cache():
     reset_settings()
     yield
     reset_settings()
+
+
+@pytest.fixture(autouse=True)
+def _reset_subtensor_singleton():
+    """Drop the cached ``bt.Subtensor`` between tests.
+
+    Tests that stub ``bittensor`` via ``sys.modules`` would otherwise
+    see a stale singleton built against the previous stub (or worse,
+    against real bittensor from an earlier test that didn't stub).
+    """
+    reset_subtensor()
+    yield
+    reset_subtensor()
 
 
 def make_submission_archive(

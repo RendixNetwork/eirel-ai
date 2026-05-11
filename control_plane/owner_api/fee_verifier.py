@@ -11,7 +11,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-import bittensor as bt
+from shared.common.subtensor import get_subtensor, reset_subtensor
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,12 @@ class FeeVerifier:
 
     def _get_hotkey_owner_uncached(self, hotkey: str) -> str | None:
         try:
-            subtensor = bt.Subtensor(network=self.network)
+            subtensor = get_subtensor(self.network)
             return subtensor.get_hotkey_owner(hotkey)
         except Exception:
+            # The singleton's socket may be the reason we failed; reset
+            # so the next call reconnects instead of reusing it.
+            reset_subtensor()
             return None
 
     def _get_hotkey_owner_cached(self, hotkey: str) -> str | None:
@@ -98,13 +101,16 @@ class FeeVerifier:
         # Fetch the extrinsic with a single retry on transient network errors.
         for attempt in range(2):
             try:
-                subtensor = bt.Subtensor(network=self.network)
+                subtensor = get_subtensor(self.network)
                 substrate = subtensor.substrate
                 receipt = substrate.retrieve_extrinsic_by_hash(
                     block_hash, extrinsic_hash,
                 )
                 break
             except (ConnectionError, OSError) as exc:
+                # Reset the singleton on connection-level errors so the
+                # retry reconnects rather than re-using the bad socket.
+                reset_subtensor()
                 if attempt == 0:
                     time.sleep(2.0)
                     continue

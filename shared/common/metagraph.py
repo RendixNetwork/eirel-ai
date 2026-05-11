@@ -4,9 +4,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import bittensor as bt
-
-
 @dataclass(slots=True)
 class MetagraphNeuron:
     """A hotkey registered on the metagraph. We don't track axon activity —
@@ -39,8 +36,18 @@ class BittensorMetagraphClient(MetagraphClient):
         self.netuid = netuid
 
     async def fetch_all_neurons(self) -> list[MetagraphNeuron]:
-        subtensor = bt.Subtensor(network=self.network)
-        metagraph = subtensor.metagraph(netuid=self.netuid, lite=True)
+        # Use the per-process Subtensor singleton (see shared.common.subtensor)
+        # so the metagraph-listener doesn't re-handshake the chain endpoint on
+        # every sync tick. A connection failure resets the singleton so the
+        # next call reconnects.
+        from shared.common.subtensor import get_subtensor, reset_subtensor
+
+        try:
+            subtensor = get_subtensor(self.network)
+            metagraph = subtensor.metagraph(netuid=self.netuid, lite=True)
+        except Exception:
+            reset_subtensor()
+            raise
         return [
             MetagraphNeuron(hotkey=hotkey, uid=uid)
             for uid, hotkey in enumerate(metagraph.hotkeys)
