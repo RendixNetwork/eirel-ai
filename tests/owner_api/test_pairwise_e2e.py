@@ -644,16 +644,20 @@ def test_e2e_official_score_uses_multi_metric_final_task_score(services):
         summary = session.query(MinerEvaluationSummary).filter_by(
             run_id="run-mm-1", miner_hotkey="hk-mm",
         ).one()
-        # Legacy mean_agreement is still 1.0 (all verdicts are matches).
-        assert summary.family_capability_score == pytest.approx(1.0)
+        # mean_agreement is gate-aware: the two tasks where the gates
+        # zeroed final_task_score (0.0) are reclassified as
+        # ``gate_knockout`` and contribute 0 to the agreement mean.
+        # Two real matches (1.0 + 1.0 = 2.0) over 4 completed rows = 0.5.
+        assert summary.family_capability_score == pytest.approx(0.5)
         # Canonical official_family_score = AVG over all 4 rows of
         #   COALESCE(final_task_score, agreement_score)
         #   = (1.0 + 0.8 + 0.0 + 0.0) / 4 = 0.45.
         # This matches the leaderboard's open-run SQL formula exactly.
         assert summary.official_family_score == pytest.approx(0.45)
-        # Rollout metadata records the formula so the dashboard /
-        # debugging can confirm which path produced the number.
-        assert summary.rollout_metadata_json["official_family_score"] == pytest.approx(0.45)
+        # Gate-aware verdict counts: 2 effective matches, 2 gate knockouts.
+        verdict_counts = summary.rollout_metadata_json["verdict_counts"]
+        assert verdict_counts["matches"] == 2
+        assert verdict_counts["gate_knockout"] == 2
         assert (
             summary.rollout_metadata_json["official_score_formula"]
             == "avg(coalesce(final_task_score, agreement_score)) over all rows"

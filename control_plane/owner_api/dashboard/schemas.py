@@ -45,11 +45,18 @@ class MinerMetrics(BaseModel):
     tasks_with_safety: int = 0
     tasks_with_latency_cost: int = 0
     tasks_with_computation_correctness: int = 0
-    # Per-verdict counts across the miner's judged tasks.
+    # Per-verdict counts across the miner's judged tasks. Gate-aware:
+    # tasks whose ``final_task_score`` was zeroed by a composite gate
+    # (tool_attestation / hallucination / safety / cost) are reclassified
+    # OUT of their pass-bucket and counted in ``gate_knockout_count``
+    # instead. This way the displayed bucket totals reflect the same
+    # reality as the canonical score — a "match" only counts as a match
+    # if the multi-metric composite agrees it scored.
     matches_count: int = 0
     partially_matches_count: int = 0
     not_applicable_count: int = 0
     contradicts_count: int = 0
+    gate_knockout_count: int = 0
     # Fraction of this miner's rows that ended in verdict=="error".
     error_rate: float | None = None
     # True iff ``error_rate`` is below the reliability threshold (0.30).

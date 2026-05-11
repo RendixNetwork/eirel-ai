@@ -1,19 +1,25 @@
 """Outcome-only agreement aggregation for the general_chat family.
 
-After the redesign, miner scoring is the mean of per-task ``agreement_score``
-values, derived from the eiretes agreement judge's verdict. Each task maps
-to exactly one scalar in [0, 1]:
+Per-task agreement maps the verdict to a scalar in [0, 1]:
 
     matches            → 1.0
     partially_matches  → 0.6
     not_applicable     → 0.7   (open-ended tasks where agreement is N/A)
     contradicts        → 0.0
-    error              → not counted
+    error              → not counted in the denominator
 
-Error rows are excluded from the mean to avoid double-penalizing (a miner
-whose pod failed and whose agreement couldn't be assessed). Instead,
-``error_rate`` is tracked separately and caps the final score when a miner
-fails on too many tasks, matching the old reliability gate.
+Gate-aware bucketing: a task whose multi-metric composite was zeroed
+by a gate (tool_attestation / hallucination_knockout / grounded_gate /
+safety_gate / cost_attestation / safety_attestation) is reclassified
+OUT of its pass bucket and into ``gate_knockout``. The ``mean_agreement``
+treats those rows as contributing 0 to the numerator — so the displayed
+verdict counts and the agreement mean reflect the same reality as the
+canonical multi-metric score.
+
+Error rows are excluded from the mean's denominator to avoid double-
+penalizing (a miner whose pod failed and whose agreement couldn't be
+assessed). Instead, ``error_rate`` is tracked separately and caps the
+final score when a miner fails on too many tasks.
 
 Citations are NOT evaluated here. They are preserved on ``TaskMinerResult``
 (``miner_citations_json``) purely for dashboard readback.
@@ -97,31 +103,51 @@ def aggregate_miner_score(results: list["TaskMinerResult"]) -> MinerRollup:
 
     miner_hotkey = results[0].miner_hotkey
 
+    # Gate-aware verdict bucketing. A pass-bucket verdict whose
+    # multi-metric ``final_task_score`` was zeroed by a composite gate
+    # is reclassified into ``gate_knockout`` so the displayed bucket
+    # counts and the agreement mean reflect the same reality as the
+    # canonical score.
+    pass_verdicts = {"matches", "partially_matches", "not_applicable"}
     verdict_counts: dict[str, int] = {
         "matches": 0, "partially_matches": 0,
-        "not_applicable": 0, "contradicts": 0, "error": 0,
+        "not_applicable": 0, "contradicts": 0,
+        "gate_knockout": 0, "error": 0,
     }
-    for r in results:
+
+    def _effective(r: "TaskMinerResult") -> str:
         v = r.agreement_verdict if r.agreement_verdict in verdict_counts else "error"
-        verdict_counts[v] += 1
+        if v not in pass_verdicts:
+            return v
+        final = getattr(r, "final_task_score", None)
+        if final is not None and float(final) <= 0.0:
+            return "gate_knockout"
+        return v
+
+    for r in results:
+        verdict_counts[_effective(r)] += 1
 
     completed = (
         verdict_counts["matches"]
         + verdict_counts["partially_matches"]
         + verdict_counts["not_applicable"]
         + verdict_counts["contradicts"]
+        + verdict_counts["gate_knockout"]
     )
 
-    # Mean of the scalar agreement scores over non-error rows. Prefer
-    # stored agreement_score (already derived from verdict) so consumers
-    # that backfill scalars directly still work.
+    # mean_agreement: sum effective agreement_score over non-error rows.
+    # Gate-knocked rows contribute 0 (the gate established that they
+    # didn't really pass). All other non-error rows use the stored
+    # agreement_score (derived from verdict).
     score_sum = 0.0
     for r in results:
-        if r.agreement_verdict == "error":
+        effective = _effective(r)
+        if effective == "error":
             continue
+        if effective == "gate_knockout":
+            continue  # contributes 0; still counted in ``completed``
         stored = float(r.agreement_score or 0.0)
         if stored <= 0.0 and r.agreement_verdict in VERDICT_SCORES:
-            # Fallback: derive from the verdict if the scalar wasn't persisted.
             stored = VERDICT_SCORES[r.agreement_verdict]
         score_sum += stored
     mean_agreement = score_sum / completed if completed else 0.0

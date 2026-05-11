@@ -125,6 +125,38 @@ def _as_mode(value: Any) -> ModeLiteral | None:
 # ---------------------------------------------------------------------------
 
 
+# Verdict buckets that mean "the verdict judge said the response passed".
+# Used by ``_effective_verdict`` to decide whether a zero ``final_task_score``
+# should reclassify the row as ``gate_knockout``.
+_PASS_VERDICTS: frozenset[str] = frozenset({"matches", "partially_matches", "not_applicable"})
+
+
+def _effective_verdict(verdict: str | None, final_task_score: float | None) -> str:
+    """Reclassify a pass-bucket verdict to ``gate_knockout`` when the
+    multi-metric composite zeroed the task.
+
+    Rule: a task is in its pass bucket (matches / partially_matches /
+    not_applicable) only if the composite gates (tool_attestation,
+    hallucination_knockout, grounded_gate, safety_gate, cost_attestation,
+    safety_attestation) didn't zero it. When ``final_task_score == 0``
+    and the verdict was a pass type, the row becomes ``gate_knockout``
+    so the displayed bucket counts and ``mean_agreement`` reflect the
+    same reality as the canonical score.
+
+    Errors stay errors. Contradicts / latency_violation stay as-is.
+    Legacy rows with ``final_task_score IS NULL`` keep their verdict
+    (no gate signal available).
+    """
+    v = verdict or "error"
+    if v not in _PASS_VERDICTS:
+        return v
+    if final_task_score is None:
+        return v
+    if final_task_score <= 0.0:
+        return "gate_knockout"
+    return v
+
+
 def _metrics_for_tasks(
     session: Session,
     *,
@@ -177,9 +209,18 @@ def _metrics_for_tasks(
         (pairwise_v, grounded_v, retrieval_v, tool_v, safety_v,
          latency_cost_v, computation_v, final_v) = row[3:11]
         task_count[hk] += 1
-        v = verdict or "error"
+        # Gate-aware: a pass-bucket verdict whose multi-metric
+        # composite was zeroed by a gate becomes "gate_knockout" — so
+        # the displayed bucket totals and mean_agreement reflect the
+        # same reality as the canonical score.
+        v = _effective_verdict(verdict, final_v)
         verdict_counts[hk][v] += 1
-        if v != "error" and isinstance(score, (int, float)):
+        # mean_agreement sums effective agreement_score: gate-knocked
+        # rows contribute 0 (matching the reality the gate established),
+        # error rows are excluded from both numerator and denominator.
+        if v == "gate_knockout":
+            pass  # contributes 0 to the sum; still counts toward completed
+        elif v != "error" and isinstance(score, (int, float)):
             score_sum[hk] += float(score)
         # Per-dimension accumulation — only if the column has a real
         # number (None means N/A for this task type).
@@ -232,6 +273,7 @@ def _metrics_for_tasks(
             partially_matches_count=counts.get("partially_matches", 0),
             not_applicable_count=counts.get("not_applicable", 0),
             contradicts_count=counts.get("contradicts", 0),
+            gate_knockout_count=counts.get("gate_knockout", 0),
             error_rate=error_rate,
             reliable=error_rate <= 0.30,
         )
@@ -268,6 +310,8 @@ def _merge_summary_metrics(
             updates["not_applicable_count"] = int(counts.get("not_applicable") or 0)
         if "contradicts" in counts:
             updates["contradicts_count"] = int(counts.get("contradicts") or 0)
+        if "gate_knockout" in counts:
+            updates["gate_knockout_count"] = int(counts.get("gate_knockout") or 0)
     return metrics.model_copy(update=updates) if updates else metrics
 
 
