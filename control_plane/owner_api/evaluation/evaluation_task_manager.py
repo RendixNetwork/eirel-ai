@@ -599,19 +599,30 @@ class EvaluationTaskManager:
     ) -> None:
         """Compute MinerEvaluationSummary from TaskMinerResult rows.
 
-        ``official_family_score`` mirrors the open-run leaderboard SQL
-        (``shared/scoring`` Phase-2 multi-metric) so the miner page and
-        the leaderboard rank page can't disagree mid-run: mean of
-        ``COALESCE(final_task_score, agreement_score)`` over non-error
-        rows. Miners with error_rate > 30% are still capped at 0.5.
+        ``official_family_score`` mirrors the leaderboard's open-run SQL
+        EXACTLY so the rank page and the miner-detail page can't show
+        different numbers:
+
+            AVG(COALESCE(final_task_score, agreement_score))
+
+        over **every** TaskMinerResult row for this miner — error rows
+        included (their ``agreement_score`` is 0.0 by default, so they
+        contribute 0 to the numerator and still count in the
+        denominator, naturally penalising miners that crash on a
+        chunk of their tasks).
 
         ``family_capability_score`` keeps the legacy ``mean_agreement``
-        (verdict-bucket scalars) so the metadata + verdict breakdowns
-        stay populated for the dashboard's coverage panels.
+        (verdict-bucket scalars over non-error rows) for the
+        dashboard's "Mean agreement" tile + Agreement column — that's
+        a complementary debug signal, not a competing score.
+
+        The reliability cap that the legacy rollup applied (cap at
+        0.5 when error_rate > 30%) is intentionally NOT applied here
+        because the leaderboard SQL doesn't cap either. The leaderboard
+        UI surfaces the same information via the "UNRELIABLE" badge on
+        rows where ``metrics.reliable is False``.
         """
         from control_plane.owner_api.evaluation.general_chat_scoring import (
-            _ERROR_RATE_CAP_THRESHOLD,
-            _UNRELIABLE_SCORE_CAP,
             aggregate_miner_score,
         )
 
@@ -634,25 +645,18 @@ class EvaluationTaskManager:
 
         rollup = aggregate_miner_score(results)
 
-        # Multi-metric mean — same formula as ``_collect_single_run_rows``
-        # in the dashboard so the open-run leaderboard and the miner-
-        # detail "Official score" land on the same number. Non-error
-        # rows only, falling back to the legacy ``agreement_score``
-        # column when Phase-2 ``final_task_score`` is NULL (older rows
-        # judged before multi-metric scoring shipped).
-        scored_rows = [r for r in results if r.agreement_verdict != "error"]
-        if scored_rows:
-            multi_metric_mean = sum(
+        # Canonical score: AVG over all rows, matching the leaderboard
+        # SQL formula. Errors (final_task_score IS NULL,
+        # agreement_score=0.0) drop the average proportional to how
+        # many of the miner's tasks failed.
+        if results:
+            official_score = sum(
                 float(r.final_task_score if r.final_task_score is not None
                       else r.agreement_score or 0.0)
-                for r in scored_rows
-            ) / len(scored_rows)
+                for r in results
+            ) / len(results)
         else:
-            multi_metric_mean = 0.0
-        official_score = (
-            multi_metric_mean if rollup.reliable
-            else min(multi_metric_mean, _UNRELIABLE_SCORE_CAP)
-        )
+            official_score = 0.0
 
         summary.completed_tasks = rollup.completed
         summary.failed_tasks = rollup.errored
@@ -666,8 +670,8 @@ class EvaluationTaskManager:
         summary.protocol_gate_passed = rollup.reliable
         summary.rollout_metadata_json = {
             **rollup.to_metadata(),
-            "multi_metric_mean": multi_metric_mean,
-            "official_score_formula": "mean(coalesce(final_task_score, agreement_score))",
+            "official_family_score": official_score,
+            "official_score_formula": "avg(coalesce(final_task_score, agreement_score)) over all rows",
         }
         summary.status = "scored"
         summary.updated_at = utcnow()

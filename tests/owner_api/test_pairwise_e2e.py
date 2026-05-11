@@ -544,7 +544,12 @@ def test_e2e_error_rate_cap_fires_above_threshold(services):
         summary = session.query(MinerEvaluationSummary).filter_by(
             run_id="run-cap-1", miner_hotkey="hk-broken",
         ).one()
-        # mean over non-error = 2 matches → 1.0, but unreliable → cap at 0.5
+        # Legacy mean_agreement (non-error only): 2 matches → 1.0; the
+        # protocol_gate flag still flips false (error_rate > 30%) so the
+        # UI can render the UNRELIABLE badge. The canonical
+        # official_family_score is the leaderboard-matching all-row
+        # mean: (1.0 + 1.0 + 0.0 + 0.0) / 4 = 0.5 — the cap-equivalent
+        # falls out naturally because error rows score 0.
         assert summary.protocol_gate_passed is False
         assert summary.family_capability_score == pytest.approx(1.0)
         assert summary.official_family_score == pytest.approx(0.5)
@@ -641,13 +646,15 @@ def test_e2e_official_score_uses_multi_metric_final_task_score(services):
         ).one()
         # Legacy mean_agreement is still 1.0 (all verdicts are matches).
         assert summary.family_capability_score == pytest.approx(1.0)
-        # New official_family_score = mean(final_task_score)
-        #   = (1.0 + 0.8 + 0.0 + 0.0) / 4 = 0.45 — the multi-metric mean.
+        # Canonical official_family_score = AVG over all 4 rows of
+        #   COALESCE(final_task_score, agreement_score)
+        #   = (1.0 + 0.8 + 0.0 + 0.0) / 4 = 0.45.
+        # This matches the leaderboard's open-run SQL formula exactly.
         assert summary.official_family_score == pytest.approx(0.45)
-        # Rollout metadata records the formula so dashboard / debugging
-        # can tell which path produced the number.
-        assert summary.rollout_metadata_json["multi_metric_mean"] == pytest.approx(0.45)
+        # Rollout metadata records the formula so the dashboard /
+        # debugging can confirm which path produced the number.
+        assert summary.rollout_metadata_json["official_family_score"] == pytest.approx(0.45)
         assert (
             summary.rollout_metadata_json["official_score_formula"]
-            == "mean(coalesce(final_task_score, agreement_score))"
+            == "avg(coalesce(final_task_score, agreement_score)) over all rows"
         )
