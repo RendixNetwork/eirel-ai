@@ -63,15 +63,12 @@ groups:
 
   - name: eirel-control-plane
     rules:
-      - alert: EirelTaskBacklogHigh
-        expr: max(eirel_execution_worker_queue_depth) > 20
-        for: 10m
-        labels:
-          severity: warning
-          service: execution-worker
-        annotations:
-          summary: execution-worker queue backlog is elevated
-          description: execution-worker queue depth has exceeded 20 for 10 minutes.
+      # NOTE: EirelTaskBacklogHigh was removed because it referenced
+      # ``eirel_execution_worker_queue_depth`` which was never emitted.
+      # A real backlog signal needs a gauge for current queue depth
+      # (queued − processed at this moment); the current
+      # ``eirel_owner_workflow_episode_*_total`` counters can only
+      # show rates. Re-add this alert once a depth gauge exists.
 
       - alert: EirelWorkerFailuresIncreasing
         expr: sum(rate(eirel_execution_worker_processed_total{outcome="failed"}[15m])) * 900 > 5
@@ -186,14 +183,18 @@ groups:
           description: at least one workflow episode has been dead-lettered in the last 15 minutes.
 
       - alert: EirelWorkflowWorkerDown
-        expr: absent(eirel_workflow_worker_processed_total)
+        # ``eirel_workflow_execution_worker_up`` is the app-emitted
+        # liveness gauge; it goes to 0 when the worker is shutting down
+        # or unhealthy. Falling back to ``absent(...)`` catches the case
+        # where the worker dies before exporting any sample at all.
+        expr: absent(eirel_workflow_execution_worker_up) or eirel_workflow_execution_worker_up == 0
         for: 5m
         labels:
           severity: critical
           service: execution-worker
         annotations:
           summary: workflow worker is unavailable
-          description: no workflow worker metrics have been observed for 5 minutes.
+          description: the workflow worker has been reporting itself unhealthy (or absent) for 5 minutes.
 
   - name: eirel-chain
     rules:
