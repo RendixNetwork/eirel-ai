@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from shared.common.http_control import SlidingWindowRateLimiter
 from shared.common.models import (
@@ -17,6 +17,12 @@ from control_plane.owner_api.dependencies import require_internal_service_token,
 from control_plane.owner_api.managed import ManagedOwnerServices, fixed_family_weight
 
 _security_logger = logging.getLogger('eirel.security')
+
+# Lifetime cap on POSTs per hotkey. Anti-spam: keeps a single miner from
+# flooding the queue with throw-away submissions. Counts everything that
+# made it past the rate limiter, including build-failed rows, so the cap
+# can't be evaded by pushing broken archives for free retries.
+_HOTKEY_SUBMISSION_LIFETIME_CAP = 2
 
 router = APIRouter(tags=["submissions"])
 
@@ -39,6 +45,23 @@ async def create_submission(
         )
         raise
     services: ManagedOwnerServices = request.app.state.services
+    with services.db.sessionmaker() as session:
+        existing_count = session.scalar(
+            select(func.count(ManagedMinerSubmission.id))
+            .where(ManagedMinerSubmission.miner_hotkey == hotkey)
+        ) or 0
+    if existing_count >= _HOTKEY_SUBMISSION_LIFETIME_CAP:
+        _security_logger.warning(
+            'submission_cap_exceeded hotkey=%s count=%d cap=%d',
+            hotkey, existing_count, _HOTKEY_SUBMISSION_LIFETIME_CAP,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "hotkey submission cap reached "
+                f"(lifetime limit: {_HOTKEY_SUBMISSION_LIFETIME_CAP} submissions per hotkey)"
+            ),
+        )
     submission_block = int(time.time())
     max_archive_bytes = 200 * 1024 * 1024  # 200 MB
     archive_bytes = await archive.read(max_archive_bytes + 1)

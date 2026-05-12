@@ -211,6 +211,31 @@ async def test_submission_rate_limit_per_hotkey(client, identities, monkeypatch)
     assert resp_b.status_code != 429
 
 
+async def test_hotkey_lifetime_submission_cap(client, identities, monkeypatch):
+    monkeypatch.setenv("EIREL_SUBMISSION_RATE_LIMIT_REQUESTS", "100")
+    monkeypatch.setenv("EIREL_SUBMISSION_RATE_LIMIT_WINDOW_SECONDS", "3600")
+
+    limiter = app.state.submission_rate_limiter
+    limiter.max_requests = 100
+
+    signer = identities["miner"]["signer"]
+    limiter._hits.pop(signer.hotkey, None)
+
+    _ensure_run()
+    _make_submission(signer.hotkey)
+    _make_submission(signer.hotkey)
+
+    archive = make_submission_archive()
+    boundary = "capboundary"
+    body = _multipart_body(archive, boundary)
+    hdrs = signed_headers(signer, method="POST", path="/v1/submissions", body=body)
+    hdrs["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+
+    resp = await client.post("/v1/submissions", content=body, headers=hdrs)
+    assert resp.status_code == 429
+    assert "lifetime limit" in resp.json()["detail"].lower()
+
+
 # -- Fix 4: Mandatory Redis in production ---------------------------------
 
 
