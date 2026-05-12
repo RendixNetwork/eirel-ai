@@ -35,7 +35,6 @@ def _seed_eval_record(
     run_id: str,
     miner_hotkey: str,
     raw_score: float,
-    normalized_score: float,
     is_eligible: bool = True,
     health: str = "healthy",
 ) -> str:
@@ -77,7 +76,6 @@ def _seed_eval_record(
             miner_hotkey=miner_hotkey,
             deployment_revision=revision,
             raw_score=raw_score,
-            normalized_score=normalized_score,
             is_eligible=is_eligible,
         )
     )
@@ -100,16 +98,16 @@ def _seed_published_release(session) -> str:
 # -- select_winners_for_run --------------------------------------------------
 
 
-def test_select_winners_picks_highest_normalized_score(tmp_path):
+def test_select_winners_picks_highest_raw_score(tmp_path):
     db = _make_db(tmp_path)
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="d-low", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=0.5, normalized_score=0.5,
+            run_id="run-1", miner_hotkey="hk1", raw_score=0.5,
         )
         _seed_eval_record(
             session, deployment_id="d-high", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk2", raw_score=0.9, normalized_score=0.9,
+            run_id="run-1", miner_hotkey="hk2", raw_score=0.9,
         )
     decisions = select_winners_for_run(database=db, run_id="run-1")
     assert len(decisions) == 1
@@ -122,12 +120,12 @@ def test_select_winners_skips_ineligible(tmp_path):
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="d-bad", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=1.0, normalized_score=1.0,
+            run_id="run-1", miner_hotkey="hk1", raw_score=1.0,
             is_eligible=False,
         )
         _seed_eval_record(
             session, deployment_id="d-ok", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk2", raw_score=0.5, normalized_score=0.5,
+            run_id="run-1", miner_hotkey="hk2", raw_score=0.5,
         )
     decisions = select_winners_for_run(database=db, run_id="run-1")
     assert len(decisions) == 1
@@ -139,12 +137,12 @@ def test_select_winners_skips_unhealthy(tmp_path):
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="d-sick", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=1.0, normalized_score=1.0,
+            run_id="run-1", miner_hotkey="hk1", raw_score=1.0,
             health="degraded",
         )
         _seed_eval_record(
             session, deployment_id="d-fit", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk2", raw_score=0.5, normalized_score=0.5,
+            run_id="run-1", miner_hotkey="hk2", raw_score=0.5,
         )
     decisions = select_winners_for_run(database=db, run_id="run-1")
     assert len(decisions) == 1
@@ -162,15 +160,15 @@ def test_select_winners_one_per_family(tmp_path):
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="gc-1", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=0.9, normalized_score=0.9,
+            run_id="run-1", miner_hotkey="hk1", raw_score=0.9,
         )
         _seed_eval_record(
             session, deployment_id="gc-2", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk2", raw_score=0.5, normalized_score=0.5,
+            run_id="run-1", miner_hotkey="hk2", raw_score=0.5,
         )
         _seed_eval_record(
             session, deployment_id="dr-1", family_id="deep_research",
-            run_id="run-1", miner_hotkey="hk3", raw_score=0.7, normalized_score=0.7,
+            run_id="run-1", miner_hotkey="hk3", raw_score=0.7,
         )
     decisions = select_winners_for_run(database=db, run_id="run-1")
     families = {d.family_id: d.source_deployment_id for d in decisions}
@@ -185,7 +183,7 @@ def test_promote_writes_serving_promotion_row(tmp_path):
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="d-win", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=0.9, normalized_score=0.9,
+            run_id="run-1", miner_hotkey="hk1", raw_score=0.9,
         )
         release_id = _seed_published_release(session)
 
@@ -210,7 +208,7 @@ def test_promote_is_idempotent_on_family_run(tmp_path):
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="d-win", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=0.9, normalized_score=0.9,
+            run_id="run-1", miner_hotkey="hk1", raw_score=0.9,
         )
         _seed_published_release(session)
 
@@ -231,7 +229,7 @@ def test_promote_skips_when_no_published_release(tmp_path):
     with db.sessionmaker() as session:
         _seed_eval_record(
             session, deployment_id="d-win", family_id="general_chat",
-            run_id="run-1", miner_hotkey="hk1", raw_score=0.9, normalized_score=0.9,
+            run_id="run-1", miner_hotkey="hk1", raw_score=0.9,
         )
         # no ServingRelease seeded
     result = promote_winners_for_run(database=db, run_id="run-1")

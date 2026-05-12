@@ -622,7 +622,6 @@ class SubmissionManager:
                 "family_id": score_record.family_id,
                 "deployment_id": score_record.deployment_id,
                 "deployment_revision": score_record.deployment_revision,
-                "normalized_score": float(score_record.normalized_score),
                 "official_family_score": float(
                     metadata.get("official_family_score", score_record.raw_score) or 0.0
                 ),

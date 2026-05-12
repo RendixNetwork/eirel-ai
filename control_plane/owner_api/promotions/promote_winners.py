@@ -51,7 +51,6 @@ class PromotionDecision:
     submission_id: str
     miner_hotkey: str
     raw_score: float
-    normalized_score: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,7 +60,6 @@ class PromotionDecision:
             "submission_id": self.submission_id,
             "miner_hotkey": self.miner_hotkey,
             "raw_score": self.raw_score,
-            "normalized_score": self.normalized_score,
         }
 
 
@@ -91,8 +89,8 @@ def select_winners_for_run(
 
     Eligible records are those with ``is_eligible=True`` and a
     ``health_status="healthy"`` deployment at the time of the read.
-    The winner is the highest ``normalized_score``; ties broken by
-    ``raw_score``, then by ``deployment_id`` (deterministic).
+    The winner is the highest ``raw_score``; ties broken by
+    ``deployment_id`` (deterministic).
     """
     decisions: list[PromotionDecision] = []
     with database.sessionmaker() as session:
@@ -113,13 +111,12 @@ def select_winners_for_run(
     by_family: dict[str, tuple[DeploymentScoreRecord, ManagedDeployment]] = {}
     for record, deployment in rows:
         prev = by_family.get(record.family_id)
-        # Tie-break: highest normalized, then highest raw, then lowest id.
-        candidate_key = (-record.normalized_score, -record.raw_score, record.deployment_id)
+        candidate_key = (-record.raw_score, record.deployment_id)
         if prev is None:
             by_family[record.family_id] = (record, deployment)
             continue
         prev_record = prev[0]
-        prev_key = (-prev_record.normalized_score, -prev_record.raw_score, prev_record.deployment_id)
+        prev_key = (-prev_record.raw_score, prev_record.deployment_id)
         if candidate_key < prev_key:
             by_family[record.family_id] = (record, deployment)
 
@@ -133,7 +130,6 @@ def select_winners_for_run(
                 submission_id=record.submission_id,
                 miner_hotkey=record.miner_hotkey,
                 raw_score=record.raw_score,
-                normalized_score=record.normalized_score,
             )
         )
     return decisions
@@ -207,7 +203,6 @@ def promote_winners_for_run(
                     "submission_id": decision.submission_id,
                     "miner_hotkey": decision.miner_hotkey,
                     "raw_score": decision.raw_score,
-                    "normalized_score": decision.normalized_score,
                 },
             )
             session.add(row)

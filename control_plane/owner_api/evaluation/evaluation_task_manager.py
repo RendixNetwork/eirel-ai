@@ -10,7 +10,6 @@ MinerEvaluationSummary via pairwise win rate.
 """
 
 import logging
-import math
 from datetime import timedelta
 from typing import Any, TYPE_CHECKING
 
@@ -97,38 +96,6 @@ if TYPE_CHECKING:
     from control_plane.owner_api.managed import ManagedOwnerServices
 
 logger = logging.getLogger(__name__)
-
-
-def _compress_scores(
-    effective_scores: dict[str, float],
-    *,
-    power: float = 0.65,
-    outlier_z_threshold: float = 2.0,
-) -> dict[str, float]:
-    """Power-law compression + outlier dampening to resist cartel gaming."""
-    if not effective_scores:
-        return effective_scores
-    values = [v for v in effective_scores.values() if v > 0]
-    if not values:
-        return effective_scores
-
-    sorted_vals = sorted(values)
-    median = sorted_vals[len(sorted_vals) // 2]
-    if len(values) >= 3:
-        mean_val = sum(values) / len(values)
-        stddev = (sum((v - mean_val) ** 2 for v in values) / len(values)) ** 0.5
-        cap = median + outlier_z_threshold * stddev if stddev > 0 else float("inf")
-    else:
-        cap = float("inf")
-
-    compressed: dict[str, float] = {}
-    for hk, score in effective_scores.items():
-        if score <= 0:
-            compressed[hk] = 0.0
-            continue
-        capped = min(score, cap)
-        compressed[hk] = math.pow(capped, power)
-    return compressed
 
 
 class EvaluationTaskManager:
@@ -728,15 +695,6 @@ class EvaluationTaskManager:
             s.miner_hotkey: s.official_family_score or 0.0 for s in summaries
         }
 
-        effective_scores = _compress_scores(dict(miner_scores))
-        total = sum(max(0.0, v) for v in effective_scores.values())
-        if total > 0:
-            normalized_weights = {
-                hk: max(0.0, v) / total for hk, v in sorted(effective_scores.items())
-            }
-        else:
-            normalized_weights = {hk: 0.0 for hk in sorted(effective_scores)}
-
         contributing_validators = {
             v for (v,) in session.execute(
                 select(TaskEvaluation.claimed_by_validator.distinct())
@@ -770,7 +728,6 @@ class EvaluationTaskManager:
             "family_id": family_id,
             "evaluation_plane": "agreement_against_openai_baseline",
             "miner_scores": miner_scores,
-            "normalized_weights": normalized_weights,
             "rubric_version": snapshot.rubric_version if snapshot else "agreement_general_chat_v1",
             "miner_score_breakdowns": miner_score_breakdowns,
             "task_count": summaries[0].total_tasks if summaries else 0,
@@ -826,7 +783,7 @@ class EvaluationTaskManager:
                 miner_hotkey=s.miner_hotkey,
                 deployment_revision=deployment.deployment_revision,
                 raw_score=s.official_family_score or 0.0,
-                normalized_score=normalized_weights.get(s.miner_hotkey, 0.0),
+                normalized_score=0.0,
                 is_eligible=deployment.health_status == "healthy",
                 metadata_json={
                     "mean_agreement": s.family_capability_score,
@@ -842,6 +799,7 @@ class EvaluationTaskManager:
                 score_record,
                 deployment.id,
                 self._owner.settings.run_budget_usd,
+                session=session,
             )
             session.add(score_record)
 

@@ -414,11 +414,13 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         runs_by_family.setdefault(family_id, []).append((sequence, run_id))
 
     latest_runs_by_family: dict[str, list[str]] = {}
+    most_recent_by_family: dict[str, str] = {}
     for family_id, pairs in runs_by_family.items():
         pairs.sort(reverse=True)
         latest_runs_by_family[family_id] = [
             run_id for _seq, run_id in pairs[:_SCORECARD_RUNS_PER_FAMILY]
         ]
+        most_recent_by_family[family_id] = pairs[0][1]
 
     if not latest_runs_by_family:
         return []
@@ -438,20 +440,12 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         (run_id, family_id): winner
         for run_id, family_id, winner in winner_rows
     }
-    # Per-(run, family, miner) counts + summed trace-reported LLM cost
-    # derived from TaskMinerResult. ``proxy_cost_usd`` is the per-task
-    # cost the validator stamped from the orchestrator's
-    # done-chunk metadata. Surfaced alongside DSR's via-proxy LLM cost
-    # so the dashboard can show what miners actually spent on LLM calls
-    # even when they bring their own API keys (in which case the proxy-
-    # ledger view is naturally 0).
     task_rows = (
         session.query(
             TaskMinerResult.run_id,
             TaskMinerResult.family_id,
             TaskMinerResult.miner_hotkey,
             func.count(),
-            func.coalesce(func.sum(TaskMinerResult.proxy_cost_usd), 0.0),
         )
         .filter(TaskMinerResult.run_id.in_(run_ids))
         .group_by(
@@ -462,11 +456,10 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         .all()
     )
     task_totals: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for run_id, family_id, hotkey, count, trace_cost in task_rows:
+    for run_id, family_id, hotkey, count in task_rows:
         task_totals[(run_id, family_id, hotkey)] = {
             "evaluated": count,
             "total": count,
-            "trace_llm_cost_usd": float(trace_cost or 0.0),
         }
 
     allowed_pairs = {
@@ -488,7 +481,7 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
         for rank, record in enumerate(ordered, start=1):
             tasks = task_totals.get(
                 (run_id, family_id, record.miner_hotkey),
-                {"evaluated": 0, "total": 0, "trace_llm_cost_usd": 0.0},
+                {"evaluated": 0, "total": 0},
             )
             rows.append(
                 {
@@ -496,14 +489,13 @@ def _collect_scorecard_rows(session) -> list[dict[str, Any]]:
                     "run_id": run_id,
                     "hotkey": record.miner_hotkey,
                     "raw_score": float(record.raw_score or 0.0),
-                    "normalized_score": float(record.normalized_score or 0.0),
                     "rank": rank,
                     "tasks_completed": tasks["evaluated"],
                     "tasks_total": tasks["total"],
                     "llm_cost_usd": float(record.llm_cost_usd or 0.0),
-                    "trace_llm_cost_usd": float(tasks.get("trace_llm_cost_usd") or 0.0),
                     "tool_cost_usd": float(record.tool_cost_usd or 0.0),
                     "is_winner": 1 if (winner and record.miner_hotkey == winner) else 0,
+                    "is_latest_run": 1 if most_recent_by_family.get(family_id) == run_id else 0,
                 }
             )
     return rows
@@ -518,11 +510,6 @@ def _format_scorecard_metrics(rows: list[dict[str, Any]]) -> str:
             "eirel_owner_scorecard_raw_score",
             "Raw score for a miner in a given run/family.",
             "raw_score",
-        ),
-        (
-            "eirel_owner_scorecard_normalized_score",
-            "Normalized score for a miner in a given run/family.",
-            "normalized_score",
         ),
         (
             "eirel_owner_scorecard_rank",
@@ -541,13 +528,8 @@ def _format_scorecard_metrics(rows: list[dict[str, Any]]) -> str:
         ),
         (
             "eirel_owner_scorecard_llm_cost_usd",
-            "LLM spend recorded against the subnet provider proxy for the miner in the given run. Zero when the miner uses self-hosted API keys.",
+            "LLM spend for the miner in the given run, summed from per-task proxy-reported cost.",
             "llm_cost_usd",
-        ),
-        (
-            "eirel_owner_scorecard_trace_llm_cost_usd",
-            "LLM spend reported by the miner's response trace (sum of task_miner_results.proxy_cost_usd). Reflects what the miner actually spent regardless of routing path.",
-            "trace_llm_cost_usd",
         ),
         (
             "eirel_owner_scorecard_tool_cost_usd",
@@ -559,11 +541,22 @@ def _format_scorecard_metrics(rows: list[dict[str, Any]]) -> str:
             "1 if the miner was the published winner of the run, 0 otherwise.",
             "is_winner",
         ),
+        (
+            "eirel_owner_scorecard_is_latest_run",
+            "Marker emitted only for the latest run of each family (value=1, no row when not latest). Use to pin dashboards to the latest run without hand-selecting a run_id.",
+            "is_latest_run",
+        ),
     ]
     for metric_name, help_text, row_key in metric_defs:
         lines.append(f"# HELP {metric_name} {help_text}")
         lines.append(f"# TYPE {metric_name} gauge")
         for row in rows:
+            # ``is_latest_run`` is emitted only for the latest (run, family)
+            # pair so Grafana's label_values() macro — which is a label
+            # selector, not a PromQL expression — can pin a variable to the
+            # latest run with a plain ``{family="X"}`` match.
+            if row_key == "is_latest_run" and not row["is_latest_run"]:
+                continue
             value = row[row_key]
             formatted = f"{value:.6f}" if isinstance(value, float) else str(value)
             lines.append(

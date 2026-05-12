@@ -281,7 +281,6 @@ class FamilyEpochScore(BaseModel):
     benchmark_version: str
     rubric_version: str
     miner_scores: dict[str, float] = Field(default_factory=dict)
-    normalized_weights: dict[str, float] = Field(default_factory=dict)
     judge_outputs: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     miner_responses: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)

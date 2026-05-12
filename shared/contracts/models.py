@@ -196,7 +196,6 @@ class FamilyScoreSnapshot(BaseModel):
     family_id: FamilyId
     evaluation_plane: Literal["family_protocol"] = "family_protocol"
     miner_scores: dict[str, float] = Field(default_factory=dict)
-    normalized_weights: dict[str, float] = Field(default_factory=dict)
     query_volume_share: float = Field(default=0.0, ge=0.0)
     rubric_version: str
 

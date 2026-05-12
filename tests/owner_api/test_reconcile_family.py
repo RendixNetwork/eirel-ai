@@ -128,7 +128,6 @@ def _add_score_record(session, *, deployment: ManagedDeployment, run_id: str = "
         miner_hotkey=deployment.miner_hotkey,
         deployment_revision=deployment.deployment_revision,
         raw_score=0.8,
-        normalized_score=0.8,
         is_eligible=True,
     )
     session.add(record)

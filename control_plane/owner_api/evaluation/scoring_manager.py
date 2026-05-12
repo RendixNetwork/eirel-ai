@@ -14,7 +14,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from shared.common.models import (
@@ -25,6 +25,7 @@ from shared.common.models import (
     ManagedDeployment,
     ManagedMinerSubmission,
     RunFamilyResult,
+    TaskMinerResult,
     WorkflowEpisodeRecord,
 )
 from eirel.groups import ensure_family_id
@@ -269,7 +270,6 @@ class ScoringManager:
             "miner_hotkey": row.miner_hotkey,
             "created_at": row.created_at.isoformat(),
             "raw_score": float(row.raw_score),
-            "normalized_score": float(row.normalized_score),
             "family_capability_score": float(
                 metadata.get("family_capability_score", row.raw_score) or row.raw_score
             ),
@@ -961,11 +961,30 @@ class ScoringManager:
         record: DeploymentScoreRecord,
         deployment_id: str,
         run_budget_usd: float,
+        session: Session | None = None,
     ) -> None:
         cost_data = self.fetch_deployment_cost(deployment_id)
         record.run_budget_usd = run_budget_usd
-        record.run_cost_usd_used = float(cost_data.get("cost_usd_used", 0.0))
-        record.llm_cost_usd = float(cost_data.get("llm_cost_usd", 0.0))
+        # Tool-side spend, run-budget consumption, and rejection counts live
+        # on the deployment-sticky ``miner-<deployment_id>`` proxy ledger
+        # because tool services charge against the env-var job_id.
         record.tool_cost_usd = float(cost_data.get("tool_cost_usd", 0.0))
         record.cost_rejection_count = int(cost_data.get("cost_rejections", 0))
+        # LLM spend is tagged per-task by owner-api's ``_build_cost_tag``
+        # (X-Eirel-Job-Id: task-eval=<turn>;deployment=<id>) and recorded
+        # on each ``task_miner_results`` row as ``proxy_cost_usd``. The
+        # deployment-sticky ledger does not see those calls, so summing
+        # the per-task rows is the authoritative LLM total.
+        llm_cost = 0.0
+        if session is not None:
+            llm_cost = float(
+                session.execute(
+                    select(func.coalesce(func.sum(TaskMinerResult.proxy_cost_usd), 0.0))
+                    .where(TaskMinerResult.run_id == record.run_id)
+                    .where(TaskMinerResult.family_id == record.family_id)
+                    .where(TaskMinerResult.miner_hotkey == record.miner_hotkey)
+                ).scalar_one()
+            )
+        record.llm_cost_usd = llm_cost
+        record.run_cost_usd_used = record.llm_cost_usd + record.tool_cost_usd
 

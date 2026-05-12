@@ -454,7 +454,6 @@ def _collect_single_run_rows(
             {
                 "miner_hotkey": r.miner_hotkey,
                 "raw_score": float(r.raw_score or 0.0),
-                "normalized_score": None,
                 "is_running": True,
                 "submission_id": submission_by_hk.get(r.miner_hotkey),
             }
@@ -472,7 +471,6 @@ def _collect_single_run_rows(
         {
             "miner_hotkey": rec.miner_hotkey,
             "raw_score": float(rec.raw_score),
-            "normalized_score": float(rec.normalized_score),
             "is_running": False,
             "submission_id": rec.submission_id,
         }
@@ -641,7 +639,6 @@ def fetch_leaderboard(
                 agent_version=meta.get("agent_version"),
                 artifact_sha256=meta.get("artifact_sha256"),
                 raw_score=row["raw_score"],
-                normalized_score=row.get("normalized_score"),
                 is_serving_winner=(hk == winner_hk),
                 is_running=bool(row.get("is_running")),
                 trend=_compute_trend(row["rank"], prev),
@@ -742,7 +739,6 @@ def fetch_miner_profile(
     latest = _latest_run(session)
     current_rank: int | None = None
     current_score: float | None = None
-    current_weight: float | None = None
     latest_metrics = MinerMetrics()
 
     if latest is not None:
@@ -752,7 +748,6 @@ def fetch_miner_profile(
             if r["miner_hotkey"] == hotkey:
                 current_rank = r["rank"]
                 current_score = r["raw_score"]
-                current_weight = r.get("normalized_score")
                 break
 
         m = _metrics_for_tasks(
@@ -798,7 +793,6 @@ def fetch_miner_profile(
         family_id=family_id,
         current_rank=current_rank,
         current_score=current_score,
-        current_weight=current_weight,
         lifetime_wins=int(lifetime_wins),
         epochs_participated=int(epochs_participated),
         first_seen_at=first_seen.isoformat() if first_seen else None,
@@ -869,7 +863,6 @@ def fetch_miner_runs(
                     closed_at=latest.closed_at.isoformat() if latest.closed_at else None,
                     rank=rank,
                     raw_score=raw,
-                    normalized_score=None,
                     was_winner=False,
                 )
             )
@@ -879,7 +872,7 @@ def fetch_miner_runs(
             select(func.count(DeploymentScoreRecord.id)).where(
                 DeploymentScoreRecord.run_id == run.id,
                 DeploymentScoreRecord.family_id == family_id,
-                DeploymentScoreRecord.normalized_score > rec.normalized_score,
+                DeploymentScoreRecord.raw_score > rec.raw_score,
             )
         ) or 0
         rank = int(higher) + 1
@@ -892,7 +885,6 @@ def fetch_miner_runs(
                 closed_at=run.closed_at.isoformat() if run.closed_at else None,
                 rank=rank,
                 raw_score=float(rec.raw_score),
-                normalized_score=float(rec.normalized_score),
                 was_winner=(winners_by_run.get(run.id) == hotkey),
             )
         )

@@ -118,7 +118,6 @@ class LeaderboardEntry(BaseModel):
     # subnet is running an unmodified copy of what they uploaded.
     artifact_sha256: str | None = None
     raw_score: float
-    normalized_score: float | None
     is_serving_winner: bool
     is_running: bool = False
     trend: TrendLiteral
@@ -183,7 +182,6 @@ class MinerProfileResponse(BaseModel):
     family_id: str
     current_rank: int | None
     current_score: float | None
-    current_weight: float | None
     lifetime_wins: int
     epochs_participated: int
     first_seen_at: str | None
@@ -198,7 +196,6 @@ class MinerRunSummary(BaseModel):
     closed_at: str | None
     rank: int | None
     raw_score: float | None
-    normalized_score: float | None
     was_winner: bool
 
 

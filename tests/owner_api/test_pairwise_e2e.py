@@ -363,7 +363,7 @@ def test_e2e_claim_submit_aggregate(services):
         assert len(score_records) == 2
         good_record = next(r for r in score_records if r.miner_hotkey == "hk-good")
         bad_record = next(r for r in score_records if r.miner_hotkey == "hk-bad")
-        assert good_record.normalized_score > bad_record.normalized_score
+        assert good_record.raw_score > bad_record.raw_score
         assert good_record.metadata_json["mean_agreement"] == pytest.approx(1.0)
         assert bad_record.metadata_json["mean_agreement"] == pytest.approx(0.0)
 

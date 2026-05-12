@@ -41,7 +41,6 @@ async def score_family_epoch(
         benchmark_version=context.benchmark_version,
         rubric_version=context.rubric_version,
         miner_scores={miner.hotkey: 0.0 for miner in miners},
-        normalized_weights={},
         judge_outputs={},
         miner_responses={},
         metadata={"note": "general_chat scoring runs per-conversation in owner-api"},

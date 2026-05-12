@@ -33,17 +33,18 @@
       },
       {
         "name": "run_id",
-        "label": "Run",
+        "label": "Run (auto: latest)",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(eirel_owner_scorecard_raw_score{family=\"$family\"}, run_id)",
+        "query": "query_result(eirel_owner_scorecard_is_latest_run{family=\"$family\"})",
+        "regex": "/run_id=\"([^\"]+)\"/",
         "refresh": 1,
         "multi": false,
         "includeAll": false,
-        "sort": 7
+        "sort": 8
       }
     ]
   },
@@ -99,12 +100,6 @@
           "format": "table"
         },
         {
-          "refId": "NORM",
-          "expr": "eirel_owner_scorecard_normalized_score{family=\"$family\",run_id=\"$run_id\"}",
-          "instant": true,
-          "format": "table"
-        },
-        {
           "refId": "DONE",
           "expr": "eirel_owner_scorecard_tasks_completed{family=\"$family\",run_id=\"$run_id\"}",
           "instant": true,
@@ -119,13 +114,6 @@
         {
           "refId": "LLM",
           "expr": "eirel_owner_scorecard_llm_cost_usd{family=\"$family\",run_id=\"$run_id\"}",
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "refId": "TRACE_LLM",
-          "expr": "eirel_owner_scorecard_trace_llm_cost_usd{family=\"$family\",run_id=\"$run_id\"}",
-          "legendFormat": "",
           "instant": true,
           "format": "table"
         },
@@ -201,37 +189,27 @@
               "instance 5": true,
               "instance 6": true,
               "instance 7": true,
-              "instance 8": true,
-              "Time 9": true,
-              "family 9": true,
-              "run_id 9": true,
-              "__name__ 9": true,
-              "job 9": true,
-              "instance 9": true
+              "instance 8": true
             },
             "indexByName": {
               "hotkey": 0,
               "Value #RANK": 1,
               "Value #RAW": 2,
-              "Value #NORM": 3,
-              "Value #DONE": 4,
-              "Value #TOTAL": 5,
-              "Value #LLM": 6,
-              "Value #TRACE_LLM": 7,
-              "Value #TOOL": 8,
-              "Value #WIN": 9
+              "Value #DONE": 3,
+              "Value #TOTAL": 4,
+              "Value #LLM": 5,
+              "Value #TOOL": 6,
+              "Value #WIN": 7
             },
             "renameByName": {
               "hotkey": "Hotkey",
               "Value #RANK": "Rank",
               "Value #RAW": "Raw",
-              "Value #NORM": "Normalized",
               "Value #DONE": "Done",
               "Value #TOTAL": "Total",
-              "Value #LLM": "LLM (proxy) $",
+              "Value #LLM": "LLM $",
               "Value #TOOL": "Tool $",
-              "Value #WIN": "Winner",
-              "Value #TRACE_LLM": "LLM (trace) $"
+              "Value #WIN": "Winner"
             }
           }
         },
@@ -304,7 +282,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "Raw|Normalized"
+              "options": "Raw"
             },
             "properties": [
               {
@@ -335,7 +313,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Normalized score per miner (current + previous run)",
+      "title": "Raw score per miner (current + previous run)",
       "gridPos": {
         "h": 8,
         "w": 24,
@@ -349,7 +327,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "eirel_owner_scorecard_normalized_score{family=\"$family\"}",
+          "expr": "eirel_owner_scorecard_raw_score{family=\"$family\"}",
           "legendFormat": "{{hotkey}} \u00b7 {{run_id}}"
         }
       ],
@@ -450,7 +428,7 @@
     {
       "id": 4,
       "type": "bargauge",
-      "title": "Spend per miner (LLM proxy + LLM trace + Tool)",
+      "title": "Spend per miner (LLM + Tool)",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -466,12 +444,7 @@
           "refId": "LLM",
           "expr": "eirel_owner_scorecard_llm_cost_usd{family=\"$family\",run_id=\"$run_id\"}",
           "instant": true,
-          "legendFormat": "{{hotkey}} \u00b7 LLM (proxy)"
-        },
-        {
-          "refId": "TRACE_LLM",
-          "expr": "eirel_owner_scorecard_trace_llm_cost_usd{family=\"$family\",run_id=\"$run_id\"}",
-          "legendFormat": "{{hotkey}} \u00b7 LLM (trace)"
+          "legendFormat": "{{hotkey}} \u00b7 LLM"
         },
         {
           "refId": "TOOL",
