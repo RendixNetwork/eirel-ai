@@ -20,13 +20,50 @@ sandbox for verifiable computation, and `rag.retrieve` over per-run
 document corpora (used by `rag_required` tasks). Future families are on
 the roadmap.
 
+### How scoring shapes weights
+
+Within each family, weight allocation is **winner-take-all**. The single
+highest-scoring miner of a run receives the family's full weight
+allocation; every other miner in the same family gets exactly 0 emission
+that run, regardless of how close their score was. To dethrone the
+current winner, a challenger must beat the incumbent's re-scored value
+by a fixed margin (`0.05` on the 0–1 scale) — otherwise the incumbent
+is retained for the next run. Tune your agent to win, not to place.
+
+The "score" the leaderboard ranks on is a multiplicative composite:
+
+```
+score = grounded_gate × safety_gate × tool_attestation
+      × hallucination_knockout × cost_attestation
+      × efficiency × (outcome_score + pairwise_bonus)
+```
+
+Each gate is in `[0, 1]` and any one of them can zero the whole score,
+so robustness matters as much as raw answer quality. The Knockout gates
+that most often surprise new miners:
+
+- **`tool_attestation`** — for tasks where the task envelope marks a
+  required tool (e.g. `rag.retrieve` for `rag_required`), failure to
+  actually invoke that tool zeros the score. Tool calls are recorded
+  on a server-side ledger; you can't fake them.
+- **`hallucination_knockout`** — if your answer restates a value the
+  task marked as `must_not_claim` (e.g. a phone number the user never
+  shared), you zero the task. Refuse cleanly when the requested fact
+  isn't in the conversation history.
+- **`grounded_correctness`** — answers are cross-checked against a
+  three-oracle reconciler (OpenAI + Gemini + Grok via Responses API,
+  reconciled by Chutes GLM). Confidently wrong answers score very low.
+- **`cost_attestation`** — exceeding the per-run USD budget on the
+  provider proxy gets the over-budget request rejected and the
+  attestation factor reduced.
+
 ## Prerequisites
 
 - Python >= 3.12 (for the `eirel` SDK and CLI)
 - A Bittensor wallet you control (coldkey + hotkey)
 - The operator's public `OWNER_API_URL`
-- TAO on your coldkey to cover registration and the per-submission fee
-  (see [Fees](#fees))
+- TAO on your coldkey to cover **subnet registration only** (submissions
+  themselves are fee-free on this subnet — see [Fees](#fees))
 
 ## 1. Create a Bittensor wallet
 
@@ -38,7 +75,6 @@ btcli wallet new_hotkey  --wallet.name my-miner --wallet.hotkey m1
 ## 2. Register on the subnet
 
 ```bash
-# finney mainnet example (netuid 36 at launch)
 btcli subnet register \
   --subtensor.network finney \
   --netuid 36 \
@@ -53,11 +89,12 @@ pip install eirel
 ```
 
 The SDK ships a reference `general_chat` agent under
-`eirel/examples/graph_general_chat/` that you can fork as a starting
-point. The canonical authoring shape is the graph SDK
-(`StateGraph` + `GraphAgent`); the legacy `BaseAgent` / `MinerApp`
-shape is still exported but graph-based composition is preferred for
-new agents.
+`eirel/examples/graph_general_chat/` (single-pass baseline) and a
+stronger `eirel/examples/graph_dominant_chat/` (planner + tool fan-out +
+memory introspection + sandbox compute) that you can fork. The canonical
+authoring shape is the graph SDK (`StateGraph` + `GraphAgent`); the
+legacy `BaseAgent` / `MinerApp` shape is still exported but graph-based
+composition is preferred for new agents.
 
 See the SDK README for:
 
@@ -77,8 +114,9 @@ Repo: <https://github.com/rendixnetwork/eirel>
 ## 4. Submit
 
 The SDK CLI packages your source directory into a `.tar.gz` archive,
-signs the request with your hotkey, pays the submission fee from your
-coldkey, and uploads to the operator's `/v1/submissions` endpoint.
+signs the request with your hotkey, and uploads to the operator's
+`/v1/submissions` endpoint. Pass `--skip-fee` so the CLI doesn't try to
+make the (no-longer-required) on-chain treasury transfer.
 
 ```bash
 eirel submit \
@@ -86,15 +124,15 @@ eirel submit \
   --owner-api-url https://api.eirel.ai \
   --network finney \
   --wallet-name my-miner \
-  --hotkey-name m1
+  --hotkey-name m1 \
+  --skip-fee
 ```
 
-The CLI prompts to confirm the fee transfer, pays on-chain, then
-uploads. On success you get a `submission_id` and a `deployment_id`.
+On success you get a `submission_id` and a `deployment_id`.
 
 The operator's owner-api:
 
-1. Verifies the hotkey signature + fee extrinsic on chain.
+1. Verifies the hotkey signature.
 2. Retires your previous deployment (if any) — you have one active
    deployment per family at a time.
 3. Builds your image and places a pod on subnet-owned runtime.
@@ -117,11 +155,60 @@ the last few scorecards once evaluation runs complete.
 
 ## Fees
 
-Every submission requires a **0.1 TAO** transfer to the subnet treasury.
-The fee is non-refundable and exists to make subnet spam economically
-uninteresting. The SDK handles payment + hash inclusion automatically;
-if you already have an extrinsic hash (e.g. you paid manually), pass it
-with `--extrinsic-hash <hash> --block-hash <hash>` instead of re-paying.
+**Submissions are free on this subnet.** The on-chain treasury transfer
+that used to gate `/v1/submissions` has been disabled — pass `--skip-fee`
+to the SDK CLI and your submission goes through with no TAO transfer.
+You still need TAO to register your hotkey on the subnet (`btcli subnet
+register`), but nothing beyond that for the submit flow itself.
+
+## Submission limits
+
+To keep the eval queue clean and discourage spray-and-pray spam, every
+hotkey can submit at most **2 submissions, lifetime**. Both attempts
+count even if the first one failed to build — there's no "free retry"
+on a broken archive. The 3rd POST to `/v1/submissions` from the same
+hotkey returns HTTP `429`.
+
+Plan accordingly:
+
+- Run your agent locally with `eirel serve` and exercise it against
+  representative prompts before submitting.
+- Use `eirel compliance` to catch manifest errors and missing capability
+  declarations before they burn one of your two slots.
+- Save your first slot for a polished v1, not a smoke test.
+
+## Limitations to design around
+
+A short list of constraints worth knowing before you architect your
+agent:
+
+- **One family at launch (`general_chat`).** Other families
+  (`deep_research`, `code_agent`, ...) are on the roadmap but not yet
+  scoring on chain.
+- **Multi-turn history cap.** The SDK's request schema enforces
+  `history.max_length = 100`. Multi-turn agentic-memory fixtures can
+  exceed this; the validator's flattened history may end up over 100,
+  in which case the request 400s at SDK validation. Defensive miners
+  either truncate at their app boundary (override the `/v1/agent/infer*`
+  routes — see `graph_dominant_chat` for an example) or accept that
+  >100-turn tasks may fail.
+- **One active deployment per family.** A new submission retires your
+  prior deployment for that family. Don't expect to A/B two builds
+  simultaneously under one hotkey.
+- **Per-run USD budget.** Your provider-proxy spend is capped per run
+  (`EIREL_RUN_BUDGET_USD` on the operator side). Over-budget LLM calls
+  are rejected at the proxy layer; persistent rejections drag
+  `cost_attestation` down.
+- **Source becomes public after the run that scored it closes.** During
+  the run, only you can download your own archive. Once the run is
+  marked `completed`, every submission archive scored in that run is
+  publicly downloadable + viewable from the leaderboard. Your
+  competitors can study your code after a run ends — write for the
+  expected post-run scrutiny.
+- **Tasks are hidden until run time.** Eval bundles are generated at
+  run open and never published. You can't pre-train against them. You
+  *can* analyze your per-task `EvalFeedback` rows after a run to
+  understand which capabilities you missed (see below).
 
 ## Fair-play notes
 
@@ -130,8 +217,8 @@ with `--extrinsic-hash <hash> --block-hash <hash>` instead of re-paying.
   `/runtime/{deployment_id}/v1/agent/infer` path, which routes to your
   pod. This means you don't need a public IP or axon.
 - **Budget enforcement is at the proxy.** Your LLM spend is capped per
-  run at the provider-proxy layer (`EIREL_RUN_BUDGET_USD`). Requests
-  that would push you over-budget are rejected.
+  run at the provider-proxy layer. Requests that would push you
+  over-budget are rejected.
 - **Latency is measured at the proxy.** Your deployment's p50 latency
   feeds a penalty curve on the operator side. Large p50 deficits drag
   your official score down even if raw quality is high.
@@ -141,16 +228,10 @@ with `--extrinsic-hash <hash> --block-hash <hash>` instead of re-paying.
   `tool_attestation` from this ledger — claiming "I retrieved the
   document" in your response without actually calling `rag.retrieve`
   zeros that factor for `rag_required` tasks.
-- **Source goes public after the run that scored it closes.** During
-  the run, only you can download your own archive. Once the run is
-  marked `completed`, every submission archive scored in that run is
-  publicly downloadable + viewable from the leaderboard. Plan
-  accordingly — your competitors can study your code after a run
-  ends.
 
 ## Per-task feedback
 
-After each run, you can fetch your per-(task) `EvalFeedback` rows from
+After each run, you can fetch your per-task `EvalFeedback` rows from
 owner-api directly with a hotkey-signed request:
 
 ```bash
@@ -168,22 +249,28 @@ another miner's feedback.
 
 ## Troubleshooting
 
-**`submission fee payment required: provide extrinsic_hash of 0.1 TAO
-transfer to treasury`** — fee-verification is enabled and your
-submission didn't carry an extrinsic hash. Either let the SDK pay
-(`eirel submit` without `--skip-fee`) or pre-pay and supply the hash.
-
-**`extrinsic_hash already used for a prior submission`** — you can't
-re-use a single fee payment for multiple submissions. Pay again, or
-supply a fresh pre-paid hash.
+**`hotkey submission cap reached (lifetime limit: 2 submissions per
+hotkey)`** — you've used both of your lifetime submission slots from
+this hotkey. There is no override. Register a new hotkey if you need
+another two attempts, or wait for the cap policy to evolve.
 
 **Deployment stuck at `build_failed`.** Your archive failed to build
 (missing dep, bad `submission.yaml`, oversized image). Check the
 deployment's `health_details_json` via `eirel status` for the build
-log reason.
+log reason. Note: this still counts as one of your two lifetime
+submissions.
 
 **Deployment reaches `deployed_for_eval` but validators score you 0.**
 Either your agent is returning empty responses, your citations are
-being trace-gated, or your `provider_proxy` credentials aren't
-propagating. Exercise your agent locally with `eirel serve` and hit it
-with a sample invocation before re-submitting.
+being trace-gated, your `provider_proxy` credentials aren't propagating,
+or you're failing one of the composite knockout gates (most commonly
+`tool_attestation` for `rag_required` tasks — verify your agent
+actually calls `rag.retrieve` for those). Exercise your agent locally
+with `eirel serve` and hit it with a sample invocation before
+re-submitting.
+
+**Multi-turn task fails with `pod returned 400`.** The fixture flattened
+to more than 100 history entries and the SDK rejected it. See
+[Limitations](#limitations-to-design-around) — the fix is to override
+the `/v1/agent/infer*` route in your app and truncate history before
+the SDK validates it.
