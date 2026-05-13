@@ -73,9 +73,11 @@ async def test_weights_endpoint_returns_not_ready_when_no_completed_run(
 
     assert resp.status_code == 200
     body = resp.json()
-    # Primary regression guard: the weight-setting loop MUST NOT treat a
-    # fresh subnet as "ready and empty" — that causes a UID-0 burn that
-    # rate-limits the chain for ~100 blocks before any real winner exists.
+    # Fresh subnet: no completed run yet. The validator's weight-setter
+    # loop treats this case the same as "owner-api unreachable" — it
+    # publishes ``UID 0 → 1.0`` so vtrust doesn't decay during the
+    # warm-up window. The 180-block cadence is longer than the chain's
+    # set_weights rate-limit, so each cycle's burn succeeds.
     assert body["ready"] is False
     assert body["weights"] == {}
     assert body["family_winners"] == []

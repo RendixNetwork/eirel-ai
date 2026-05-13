@@ -738,19 +738,20 @@ async def run_weight_setting_loop() -> None:
                 )
                 owner_api_down = True
 
-            if owner_api_down:
+            if owner_api_down or not data.get("ready"):
+                # Either owner-api is down or no completed run exists yet
+                # (validator was just deployed, or the first run hasn't
+                # finished). In both cases the burn path below publishes
+                # [UID 0 → 1.0] so the chain keeps seeing weights from us
+                # and vtrust doesn't decay during the warm-up window.
+                if not owner_api_down:
+                    logger.info(
+                        "weight-setting: no completed run yet, burning to UID 0",
+                    )
                 current_run_id = None
                 weights_by_hotkey: dict[str, float] = {}
                 family_winners: list[dict[str, Any]] = []
             else:
-                if not data.get("ready"):
-                    # No completed run yet; nothing to publish. Skipping here
-                    # is fine because the chain hasn't started expecting
-                    # weights from us.
-                    logger.info("weight-setting: no weights ready, sleeping")
-                    await asyncio.sleep(_WEIGHT_SET_INTERVAL_SECONDS)
-                    continue
-
                 current_run_id = data.get("run_id")
                 # Bittensor expects set_weights every ~180 blocks regardless
                 # of whether the target run id or winner set repeats — missing
