@@ -327,7 +327,12 @@ async def test_ensure_runtime_rejects_archive_over_900kib(monkeypatch):
     mgr = _make_manager(cluster)
     _patch_time(monkeypatch)
 
-    large_content = b"x" * (901 * 1024)
+    # Incompressible payload: the ConfigMap stores the *gzipped* archive,
+    # so the size gate is on the compressed bytes. Random data won't
+    # shrink, so this genuinely overflows a ConfigMap.
+    import os
+
+    large_content = os.urandom(2 * 1024 * 1024)
     archive = _make_archive({"big_file.bin": large_content})
 
     with pytest.raises(RuntimeManagerError, match="too large"):

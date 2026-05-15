@@ -68,7 +68,15 @@ def _run_migrations_unlocked(engine: Engine) -> list[str]:
                     VALUES (:version, :description)
                     """
                 ),
-                {"version": migration.version, "description": migration.description},
+                {
+                    "version": migration.version,
+                    # schema_migrations.description is VARCHAR(255); a
+                    # longer string would raise StringDataRightTruncation
+                    # AFTER apply() already ran, wedging startup in a
+                    # crash loop. Truncate defensively — this column is
+                    # human-readable bookkeeping, not load-bearing.
+                    "description": (migration.description or "")[:255],
+                },
             )
         executed.append(migration.version)
     return executed
@@ -234,6 +242,32 @@ def _migration_validator_cost_tracking(engine: Engine) -> None:
         )
 
 
+def _migration_oracle_baseline_ttl_cache(engine: Engine) -> None:
+    """Add ``task_evaluations.baseline_cached_at`` for the 12h oracle
+    baseline TTL cache used by capacity-aware pool evaluation.
+
+    Skipped on fresh databases — ``Base.metadata.create_all`` runs after
+    migrations and creates the column from the model. Only ALTERs
+    pre-existing DBs.
+    """
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if "task_evaluations" not in inspector.get_table_names():
+        return
+    existing_columns = {
+        col["name"] for col in inspector.get_columns("task_evaluations")
+    }
+    if "baseline_cached_at" in existing_columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE task_evaluations "
+                "ADD COLUMN baseline_cached_at TIMESTAMP WITHOUT TIME ZONE"
+            )
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="initial_schema",
@@ -272,5 +306,13 @@ MIGRATIONS: tuple[Migration, ...] = (
             "the validator-costs dashboard endpoint."
         ),
         apply=_migration_validator_cost_tracking,
+    ),
+    Migration(
+        version="oracle_baseline_ttl_cache",
+        description=(
+            "Add task_evaluations.baseline_cached_at for the 12h oracle "
+            "baseline TTL cache (capacity-aware pool eval)."
+        ),
+        apply=_migration_oracle_baseline_ttl_cache,
     ),
 )

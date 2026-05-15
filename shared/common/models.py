@@ -666,6 +666,14 @@ class TaskEvaluation(Base):
     oracle_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    # When the oracle baseline in ``baseline_response_json`` was first
+    # computed. Drives the 12h TTL: within the window every pool cycle
+    # that re-claims this task reuses the cached baseline (flat oracle
+    # cost + identical baseline → batch-independent scoring); past it
+    # the next claim recomputes and resets this stamp.
+    baseline_cached_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
 

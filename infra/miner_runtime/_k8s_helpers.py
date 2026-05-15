@@ -81,6 +81,22 @@ class DeploymentStatus:
 
 _CONFIGMAP_MAX_BYTES = 900 * 1024
 
+# Single ConfigMap key holding the whole cleaned submission as a gzipped
+# tar. We deliberately do NOT map one file → one ConfigMap key: k8s
+# ConfigMap keys must match ``[-._a-zA-Z0-9]+`` and are length-capped, so
+# any submission with subdirectories (``pkg/mod.py``), unusual characters,
+# or deep paths makes the ConfigMap API reject the whole object with 422.
+# One opaque archive key sidesteps every key-charset / key-length / nested
+# -path failure mode permanently; an init container unpacks it into a
+# shared emptyDir before the runtime container starts.
+_CODE_ARCHIVE_KEY = "code.tar.gz"
+# Where the ConfigMap (archive) is mounted, and where the init container
+# unpacks it for the runtime container to import from.
+_CODE_ARCHIVE_MOUNT = "/submission-archive"
+_CODE_EXTRACT_MOUNT = "/submission"
+_CODE_EXTRACT_VOLUME = "submission-code-extracted"
+_CODE_ARCHIVE_VOLUME = "submission-code"
+
 _ARCHIVE_EXCLUDE_DIRS = {"__pycache__", ".git", ".venv", "venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules"}
 _ARCHIVE_EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".pyd", ".swp", ".swo"}
 _ARCHIVE_EXCLUDE_NAMES = {".DS_Store", "Thumbs.db"}
@@ -121,14 +137,47 @@ def _extract_archive_to_dict(archive_bytes: bytes) -> dict[str, bytes]:
     return files
 
 
-def _check_configmap_size(files: dict[str, bytes]) -> None:
-    total = sum(len(v) for v in files.values())
-    if total > _CONFIGMAP_MAX_BYTES:
+def _repack_clean_archive(files: dict[str, bytes]) -> bytes:
+    """Re-tar the cleaned file set into one deterministic gzipped archive.
+
+    ``files`` has already been path-validated and junk-filtered by
+    :func:`_extract_archive_to_dict`. We repack (rather than forwarding the
+    miner's original tar) so the archive shipped to the pod contains
+    exactly the sanitized tree — no ``__pycache__``/``.git`` bloat, no
+    path-escape members, no preserved ownership/mtime. Deterministic
+    output (sorted names, zeroed mtime/uid/gid) keeps the ConfigMap stable
+    across re-deploys so unchanged code doesn't churn the object.
+    """
+    raw = io.BytesIO()
+    # mtime=0 → reproducible gzip header; sorted names → stable tar order.
+    with tarfile.open(fileobj=raw, mode="w:gz", compresslevel=9) as tar:
+        for path in sorted(files):
+            data = files[path]
+            info = tarfile.TarInfo(name=path)
+            info.size = len(data)
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
+def _check_archive_configmap_size(archive_bytes: bytes) -> None:
+    """Reject archives that won't fit in a ConfigMap.
+
+    etcd stores the base64 of ``binaryData`` values, so the on-wire size
+    is ~4/3 the raw archive. Bound the base64 size, not the raw size, so
+    the check matches what the API server actually enforces (~1 MiB).
+    """
+    encoded = (len(archive_bytes) + 2) // 3 * 4
+    if encoded > _CONFIGMAP_MAX_BYTES:
         from .runtime_manager import RuntimeManagerError
 
         raise RuntimeManagerError(
-            f"archive too large for ConfigMap: {total} bytes "
-            f"(limit {_CONFIGMAP_MAX_BYTES} bytes)"
+            f"submission archive too large for ConfigMap: {encoded} bytes "
+            f"base64 (limit {_CONFIGMAP_MAX_BYTES} bytes); raw archive "
+            f"{len(archive_bytes)} bytes"
         )
 
 
@@ -149,8 +198,10 @@ def _build_code_configmap(
     *,
     name: str,
     submission_id: str,
-    files: dict[str, bytes],
+    archive_bytes: bytes,
 ) -> dict[str, Any]:
+    """One ConfigMap, one key (``code.tar.gz``) holding the whole archive.
+    """
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -159,8 +210,7 @@ def _build_code_configmap(
             "labels": {"eirel.dev/submission-id": submission_id},
         },
         "binaryData": {
-            path: base64.b64encode(content).decode()
-            for path, content in files.items()
+            _CODE_ARCHIVE_KEY: base64.b64encode(archive_bytes).decode(),
         },
     }
 

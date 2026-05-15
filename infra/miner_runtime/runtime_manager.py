@@ -11,13 +11,19 @@ from typing import Any
 from ._k8s_helpers import (
     DeploymentStatus,
     DeploymentStatusCode,
+    _CODE_ARCHIVE_KEY,
+    _CODE_ARCHIVE_MOUNT,
+    _CODE_ARCHIVE_VOLUME,
+    _CODE_EXTRACT_MOUNT,
+    _CODE_EXTRACT_VOLUME,
     _build_code_configmap,
     _build_k8s_deployment,
     _build_k8s_service,
     _build_network_policy,
-    _check_configmap_size,
+    _check_archive_configmap_size,
     _create_or_replace,
     _extract_archive_to_dict,
+    _repack_clean_archive,
 )
 
 logger = logging.getLogger(__name__)
@@ -330,19 +336,59 @@ def _deployment_manifest_common(
                     },
                 ]
             )
-    if code_configmap_name is not None:
-        container["volumeMounts"] = [
-            {"name": "submission-code", "mountPath": "/submission"},
-        ]
     pod_spec: dict[str, Any] = {
         "containers": [container],
         "restartPolicy": "Always",
     }
     if code_configmap_name is not None:
+        # The runtime container imports code from an emptyDir
+        # (``/submission``) that an init container fills by unpacking the
+        # single-key archive ConfigMap. The runtime container never sees
+        # the raw ConfigMap, so the legacy one-file-per-key layout (and
+        # its 422 key-charset failures) is gone for good.
+        container["volumeMounts"] = [
+            {"name": _CODE_EXTRACT_VOLUME, "mountPath": _CODE_EXTRACT_MOUNT},
+        ]
+        # Python 3.12 ``tarfile`` ``data`` filter: blocks path traversal,
+        # absolute paths, links escaping the tree, and device/special
+        # files — safe extraction of an untrusted miner archive. owner-api
+        # also validates the archive at build time (defense in depth).
+        extract_script = (
+            "import tarfile, pathlib; "
+            f"dest = pathlib.Path({_CODE_EXTRACT_MOUNT!r}); "
+            "dest.mkdir(parents=True, exist_ok=True); "
+            "tar = tarfile.open("
+            f"{_CODE_ARCHIVE_MOUNT!r} + '/' + {_CODE_ARCHIVE_KEY!r}); "
+            "tar.extractall(dest, filter='data'); "
+            "tar.close()"
+        )
+        pod_spec["initContainers"] = [
+            {
+                "name": "extract-submission-code",
+                "image": artifact_url,
+                "imagePullPolicy": "Always",
+                "command": ["python", "-c", extract_script],
+                "volumeMounts": [
+                    {
+                        "name": _CODE_ARCHIVE_VOLUME,
+                        "mountPath": _CODE_ARCHIVE_MOUNT,
+                        "readOnly": True,
+                    },
+                    {
+                        "name": _CODE_EXTRACT_VOLUME,
+                        "mountPath": _CODE_EXTRACT_MOUNT,
+                    },
+                ],
+            }
+        ]
         pod_spec["volumes"] = [
             {
-                "name": "submission-code",
+                "name": _CODE_ARCHIVE_VOLUME,
                 "configMap": {"name": code_configmap_name},
+            },
+            {
+                "name": _CODE_EXTRACT_VOLUME,
+                "emptyDir": {},
             },
         ]
     pod_spec["nodeSelector"] = {
@@ -1035,13 +1081,18 @@ class KubernetesMinerRuntimeManager(MinerRuntimeManager):
             or "/healthz"
         )
 
+        # Validate + junk-filter (raises on path escape), then repack the
+        # cleaned tree into one deterministic archive. The pod's init
+        # container unpacks this single key, so nested paths and odd
+        # filenames can never break ConfigMap creation again.
         code_files = _extract_archive_to_dict(archive_bytes)
-        _check_configmap_size(code_files)
+        clean_archive = _repack_clean_archive(code_files)
+        _check_archive_configmap_size(clean_archive)
 
         cm_body = _build_code_configmap(
             name=f"{dep_name}-code",
             submission_id=submission_id,
-            files=code_files,
+            archive_bytes=clean_archive,
         )
         try:
             await _create_or_replace(

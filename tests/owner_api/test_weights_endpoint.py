@@ -4,16 +4,7 @@ from datetime import timedelta
 
 from control_plane.owner_api.app import app
 from control_plane.owner_api._helpers import utcnow
-from shared.common.models import EvaluationRun, RunFamilyResult, ValidatorRecord
-from tests.conftest import signed_headers
-
-
-def _register_validator(hotkey: str) -> None:
-    services = app.state.services
-    with services.db.sessionmaker() as session:
-        if session.get(ValidatorRecord, hotkey) is None:
-            session.add(ValidatorRecord(hotkey=hotkey, uid=1))
-            session.commit()
+from shared.common.models import EvaluationRun, RunFamilyResult
 
 
 def _make_run(run_id: str, *, sequence: int, status: str) -> None:
@@ -62,14 +53,8 @@ def _make_family_result(
         session.commit()
 
 
-async def test_weights_endpoint_returns_not_ready_when_no_completed_run(
-    client, identities
-):
-    signer = identities["validator-1"]["signer"]
-    _register_validator(signer.hotkey)
-
-    hdrs = signed_headers(signer, method="GET", path="/v1/weights", body=b"")
-    resp = await client.get("/v1/weights", headers=hdrs)
+async def test_weights_endpoint_returns_not_ready_when_no_completed_run(client):
+    resp = await client.get("/v1/weights")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -86,8 +71,6 @@ async def test_weights_endpoint_returns_not_ready_when_no_completed_run(
 async def test_weights_endpoint_returns_winner_weights_when_run_completed(
     client, identities
 ):
-    signer = identities["validator-1"]["signer"]
-    _register_validator(signer.hotkey)
     miner_hotkey = identities["miner"]["signer"].hotkey
 
     _make_run("run-weights-1", sequence=1, status="completed")
@@ -99,8 +82,7 @@ async def test_weights_endpoint_returns_winner_weights_when_run_completed(
         best_raw_score=0.75,
     )
 
-    hdrs = signed_headers(signer, method="GET", path="/v1/weights", body=b"")
-    resp = await client.get("/v1/weights", headers=hdrs)
+    resp = await client.get("/v1/weights")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -115,11 +97,8 @@ async def test_weights_endpoint_returns_winner_weights_when_run_completed(
 
 
 async def test_weights_endpoint_returns_empty_winner_when_family_has_no_winner(
-    client, identities
+    client,
 ):
-    signer = identities["validator-1"]["signer"]
-    _register_validator(signer.hotkey)
-
     _make_run("run-weights-2", sequence=2, status="completed")
     _make_family_result(
         "run-weights-2",
@@ -128,8 +107,7 @@ async def test_weights_endpoint_returns_empty_winner_when_family_has_no_winner(
         winner_hotkey=None,
     )
 
-    hdrs = signed_headers(signer, method="GET", path="/v1/weights", body=b"")
-    resp = await client.get("/v1/weights", headers=hdrs)
+    resp = await client.get("/v1/weights")
 
     assert resp.status_code == 200
     body = resp.json()

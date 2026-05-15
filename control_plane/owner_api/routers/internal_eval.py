@@ -35,6 +35,7 @@ read path.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -53,6 +54,15 @@ from shared.common.models import EvalFeedback, OrchestratorToolCallLog
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["internal_eval"])
+
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def eval_feedback_enabled() -> bool:
+    """Return True iff the EvalFeedback subsystem is enabled.
+    """
+    return os.getenv("EIREL_EVAL_FEEDBACK_ENABLED", "1").strip().lower() in _TRUTHY
 
 
 class ToolCallLogWriteRequest(BaseModel):
@@ -226,6 +236,11 @@ async def read_eval_feedback(
     callers cannot read another miner's feedback by passing a different
     hotkey in a query param. No proxy / no internal token.
     """
+    if not eval_feedback_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="eval feedback is temporarily disabled",
+        )
     services: ManagedOwnerServices = request.app.state.services
     with services.db.sessionmaker() as session:
         rows = list(
