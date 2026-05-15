@@ -28,6 +28,12 @@ from eirel.groups import ensure_active_family_id
 
 from control_plane.owner_api._helpers import _strip_sensitive_task_metadata
 
+# Oracle baseline cache lifetime. Within this window every pool cycle
+# that re-claims a task reuses the frozen baseline (flat oracle cost +
+# batch-independent scoring); past it the next claim recomputes and
+# resets the first-compute stamp. Confirmed product decision: 12h.
+_ORACLE_BASELINE_TTL = timedelta(hours=12)
+
 
 def _opt_float(value: Any) -> float | None:
     """Coerce numeric scores to float; preserve ``None`` for N/A dimensions."""
@@ -54,6 +60,11 @@ def _upsert_eval_feedback(
     unique constraint. Caller has already verified ``eval_outcome`` is
     present in ``judge_meta``.
     """
+    from control_plane.owner_api.routers.internal_eval import (
+        eval_feedback_enabled,
+    )
+    if not eval_feedback_enabled():
+        return
     knockout_reasons = judge_meta.get("eval_knockout_reasons")
     if not isinstance(knockout_reasons, list):
         knockout_reasons = []
@@ -345,8 +356,23 @@ class EvaluationTaskManager:
                 "remaining_task_count": -1,
             }
 
-        task.baseline_response_json = baseline_response
-        task.oracle_cost_usd = max(0.0, float(oracle_cost_usd or 0.0))
+        # Oracle baseline 12h TTL. Keep the first-computed baseline (and
+        # its cost + first-compute stamp) for the whole TTL window so
+        # every pool cycle that re-claims this task is judged against an
+        # identical baseline and the oracle is billed once. Only accept
+        # (and re-stamp) a freshly computed baseline when the cache is
+        # absent or expired — that's also the only case the validator
+        # actually computes one (see build_claim_items / engine.py).
+        cached_at = task.baseline_cached_at
+        cache_fresh = (
+            cached_at is not None
+            and task.baseline_response_json is not None
+            and (now - cached_at) < _ORACLE_BASELINE_TTL
+        )
+        if not cache_fresh and baseline_response is not None:
+            task.baseline_response_json = baseline_response
+            task.oracle_cost_usd = max(0.0, float(oracle_cost_usd or 0.0))
+            task.baseline_cached_at = now
         task.status = "evaluated"
         task.evaluated_at = now
         task.updated_at = now
@@ -427,13 +453,55 @@ class EvaluationTaskManager:
         session.flush()
 
         remaining = self._remaining_tasks(session, task)
-        family_complete = remaining == 0
-        if family_complete:
-            self._on_family_evaluation_complete(
-                session,
-                run_id=task.run_id,
-                family_id=task.family_id,
-            )
+        family_complete = False
+        if remaining == 0:
+            # All tasks evaluated against the *current* pool batch. Under
+            # continuous-pool eval that's not run completion — other
+            # eligible miners still owe every task. Re-arm the tasks so
+            # the next batch can claim them; the claim-time filter sends
+            # each re-armed task only to not-yet-scored miners, and the
+            # 12h baseline cache means the oracle isn't re-billed. The
+            # run is finished only once no eligible-not-done member
+            # remains (pool fully drained).
+            #
+            # If pool eligibility can't be computed (degraded owner /
+            # transient error), fall back to the legacy "complete when
+            # all tasks evaluated" semantics so submission never wedges.
+            try:
+                pool = self._owner.pool_keep_deployment_ids(
+                    session, family_id=task.family_id, capacity_k=1_000_000,
+                )
+                eligible_total = int(pool["eligible_total"])
+            except Exception as exc:  # noqa: BLE001 — never wedge submit
+                logger.warning(
+                    "pool eligibility check failed (%s); finalizing on "
+                    "all-tasks-evaluated (legacy behavior)", exc,
+                )
+                eligible_total = 0
+            if eligible_total > 0:
+                session.execute(
+                    update(TaskEvaluation)
+                    .where(TaskEvaluation.run_id == task.run_id)
+                    .where(TaskEvaluation.family_id == task.family_id)
+                    .where(TaskEvaluation.status == "evaluated")
+                    .values(
+                        status="pending",
+                        claimed_by_validator=None,
+                        claimed_at=None,
+                        claim_expires_at=None,
+                        claim_attempt_count=0,
+                        evaluated_at=None,
+                        updated_at=now,
+                    )
+                )
+                session.flush()
+            else:
+                family_complete = True
+                self._on_family_evaluation_complete(
+                    session,
+                    run_id=task.run_id,
+                    family_id=task.family_id,
+                )
 
         return {
             "status": "accepted",
@@ -834,7 +902,22 @@ class EvaluationTaskManager:
         run_id: str,
         family_id: str,
     ) -> list[dict[str, Any]]:
-        """Package claimed tasks with task payload + miner fan-out list."""
+        """Package claimed tasks with task payload + miner fan-out list.
+
+        Per-task miner list excludes any hotkey that already has a
+        TaskMinerResult row for that ``(run_id, task_id)`` — so a miner
+        drops out of fanout the instant it's fully scored, which is the
+        signal the pool scheduler uses to recycle its slot. Under
+        capacity-aware continuous-pool evaluation the validator thus
+        only ever judges the live K-pod batch, and re-judging a reset
+        task never overwrites already-scored miners.
+
+        When a task's oracle baseline is cached and within the 12h TTL,
+        it's attached as ``cached_baseline`` so the validator skips
+        oracle enrichment entirely (flat oracle cost across pool cycles;
+        identical baseline → batch-independent scoring).
+        """
+        now = utcnow()
         snapshot = session.execute(
             select(EpochTargetSnapshot).where(
                 EpochTargetSnapshot.run_id == run_id,
@@ -844,17 +927,57 @@ class EvaluationTaskManager:
         if snapshot is None:
             return []
 
-        miners = []
+        # Capacity-aware pool: only fan out to miners whose deployment is
+        # live right now. The scheduler keeps just K pods deployed and
+        # cycles the rest through; a member without a healthy pod is
+        # simply not in this batch yet (it'll be picked up once its pod
+        # is up). Combined with the already-scored exclusion below, the
+        # validator only ever judges the current K-pod batch.
+        from shared.common.models import ManagedDeployment
+
+        _SERVING_STATES = {"deployed_for_eval", "eligible", "active"}
+        member_dep_ids = [
+            str((m.get("metadata") or {}).get("deployment_id") or "").strip()
+            for m in (snapshot.members_json or [])
+        ]
+        member_dep_ids = [d for d in member_dep_ids if d]
+        healthy_dep_ids: set[str] = set()
+        if member_dep_ids:
+            for dep_id, dep_status, dep_health in session.execute(
+                select(
+                    ManagedDeployment.id,
+                    ManagedDeployment.status,
+                    ManagedDeployment.health_status,
+                ).where(ManagedDeployment.id.in_(member_dep_ids))
+            ):
+                if dep_status in _SERVING_STATES and dep_health == "healthy":
+                    healthy_dep_ids.add(dep_id)
+
+        all_miners: list[dict[str, Any]] = []
         for member in (snapshot.members_json or []):
             hk = member.get("hotkey", "")
             if not hk:
                 continue
             metadata = member.get("metadata", {}) or {}
-            miners.append({
+            dep_id = str(metadata.get("deployment_id") or "").strip()
+            if dep_id not in healthy_dep_ids:
+                continue
+            all_miners.append({
                 "hotkey": hk,
                 "endpoint": metadata.get("validator_endpoint") or member.get("endpoint", ""),
                 "auth_headers": metadata.get("auth_headers", {}),
             })
+
+        claimed_task_ids = [t.task_id for t in claimed_tasks]
+        scored_by_task: dict[str, set[str]] = {tid: set() for tid in claimed_task_ids}
+        if claimed_task_ids:
+            for tid, hk in session.execute(
+                select(TaskMinerResult.task_id, TaskMinerResult.miner_hotkey)
+                .where(TaskMinerResult.run_id == run_id)
+                .where(TaskMinerResult.family_id == family_id)
+                .where(TaskMinerResult.task_id.in_(claimed_task_ids))
+            ):
+                scored_by_task.setdefault(tid, set()).add(hk)
 
         bundle = self._owner.run_evaluation_bundle(
             session, run_id=run_id, family_id=family_id,
@@ -870,23 +993,28 @@ class EvaluationTaskManager:
         for task in claimed_tasks:
             task_payload = tasks_by_id.get(task.task_id, {})
             if isinstance(task_payload, dict):
-                # Validators run inside the operator's stack and need
-                # ``expected_output.answer`` to compute multi-metric
-                # per-task scores. Sensitive metadata keys (seed_id,
-                # hidden_fixture, etc.) are still scrubbed.
                 task_payload = _strip_sensitive_task_metadata(
                     task_payload, strip_expected_output=False,
                 )
-            items.append({
+            already_scored = scored_by_task.get(task.task_id, set())
+            miners_for_task = [m for m in all_miners if m["hotkey"] not in already_scored]
+            item = {
                 "task_evaluation_id": task.id,
                 "run_id": task.run_id,
                 "family_id": task.family_id,
                 "task_id": task.task_id,
                 "task_index": task.task_index,
                 "task_payload": task_payload,
-                "miners": miners,
+                "miners": miners_for_task,
                 "claim_expires_at": task.claim_expires_at.isoformat() if task.claim_expires_at else "",
                 "rubric_version": snapshot.rubric_version,
                 "benchmark_version": snapshot.benchmark_version,
-            })
+            }
+            if (
+                task.baseline_response_json is not None
+                and task.baseline_cached_at is not None
+                and (now - task.baseline_cached_at) < _ORACLE_BASELINE_TTL
+            ):
+                item["cached_baseline"] = task.baseline_response_json
+            items.append(item)
         return items

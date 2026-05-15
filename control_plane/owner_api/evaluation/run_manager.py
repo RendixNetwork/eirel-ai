@@ -16,7 +16,7 @@ from typing import Any, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,7 @@ from shared.common.models import (
     ManagedDeployment,
     ManagedMinerSubmission,
     TaskEvaluation,
+    TaskMinerResult,
     RunFamilyResult,
 )
 from shared.contracts.models import BenchmarkRunRecord
@@ -885,6 +886,113 @@ class RunManager:
                 if deployment_id:
                     deployment_ids.add(deployment_id)
         return deployment_ids
+
+    def pool_keep_deployment_ids(
+        self,
+        session: Session,
+        *,
+        family_id: str,
+        capacity_k: int,
+    ) -> dict[str, Any]:
+        """Capacity-aware continuous-pool selection for the open run.
+
+        Replaces "pin every snapshot member" (which silently strands
+        every submission past node capacity in ``pending_capacity``).
+        Of the open snapshot's members:
+
+        * ``done``  — has a TaskMinerResult row for *every* task in the
+          run → fully evaluated; its pod can be retired and the slot
+          recycled.
+        * ``eligible`` — not yet done; ordered by submission recency
+          (most recent first, per product decision). The first
+          ``capacity_k`` of these are ``keep`` (stay deployed); the
+          rest wait for a freed slot.
+
+        Returns ``{keep, done, eligible_total, snapshot_total}`` as
+        sets/ints. ``eligible_total`` drives run-completion gating —
+        the run isn't ``scored`` until it reaches 0.
+        """
+        snapshot = session.execute(
+            select(EpochTargetSnapshot)
+            .where(EpochTargetSnapshot.status == "open")
+            .where(EpochTargetSnapshot.family_id == ensure_family_id(family_id))
+            .limit(1)
+        ).scalar_one_or_none()
+        if snapshot is None:
+            return {
+                "keep": set(),
+                "done": set(),
+                "eligible_total": 0,
+                "snapshot_total": 0,
+            }
+
+        run_id = snapshot.run_id
+        total_tasks = int(
+            session.execute(
+                select(func.count())
+                .select_from(TaskEvaluation)
+                .where(TaskEvaluation.run_id == run_id)
+                .where(TaskEvaluation.family_id == ensure_family_id(family_id))
+            ).scalar()
+            or 0
+        )
+
+        # Per-miner distinct evaluated task count for this run.
+        done_counts: dict[str, int] = {}
+        if total_tasks > 0:
+            for hk, n in session.execute(
+                select(
+                    TaskMinerResult.miner_hotkey,
+                    func.count(func.distinct(TaskMinerResult.task_id)),
+                )
+                .where(TaskMinerResult.run_id == run_id)
+                .where(TaskMinerResult.family_id == ensure_family_id(family_id))
+                .group_by(TaskMinerResult.miner_hotkey)
+            ):
+                done_counts[hk] = int(n or 0)
+
+        members = list(snapshot.members_json or [])
+        sub_ids = [
+            str((m.get("metadata") or {}).get("submission_id") or "").strip()
+            for m in members
+        ]
+        sub_ids = [s for s in sub_ids if s]
+        sub_created: dict[str, Any] = {}
+        if sub_ids:
+            for sid, created in session.execute(
+                select(ManagedMinerSubmission.id, ManagedMinerSubmission.created_at)
+                .where(ManagedMinerSubmission.id.in_(sub_ids))
+            ):
+                sub_created[sid] = created
+
+        done: set[str] = set()
+        eligible: list[tuple[Any, str]] = []  # (created_at, deployment_id)
+        for member in members:
+            meta = member.get("metadata") or {}
+            dep_id = str(meta.get("deployment_id") or "").strip()
+            sub_id = str(meta.get("submission_id") or "").strip()
+            hk = str(member.get("hotkey") or "").strip()
+            if not dep_id:
+                continue
+            if total_tasks > 0 and done_counts.get(hk, 0) >= total_tasks:
+                done.add(dep_id)
+                continue
+            eligible.append((sub_created.get(sub_id), dep_id))
+
+        # Most-recent submission first. None-created sorts last (oldest).
+        from datetime import datetime as _dt
+
+        eligible.sort(
+            key=lambda t: t[0] or _dt.min,
+            reverse=True,
+        )
+        keep = {dep for _, dep in eligible[: max(0, capacity_k)]}
+        return {
+            "keep": keep,
+            "done": done,
+            "eligible_total": len(eligible),
+            "snapshot_total": len(members),
+        }
 
     def resolve_run_member(
         self,

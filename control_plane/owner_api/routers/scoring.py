@@ -135,7 +135,6 @@ async def aggregate_family_scores(
 async def get_weights(
     request: Request,
     run_id: str | None = None,
-    validator_hotkey: str = Depends(validator_dependency),
 ) -> WeightsResponse:
     """Return the current weight table for validators to set on-chain.
 
@@ -147,7 +146,6 @@ async def get_weights(
     Validators poll this every ~180 blocks, resolve hotkey→UID via
     their own metagraph sync, and call ``subtensor.set_weights()``.
     """
-    del validator_hotkey
     services: ManagedOwnerServices = request.app.state.services
     with services.db.sessionmaker() as session:
         from shared.common.models import EvaluationRun, RunFamilyResult

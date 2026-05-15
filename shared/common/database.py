@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import Any
 
@@ -10,14 +11,24 @@ from shared.common.migrations import run_migrations
 from shared.common.models import Base
 
 
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
 class Database:
     def __init__(self, url: str):
         normalized_url = url.replace("sqlite+aiosqlite://", "sqlite://")
         engine_kwargs: dict[str, Any] = {"future": True}
         if not normalized_url.startswith("sqlite"):
             engine_kwargs.update({
-                "pool_size": 5,
-                "max_overflow": 10,
+                "pool_size": _int_env("EIREL_DB_POOL_SIZE", 20),
+                "max_overflow": _int_env("EIREL_DB_MAX_OVERFLOW", 30),
                 "pool_pre_ping": True,
                 "pool_recycle": 1800,
                 "connect_args": {"connect_timeout": 10},

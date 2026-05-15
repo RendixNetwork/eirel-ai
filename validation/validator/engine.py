@@ -4,7 +4,7 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as _dc_fields
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -80,6 +80,28 @@ class _SyntheticBaselineResponse:
             "latency_seconds": self.latency_seconds,
             "source_vendor": self.source_vendor,
         }
+
+
+def _reconciled_to_payload(reconciled: "ReconciledOracle") -> dict[str, Any]:
+    """Serialize a ReconciledOracle for the oracle-baseline TTL cache.
+
+    Embedded under ``_reconciled`` in the submitted ``baseline_response``
+    so a later pool cycle reconstructs the *exact* reconciled oracle —
+    identical expected_claims/must_not_claim/vendor data — making the
+    cached judging input byte-identical to the first compute (the
+    invariant that keeps scoring batch-independent).
+    """
+    return {f.name: getattr(reconciled, f.name) for f in _dc_fields(reconciled)}
+
+
+def _reconciled_from_payload(payload: dict[str, Any]) -> "ReconciledOracle":
+    """Rebuild a ReconciledOracle from a cached ``_reconciled`` blob.
+
+    Unknown keys are dropped so a future field addition doesn't break
+    replay of baselines cached by an older validator.
+    """
+    known = {f.name for f in _dc_fields(ReconciledOracle)}
+    return ReconciledOracle(**{k: v for k, v in payload.items() if k in known})
 
 
 def _select_pairwise_reference(
@@ -1157,6 +1179,16 @@ async def run_distributed_benchmarks(
         # carry this field; default to None (= deterministic).
         task_obj.oracle_source = task_payload.get("oracle_source")
 
+        # Oracle baseline 12h TTL cache. owner-api attaches
+        # ``cached_baseline`` when this task's baseline is still within
+        # the window; we then skip oracle enrichment entirely (no
+        # OpenAI/Gemini/Grok/reconciler calls) and replay the exact
+        # reconciled oracle from the first compute — keeping every pool
+        # cycle's judging input identical (batch-independent scoring)
+        # at flat oracle cost.
+        cached_baseline = task_claim.get("cached_baseline")
+        using_cached_baseline = bool(cached_baseline)
+
         # Oracle enrichment runs in parallel with miner dispatch.
         #   three_oracle items  → 3 frontier-LLM calls + 1 reconciler.
         #   deterministic items → 1 frontier-LLM call (the configured
@@ -1169,15 +1201,17 @@ async def run_distributed_benchmarks(
         # $10/1k web-search adder on self-contained tasks.
         # Result is consumed by every ``_judge_miner`` call for this
         # task. Cache lifetime = this task evaluation.
-        reconciled_task = asyncio.create_task(
-            _enrich_task_oracle(
-                task_obj,
-                fanout=oracle_fanout,
-                reconciler=reconciler,
-                pairwise_vendor=pairwise_vendor,
-                web_search=web_search_flag,
+        reconciled_task = None
+        if not using_cached_baseline:
+            reconciled_task = asyncio.create_task(
+                _enrich_task_oracle(
+                    task_obj,
+                    fanout=oracle_fanout,
+                    reconciler=reconciler,
+                    pairwise_vendor=pairwise_vendor,
+                    web_search=web_search_flag,
+                )
             )
-        )
 
         miner_tasks = [
             asyncio.create_task(_invoke_one_miner(m, task_obj, task_id)) for m in miners
@@ -1196,56 +1230,79 @@ async def run_distributed_benchmarks(
                     t.cancel()
             return "submit_failed"
 
-        # Pairwise comparator: pick the chosen oracle's answer as the
-        # reference instead of paying for a separate OpenAI baseline
-        # call. Fallback chain handles vendors that errored or
-        # ``deterministic`` items where no oracle ran.
-        try:
-            reconciled_for_baseline = await reconciled_task
-        except Exception as enrich_exc:
-            logger.warning(
-                "oracle enrichment crashed for task=%s: %s; "
-                "falling back to disputed (no comparator text available)",
-                task_id, enrich_exc,
+        if using_cached_baseline:
+            # Replay the first compute's reconciled oracle + reference
+            # text verbatim. No oracle spend; judging input identical to
+            # the original cycle (batch-independent scoring invariant).
+            reconciled_for_baseline = _reconciled_from_payload(
+                (cached_baseline.get("_reconciled") or {})
+                if isinstance(cached_baseline, dict) else {}
             )
-            reconciled_for_baseline = ReconciledOracle(
-                expected_claims=[],
-                must_not_claim=list(
-                    (task_obj.expected_output or {}).get("must_not_claim") or []
-                ),
-                oracle_status="disputed",
-                disagreement_note=f"enrichment_crashed: {enrich_exc!r}",
+            baseline_source = str(
+                (cached_baseline or {}).get("source_vendor") or "cached"
             )
-        baseline_text, baseline_source = _select_pairwise_reference(
-            reconciled=reconciled_for_baseline,
-            preferred_vendor=pairwise_vendor,
-        )
-        # Carry the source vendor's web-search citations through onto the
-        # baseline so the dashboard can render the reference answer's URLs
-        # alongside the miner's. Non-vendor sources (deterministic,
-        # consensus_claim, none) have no per-vendor citations to copy.
-        vendor_key = baseline_source.removesuffix("_fallback")
-        baseline_citations = [
-            {"url": str(u), "title": ""}
-            for u in (reconciled_for_baseline.vendor_citations or {}).get(vendor_key, [])
-            if u
-        ]
-        # Synthetic ``baseline`` shim that still satisfies the rest of
-        # the engine's expected fields (cost, latency, citations).
-        # ``cost_usd=0.0`` because reusing the cached oracle answer
-        # adds no incremental spend.
-        baseline = _SyntheticBaselineResponse(
-            response_text=baseline_text,
-            citations=baseline_citations,
-            cost_usd=0.0,
-            latency_seconds=0.0,
-            source_vendor=baseline_source,
-        )
-        logger.info(
-            "task_eval=%s baseline=ok source=%s",
-            task_evaluation_id[:8],
-            baseline_source,
-        )
+            baseline = _SyntheticBaselineResponse(
+                response_text=str((cached_baseline or {}).get("response_text") or ""),
+                citations=list((cached_baseline or {}).get("citations") or []),
+                cost_usd=0.0,
+                latency_seconds=0.0,
+                source_vendor=baseline_source,
+            )
+            logger.info(
+                "task_eval=%s baseline=ok source=cached(%s)",
+                task_evaluation_id[:8], baseline_source,
+            )
+        else:
+            # Pairwise comparator: pick the chosen oracle's answer as the
+            # reference instead of paying for a separate OpenAI baseline
+            # call. Fallback chain handles vendors that errored or
+            # ``deterministic`` items where no oracle ran.
+            try:
+                reconciled_for_baseline = await reconciled_task
+            except Exception as enrich_exc:
+                logger.warning(
+                    "oracle enrichment crashed for task=%s: %s; "
+                    "falling back to disputed (no comparator text available)",
+                    task_id, enrich_exc,
+                )
+                reconciled_for_baseline = ReconciledOracle(
+                    expected_claims=[],
+                    must_not_claim=list(
+                        (task_obj.expected_output or {}).get("must_not_claim") or []
+                    ),
+                    oracle_status="disputed",
+                    disagreement_note=f"enrichment_crashed: {enrich_exc!r}",
+                )
+            baseline_text, baseline_source = _select_pairwise_reference(
+                reconciled=reconciled_for_baseline,
+                preferred_vendor=pairwise_vendor,
+            )
+            # Carry the source vendor's web-search citations through onto
+            # the baseline so the dashboard can render the reference
+            # answer's URLs alongside the miner's. Non-vendor sources
+            # (deterministic, consensus_claim, none) have none to copy.
+            vendor_key = baseline_source.removesuffix("_fallback")
+            baseline_citations = [
+                {"url": str(u), "title": ""}
+                for u in (reconciled_for_baseline.vendor_citations or {}).get(vendor_key, [])
+                if u
+            ]
+            # Synthetic ``baseline`` shim that still satisfies the rest
+            # of the engine's expected fields (cost, latency, citations).
+            # ``cost_usd=0.0`` because reusing the cached oracle answer
+            # adds no incremental spend.
+            baseline = _SyntheticBaselineResponse(
+                response_text=baseline_text,
+                citations=baseline_citations,
+                cost_usd=0.0,
+                latency_seconds=0.0,
+                source_vendor=baseline_source,
+            )
+            logger.info(
+                "task_eval=%s baseline=ok source=%s",
+                task_evaluation_id[:8],
+                baseline_source,
+            )
 
         # Per-miner fan-out outcome. miner_runs is a list of either
         # ``(hotkey, BenchmarkTaskRun)`` tuples or raised exceptions
@@ -1884,10 +1941,17 @@ async def run_distributed_benchmarks(
             oracle_layer_cost + judge_cost,
         )
 
-        # Submit the batch
+        # Submit the batch. Embed the reconciled oracle under
+        # ``_reconciled`` so owner-api's TTL cache can replay the exact
+        # judging input on later pool cycles (additive key — older
+        # readers ignore it; schema stays stable).
+        baseline_payload = baseline.model_dump(mode="json")
+        baseline_payload["_reconciled"] = _reconciled_to_payload(
+            reconciled_for_baseline
+        )
         result_path = f"/v1/families/{family_id}/task-evaluations/{task_evaluation_id}/result"
         result_body = {
-            "baseline_response": baseline.model_dump(mode="json"),
+            "baseline_response": baseline_payload,
             "miner_results": judge_results,
             "validator_hotkey": signer.hotkey,
             "judge_model": judge_model,

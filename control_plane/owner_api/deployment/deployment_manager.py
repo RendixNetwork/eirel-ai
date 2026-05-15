@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shared.common.models import (
@@ -286,6 +286,106 @@ class DeploymentManager:
             - int(stats.get("reserved_pods", 0)),
         )
         return remaining_cpu, remaining_memory, remaining_pods
+
+    def _derive_pool_capacity(self, session: Session) -> int:
+        """K = how many eval pods fit on healthy nodes right now.
+
+        Sum over verified+schedulable nodes of
+        ``floor((allocatable_cpu - cpu_headroom) / per_submission_cpu)``,
+        minus slots already held by ``active`` serving (product) pods —
+        those aren't part of the eval pool. Recomputed every reconcile
+        from live node snapshots so adding nodes grows K automatically.
+        """
+        per_sub_cpu = max(
+            1, int(self._owner.settings.owner_runtime_submission_cpu_millis)
+        )
+        headroom = self._owner.runtime_cpu_headroom_millis
+        nodes = list(
+            session.execute(
+                select(RuntimeNodeSnapshot)
+                .where(RuntimeNodeSnapshot.verified.is_(True))
+                .where(RuntimeNodeSnapshot.schedulable.is_(True))
+            ).scalars()
+        )
+        total_slots = 0
+        for node in nodes:
+            usable = max(0, int(node.allocatable_cpu_millis or 0) - headroom)
+            total_slots += usable // per_sub_cpu
+        active_serving = int(
+            session.execute(
+                select(func.count())
+                .select_from(ManagedDeployment)
+                .where(ManagedDeployment.status == "active")
+            ).scalar()
+            or 0
+        )
+        return max(0, total_slots - active_serving)
+
+    def _pool_keep_and_done(
+        self, session: Session, *, family_id: str
+    ) -> tuple[set[str], set[str], dict[str, Any]]:
+        """(keep_ids, done_ids, stats) for capacity-aware pool eval.
+
+        ``keep`` = active serving pods ∪ the top-K eligible-not-done
+        members by submission recency. ``done`` = fully-evaluated
+        members (their slot can be recycled). Non-kept healthy
+        deployments are drained → standby by the caller's existing
+        drain pass, which is exactly the slot-recycle mechanism.
+        """
+        k = self._derive_pool_capacity(session)
+        pool = self._owner.pool_keep_deployment_ids(
+            session, family_id=family_id, capacity_k=k
+        )
+        active_ids = {
+            d_id
+            for (d_id,) in session.execute(
+                select(ManagedDeployment.id)
+                .where(ManagedDeployment.family_id == family_id)
+                .where(ManagedDeployment.status == "active")
+            )
+        }
+        if pool["snapshot_total"] == 0:
+            # Pre-freeze bootstrap: no open snapshot yet (it's created
+            # lazily on the first validator claim from whatever
+            # deployments exist). Keep up to K bootstrapping/eval pods so
+            # the first freeze has live candidates and the first claim
+            # works — otherwise the scheduler would drain every fresh
+            # submission before the snapshot ever names it.
+            boot = list(
+                session.execute(
+                    select(ManagedDeployment.id)
+                    .where(ManagedDeployment.family_id == family_id)
+                    .where(
+                        ManagedDeployment.status.in_(
+                            (
+                                "queued", "received", "pending_capacity",
+                                "building", "deploying", "deployed_for_eval",
+                                "eligible",
+                            )
+                        )
+                    )
+                    .order_by(ManagedDeployment.created_at.desc())
+                    .limit(max(0, k))
+                )
+            )
+            keep = {d_id for (d_id,) in boot} | active_ids
+            stats = {
+                "k": k,
+                "eligible_total": 0,
+                "snapshot_total": 0,
+                "done": 0,
+                "bootstrap": True,
+            }
+            return keep, set(), stats
+        keep = set(pool["keep"]) | active_ids
+        stats = {
+            "k": k,
+            "eligible_total": pool["eligible_total"],
+            "snapshot_total": pool["snapshot_total"],
+            "done": len(pool["done"]),
+            "bootstrap": False,
+        }
+        return keep, set(pool["done"]), stats
 
     def _select_runtime_node(
         self,
@@ -826,24 +926,24 @@ class DeploymentManager:
                     .where(ManagedDeployment.status != "retired")
                 ).scalars()
             )
-            pinned_ids = self._owner.open_run_pinned_deployment_ids(session, family_id=family_id)
-            bootstrapping_ids = {
-                item.id
-                for item in deployments
-                if item.status in {"building", "received", "deploying", "pending_capacity"}
-                or item.health_status == "starting"
-            }
-            to_keep = (
-                {item.id for item in deployments if item.is_active}
-                | pinned_ids
-                | bootstrapping_ids
-                | {
-                    item.id
-                    for item in deployments
-                    if item.status in {"deployed_for_eval", "eligible"}
-                }
+            # Capacity-aware continuous pool: deploy only the top-K
+            # eligible-not-done members (by submission recency) plus
+            # active serving pods. Members beyond K wait for a freed
+            # slot; fully-evaluated ("done") members are not started so
+            # the drain pass recycles their slot. This replaces the old
+            # "pin every snapshot member" behavior that stranded every
+            # submission past node capacity in pending_capacity forever.
+            keep_ids, done_ids, pool_stats = self._pool_keep_and_done(
+                session, family_id=family_id
             )
-            to_start = [item.id for item in deployments if item.id in to_keep]
+            logger.info(
+                "pool reconcile family=%s k=%d snapshot=%d eligible=%d "
+                "done=%d keep=%d",
+                family_id, pool_stats["k"], pool_stats["snapshot_total"],
+                pool_stats["eligible_total"], pool_stats["done"],
+                len(keep_ids),
+            )
+            to_start = [item.id for item in deployments if item.id in keep_ids]
         for deployment_id in to_start:
             try:
                 await self.ensure_deployment_runtime(deployment_id=deployment_id)
@@ -859,23 +959,14 @@ class DeploymentManager:
                     .where(ManagedDeployment.status != "retired")
                 ).scalars()
             )
-            pinned_ids = self._owner.open_run_pinned_deployment_ids(session, family_id=family_id)
-            bootstrapping_ids = {
-                item.id
-                for item in deployments
-                if item.status in {"building", "received", "deploying", "pending_capacity"}
-                or item.health_status == "starting"
-            }
-            desired_keep = (
-                {item.id for item in deployments if item.is_active}
-                | pinned_ids
-                | bootstrapping_ids
-                | {
-                    item.id
-                    for item in deployments
-                    if item.status == "deployed_for_eval"
-                }
+            # Same capacity-bounded keep set as the deploy pass. Anything
+            # not kept (over-capacity members AND fully-evaluated "done"
+            # members) drains → standby_cold below, freeing its slot for
+            # the next eligible miner on the following reconcile tick.
+            keep_ids, _done_ids, _pool_stats = self._pool_keep_and_done(
+                session, family_id=family_id
             )
+            desired_keep = set(keep_ids)
             now = utcnow()
             for deployment in deployments:
                 if deployment.id not in desired_keep:

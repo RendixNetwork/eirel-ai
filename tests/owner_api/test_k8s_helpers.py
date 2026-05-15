@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+import io
+import tarfile
 from types import SimpleNamespace
 
+import pytest
+
 from infra.miner_runtime._k8s_helpers import (
+    _CODE_ARCHIVE_KEY,
+    _build_code_configmap,
     _build_network_policy,
+    _check_archive_configmap_size,
+    _extract_archive_to_dict,
+    _repack_clean_archive,
     parse_cpu_to_millis,
     parse_memory_to_bytes,
 )
-from infra.miner_runtime.runtime_manager import _deployment_manifest_common
+from infra.miner_runtime.runtime_manager import (
+    RuntimeManagerError,
+    _deployment_manifest_common,
+)
+
+
+def _make_targz(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path, data in files.items():
+            info = tarfile.TarInfo(name=path)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 def _stub_manifest(port: int = 8080, health_path: str = "/healthz"):
@@ -191,15 +213,28 @@ def test_manifest_emits_configmap_volume_when_code_configmap_name_set():
     )
     deployment, container = _get_deployment_and_container(manifests)
     pod_spec = deployment["spec"]["template"]["spec"]
+
+    # Runtime container imports from the extracted emptyDir, never the
+    # raw ConfigMap.
     assert any(
-        vm["mountPath"] == "/submission" and vm["name"] == "submission-code"
+        vm["mountPath"] == "/submission"
+        and vm["name"] == "submission-code-extracted"
         for vm in container["volumeMounts"]
     )
-    assert any(
-        v["name"] == "submission-code"
-        and v["configMap"]["name"] == "miner-test-123-code"
-        for v in pod_spec["volumes"]
-    )
+
+    # ConfigMap (single archive key) is mounted only into the init
+    # container, which unpacks it into the shared emptyDir.
+    init = pod_spec["initContainers"][0]
+    assert init["image"] == container["image"]
+    assert init["command"][:2] == ["python", "-c"]
+    assert "filter='data'" in init["command"][2]
+    init_mounts = {vm["name"]: vm["mountPath"] for vm in init["volumeMounts"]}
+    assert init_mounts["submission-code"] == "/submission-archive"
+    assert init_mounts["submission-code-extracted"] == "/submission"
+
+    vols = {v["name"]: v for v in pod_spec["volumes"]}
+    assert vols["submission-code"]["configMap"]["name"] == "miner-test-123-code"
+    assert "emptyDir" in vols["submission-code-extracted"]
 
 
 def test_manifest_emits_network_policy_when_emit_network_policy_true():
@@ -273,3 +308,66 @@ def test_build_network_policy_blocks_direct_https_egress():
                 "egress rule allows unscoped outbound HTTPS — miners would "
                 "bypass provider-proxy and reach api.openai.com directly"
             )
+
+
+# -- single-archive ConfigMap ------
+
+
+def test_configmap_has_single_archive_key_for_nested_submission():
+    """A submission with subdirectories must NOT produce per-path
+    ConfigMap keys (those fail k8s validation with 422). One opaque
+    archive key only."""
+    archive = _make_targz({
+        "app.py": b"x = 1\n",
+        "bench/tasks.py": b"# nested\n",
+        "tests/test_middleware.py": b"# deep/nested\n",
+        "pkg/sub/mod.py": b"# very/deep\n",
+    })
+    files = _extract_archive_to_dict(archive)
+    clean = _repack_clean_archive(files)
+    cm = _build_code_configmap(
+        name="miner-x-code", submission_id="x", archive_bytes=clean,
+    )
+    assert list(cm["binaryData"].keys()) == [_CODE_ARCHIVE_KEY]
+    # No '/' in any key — the whole class of 422 failures is gone.
+    assert all("/" not in k for k in cm["binaryData"])
+
+
+def test_repacked_archive_round_trips_and_drops_junk():
+    archive = _make_targz({
+        "app.py": b"MAIN\n",
+        "pkg/util.py": b"UTIL\n",
+        "__pycache__/app.cpython-312.pyc": b"\x00junk",
+        ".git/config": b"[core]\n",
+    })
+    files = _extract_archive_to_dict(archive)
+    clean = _repack_clean_archive(files)
+    extracted: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(clean), mode="r:gz") as tar:
+        for m in tar.getmembers():
+            f = tar.extractfile(m)
+            if f is not None:
+                extracted[m.name] = f.read()
+    assert extracted == {"app.py": b"MAIN\n", "pkg/util.py": b"UTIL\n"}
+
+
+def test_repacked_archive_is_deterministic():
+    archive = _make_targz({"b.py": b"B", "a/c.py": b"C", "a.py": b"A"})
+    files = _extract_archive_to_dict(archive)
+    assert _repack_clean_archive(files) == _repack_clean_archive(files)
+
+
+def test_archive_size_check_rejects_oversized():
+    big = b"\x00" * (2 * 1024 * 1024)
+    with pytest.raises(RuntimeManagerError, match="too large for ConfigMap"):
+        _check_archive_configmap_size(big)
+
+
+def test_archive_size_check_allows_small():
+    _check_archive_configmap_size(b"small archive")  # no raise
+
+
+def test_extract_archive_rejects_path_escape():
+    escape = _make_targz({"../evil.py": b"PWN"})
+    with pytest.raises(ValueError, match="escape root"):
+        _extract_archive_to_dict(escape)

@@ -16,6 +16,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+from fastapi import HTTPException
+
 from shared.common.database import Database
 from shared.common.models import EvalFeedback
 from control_plane.owner_api.evaluation.evaluation_task_manager import (
@@ -232,3 +235,27 @@ async def test_read_orders_by_created_at(tmp_path):
         req, run_id="run-1", hotkey="hk_alpha",
     )
     assert [item.task_id for item in response.items] == ["t-3", "t-1", "t-2"]
+
+
+async def test_read_returns_503_when_disabled(tmp_path, monkeypatch):
+    """Flipping ``EIREL_EVAL_FEEDBACK_ENABLED=0`` shuts off the miner-facing
+    GET; existing rows survive but are not served."""
+    db = _make_db(tmp_path)
+    _seed(db, miner_hotkey="hk_alpha", task_id="t-1")
+
+    monkeypatch.setenv("EIREL_EVAL_FEEDBACK_ENABLED", "0")
+    req = _make_request(db=db)
+    with pytest.raises(HTTPException) as exc_info:
+        await read_eval_feedback(req, run_id="run-1", hotkey="hk_alpha")
+    assert exc_info.value.status_code == 503
+
+
+def test_upsert_is_noop_when_disabled(tmp_path, monkeypatch):
+    """Flipping the flag off short-circuits the upsert so the validator
+    can keep submitting task results without accruing EvalFeedback rows."""
+    monkeypatch.setenv("EIREL_EVAL_FEEDBACK_ENABLED", "0")
+    db = _make_db(tmp_path)
+    _seed(db)
+
+    with db.sessionmaker() as session:
+        assert session.query(EvalFeedback).count() == 0
