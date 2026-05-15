@@ -907,6 +907,8 @@ def _task_evaluation_from_row(
     *,
     bundle_task: dict[str, Any],
     baseline_response_json: dict[str, Any] | None = None,
+    validator_hotkey: str | None = None,
+    redact_sensitive: bool = False,
 ) -> TaskEvaluation:
     jo = row.judge_output_json or {}
 
@@ -1058,13 +1060,14 @@ def _task_evaluation_from_row(
         category=category,
         difficulty=difficulty,
         web_search=web_search,
+        validator_hotkey=validator_hotkey,
         task_status=status,
         evaluated_at=row.created_at.isoformat() if row.created_at else None,
         prompt=prompt_val if isinstance(prompt_val, str) else None,
         turn_count=turn_count,
         user_turns=user_turns,
-        miner_response=row.miner_response_json,
-        baseline_response_text=baseline_text,
+        miner_response=None if redact_sensitive else row.miner_response_json,
+        baseline_response_text=None if redact_sensitive else baseline_text,
         agreement_verdict=row.agreement_verdict,
         agreement_score=(
             float(row.agreement_score) if row.agreement_score is not None else None
@@ -1076,7 +1079,7 @@ def _task_evaluation_from_row(
             if row.miner_latency_seconds
             else None
         ),
-        judge_rationale=jo.get("rationale"),
+        judge_rationale=None if redact_sensitive else jo.get("rationale"),
         # Multi-metric breakdown — None for legacy rows.
         task_type=getattr(row, "task_type", None),
         pairwise_preference_score=_opt_score(getattr(row, "pairwise_preference_score", None)),
@@ -1098,8 +1101,14 @@ def _task_evaluation_from_row(
         composite_knockout_reason=composite_knockout_reason if isinstance(composite_knockout_reason, str) else None,
         weighted_sum_score=weighted_sum_score_val,
         eval_outcome=eval_outcome if eval_outcome in ("correct", "partial", "wrong", "hallucinated", "refused", "disputed") else None,
-        eval_failure_mode=eval_failure_mode if isinstance(eval_failure_mode, str) else None,
-        eval_guidance=eval_guidance if isinstance(eval_guidance, str) else None,
+        eval_failure_mode=(
+            None if redact_sensitive
+            else (eval_failure_mode if isinstance(eval_failure_mode, str) else None)
+        ),
+        eval_guidance=(
+            None if redact_sensitive
+            else (eval_guidance if isinstance(eval_guidance, str) else None)
+        ),
         ledger_tools=ledger_tools,
         capability=capability if isinstance(capability, str) else None,
         domain=domain if isinstance(domain, str) else None,
@@ -1161,25 +1170,34 @@ def fetch_run_detail(
             if tid:
                 tasks_by_id[tid] = _strip_sensitive_task_metadata(task_def)
 
-    # Fetch baseline responses alongside the task evals so we can surface
-    # OpenAI's citations next to the miner's on each task row.
+    # Fetch baseline responses + claimed_by_validator alongside the task
+    # evals so we can surface OpenAI's citations and which validator
+    # graded the row.
     from shared.common.models import TaskEvaluation as TaskEvaluationRow
-    baseline_rows = session.execute(
-        select(TaskEvaluationRow.task_id, TaskEvaluationRow.baseline_response_json)
-        .where(
+    eval_rows = session.execute(
+        select(
+            TaskEvaluationRow.id,
+            TaskEvaluationRow.baseline_response_json,
+            TaskEvaluationRow.claimed_by_validator,
+        ).where(
             TaskEvaluationRow.run_id == run_id,
             TaskEvaluationRow.family_id == family_id,
         )
     ).all()
-    baseline_by_task: dict[str, dict[str, Any] | None] = {
-        task_id: baseline for (task_id, baseline) in baseline_rows
-    }
+    baseline_by_eval_id: dict[str, dict[str, Any] | None] = {}
+    validator_by_eval_id: dict[str, str | None] = {}
+    for eval_id, baseline, claimed_by in eval_rows:
+        baseline_by_eval_id[eval_id] = baseline
+        validator_by_eval_id[eval_id] = claimed_by
 
+    redact_sensitive = run.status != "completed"
     tasks = [
         _task_evaluation_from_row(
             row,
             bundle_task=tasks_by_id.get(row.task_id, {}),
-            baseline_response_json=baseline_by_task.get(row.task_id),
+            baseline_response_json=baseline_by_eval_id.get(row.task_evaluation_id),
+            validator_hotkey=validator_by_eval_id.get(row.task_evaluation_id),
+            redact_sensitive=redact_sensitive,
         )
         for row in task_rows
     ]
